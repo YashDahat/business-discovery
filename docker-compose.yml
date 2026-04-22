@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: phase1-db
+    environment:
+      POSTGRES_DB: business_discovery
+      POSTGRES_USER: amardahat
+      POSTGRES_PASSWORD: 94227
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  app:
+    build: .
+    container_name: phase1-app
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/business_discovery
+      SPRING_DATASOURCE_USERNAME: amardahat
+      SPRING_DATASOURCE_PASSWORD: 94227
+    depends_on:
+      - postgres
+
+volumes:
+  pgdata:
