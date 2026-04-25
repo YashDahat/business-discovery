@@ -34,4 +34,6 @@ public interface BusinessEntityRepository extends JpaRepository<BusinessEntity, 
 
     // Count BusinessEntityes per scraper job
     long countByScraperJobId(String scraperJobId);
+
+    List<BusinessEntity> findByRunIdAndBusinessTier(UUID runId, String businessTier);
 }

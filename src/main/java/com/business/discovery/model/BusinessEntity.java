@@ -133,4 +133,17 @@ public class BusinessEntity {
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;
+
+    // Add these fields to the existing Business entity
+    @Column(name = "website_scope_score")
+    private Integer websiteScopeScore;
+
+    @Column(name = "business_tier")
+    private String businessTier;
+
+    @Column(name = "revenue_estimate")
+    private String revenueEstimate;
+
+    @Column(name = "is_targeted")
+    private Boolean isTargeted;
 }
