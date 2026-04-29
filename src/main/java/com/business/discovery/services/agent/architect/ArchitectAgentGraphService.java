@@ -15,6 +15,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -29,22 +30,13 @@ public class ArchitectAgentGraphService {
 
     @Async
     public void executeAsync(UUID runId, String keyword,
-                             String category, String location) {
-        // Add runId to MDC so all log lines from this run are tagged
+                             String category, String location,
+                             Map<String, Object> scraperConfig) {
         MDC.put("runId", runId.toString());
-
         try {
-            log.info("Agent run starting — runId: {}", runId);
-
-            // Mark as IN_PROGRESS
-            //updateRunStatus(runId, AgentRunStatus.IN_PROGRESS, "INITIALIZING");
-
-            // Execute the LangGraph4j workflow
-            architectAgentGraph.execute(runId, keyword, category, location);
-
+            architectAgentGraph.execute(runId, keyword, category, location, scraperConfig);
         } catch (Exception e) {
             log.error("Agent run failed — runId: {}", runId, e);
-            //failRun(runId, e.getMessage());
         } finally {
             MDC.remove("runId");
         }

@@ -1,5 +1,6 @@
 package com.business.discovery.api;
 
+import com.business.discovery.dto.GoogleMapsScraperJobRequest;
 import com.business.discovery.model.BusinessEntity;
 import com.business.discovery.services.scraper.GoogleMapsScraperService;
 import lombok.RequiredArgsConstructor;
@@ -12,7 +13,7 @@ import java.util.UUID;
 
 @Slf4j
 @RestController
-    @RequestMapping("/api/v1/scraper")
+@RequestMapping("/api/v1/scraper")
 @RequiredArgsConstructor
 public class GoogleScraperController {
 
@@ -22,9 +23,9 @@ public class GoogleScraperController {
     @PostMapping("/scrape")
     public ResponseEntity<ScrapeResponse> scrape(@RequestBody ScrapeRequest request) {
         log.info("Scrape request received — keyword: {}", request.keyword());
-
+        GoogleMapsScraperJobRequest scrapperRequest = scraperService.toJobRequest(request);
         List<BusinessEntity> businesses = scraperService.scrapeAndPersist(
-                request.keyword(), null
+                scrapperRequest, null
         );
 
         return ResponseEntity.ok(new ScrapeResponse(
@@ -38,7 +39,8 @@ public class GoogleScraperController {
     @PostMapping("/jobs")
     public ResponseEntity<JobResponse> submitJob(@RequestBody ScrapeRequest request) {
         log.info("Job submission request — keyword: {}", request.keyword());
-        String jobId = scraperService.submitJob(request.keyword());
+        GoogleMapsScraperJobRequest scraperJobRequest = scraperService.toJobRequest(request);
+        String jobId = scraperService.submitJob(scraperJobRequest);
         return ResponseEntity.accepted().body(new JobResponse(jobId, "pending"));
     }
 
@@ -75,7 +77,33 @@ public class GoogleScraperController {
 
     // --- Request / Response records ---
 
-    public record ScrapeRequest(String keyword) {}
+    public record ScrapeRequest(
+
+            String keyword,
+
+            // ─── Optional scraper settings ───
+            String lang,
+            Integer depth,
+            Integer zoom,
+            String lat,
+            String lon,
+            Boolean fastMode,
+            Integer radius,
+            Boolean email,
+            Integer maxTime,
+            List<String> proxies
+    ) {
+        // Apply defaults for null values
+        public ScrapeRequest {
+            lang     = lang     != null ? lang     : "en";
+            depth    = depth    != null ? depth    : 5;
+            zoom     = zoom     != null ? zoom     : 15;
+            fastMode = fastMode != null ? fastMode : false;
+            radius   = radius   != null ? radius   : 10000;
+            email    = email    != null ? email    : false;
+            maxTime  = maxTime  != null ? maxTime  : 0;
+        }
+    }
 
     public record JobResponse(String jobId, String status) {}
 

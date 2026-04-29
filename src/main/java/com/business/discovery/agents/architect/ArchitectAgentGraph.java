@@ -19,6 +19,7 @@ import org.bsc.langgraph4j.StateGraph;
 import org.bsc.langgraph4j.checkpoint.BaseCheckpointSaver;
 import org.springframework.stereotype.Component;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
@@ -104,26 +105,20 @@ public class ArchitectAgentGraph {
 
     // Called by ArchitectAgentService.executeAsync()
     public void execute(UUID runId, String keyword,
-                        String category, String location) throws Exception {
+                        String category, String location,
+                        Map<String, Object> scraperConfig) throws Exception {
 
-        Map<String, Object> initialState = Map.of(
-                ArchitectAgentState.RUN_ID,   runId.toString(),
-                ArchitectAgentState.KEYWORD,  keyword,
-                ArchitectAgentState.CATEGORY, category,
-                ArchitectAgentState.LOCATION, location
-        );
+        Map<String, Object> initialState = new HashMap<>();
+        initialState.put(ArchitectAgentState.RUN_ID,       runId.toString());
+        initialState.put(ArchitectAgentState.KEYWORD,      keyword);
+        initialState.put(ArchitectAgentState.CATEGORY,     category);
+        initialState.put(ArchitectAgentState.LOCATION,     location);
+        initialState.put(ArchitectAgentState.SCRAPER_CONFIG, scraperConfig);
 
-        // threadId = runId — each agent run is an isolated graph thread
         var config = org.bsc.langgraph4j.RunnableConfig.builder()
                 .threadId(runId.toString())
                 .build();
 
-        log.info("Invoking ArchitectAgent graph — runId: {}, keyword: {}",
-                runId, keyword);
-
-        // invoke() runs the full graph synchronously in the async thread
         compiledGraph.invoke(initialState, config);
-
-        log.info("ArchitectAgent graph execution complete — runId: {}", runId);
     }
 }

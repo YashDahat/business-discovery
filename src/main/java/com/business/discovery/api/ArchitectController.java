@@ -16,7 +16,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 
 @Slf4j
@@ -36,9 +38,21 @@ public class ArchitectController {
 
         log.info("Architect run requested — keyword: {}", request.keyword());
 
-        AgentRun run = architectAgentRunService.startRun(request.keyword());
+        AgentRun run = architectAgentRunService.startRun(request);
 
-        architectAgentGraphService.executeAsync(run.getId(), run.getKeyword(), run.getCategory(), run.getLocation());
+        Map<String, Object> scraperConfig = new HashMap<>();
+        scraperConfig.put("lang",      request.lang());
+        scraperConfig.put("depth",     request.depth());
+        scraperConfig.put("zoom",      request.zoom());
+        scraperConfig.put("lat",       request.lat());
+        scraperConfig.put("lon",       request.lon());
+        scraperConfig.put("fastMode",  request.fastMode());
+        scraperConfig.put("radius",    request.radius());
+        scraperConfig.put("email",     request.email());
+        scraperConfig.put("maxTime",   request.maxTime());
+        scraperConfig.put("proxies",   request.proxies());
+
+        architectAgentGraphService.executeAsync(run.getId(), run.getKeyword(), run.getCategory(), run.getLocation(), scraperConfig);
 
         return ResponseEntity.accepted().body(new ArchitectRunResponse(
                 run.getId(),

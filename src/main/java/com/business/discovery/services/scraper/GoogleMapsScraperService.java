@@ -1,5 +1,6 @@
 package com.business.discovery.services.scraper;
 
+import com.business.discovery.api.GoogleScraperController;
 import com.business.discovery.dto.GoogleMapsScraperJobRequest;
 import com.business.discovery.dto.GoogleMapsScraperJobResponse;
 import com.business.discovery.model.BusinessEntity;
@@ -29,15 +30,9 @@ public class GoogleMapsScraperService {
     private final BusinessEntityRepository businessRepository;
 
     // Step 1: Submit a scraping job to gosom
-    public String submitJob(String keyword) {
-        log.info("Submitting scrape job for keyword: {}", keyword);
-
-        GoogleMapsScraperJobRequest request = GoogleMapsScraperJobRequest.builder()
-                .name(keyword)                    // name is mandatory
-                .keywords(List.of(keyword))       // keywords is mandatory — wrap in list
-                .depth(5)
-                .maxTime(1000)
-                .build();
+    public String submitJob(GoogleMapsScraperJobRequest request) {
+        log.info("Submitting scrape job — keyword: {}, depth: {}, radius: {}",
+                request.getKeywords(), request.getDepth(), request.getRadius());
 
         GoogleMapsScraperJobResponse response = scraperRestClient.post()
                 .uri("/api/v1/jobs")
@@ -186,6 +181,23 @@ public class GoogleMapsScraperService {
                 .build();
     }
 
+    public GoogleMapsScraperJobRequest toJobRequest(GoogleScraperController.ScrapeRequest request) {
+        return GoogleMapsScraperJobRequest.builder()
+                .name(request.keyword())
+                .keywords(List.of(request.keyword()))
+                .lang(request.lang())
+                .depth(request.depth())
+                .zoom(request.zoom())
+                .lat(request.lat())
+                .lon(request.lon())
+                .fastMode(request.fastMode())
+                .radius(request.radius())
+                .email(request.email())
+                .maxTime(request.maxTime())
+                .proxies(request.proxies())
+                .build();
+    }
+
     // Safe helpers
     private String get(CSVRecord r, String col) {
         try { return r.get(col); } catch (Exception e) { return null; }
@@ -200,8 +212,9 @@ public class GoogleMapsScraperService {
     }
 
     // Full pipeline: submit → wait → download → persist
-    public List<BusinessEntity> scrapeAndPersist(String keyword, UUID runId) {
-        String jobId = submitJob(keyword);
+    public List<BusinessEntity> scrapeAndPersist(
+            GoogleMapsScraperJobRequest request, UUID runId) {
+        String jobId = submitJob(request);
         waitForCompletion(jobId);
         return downloadAndPersist(jobId, runId);
     }

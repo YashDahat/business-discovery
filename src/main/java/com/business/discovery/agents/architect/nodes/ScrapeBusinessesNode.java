@@ -1,6 +1,8 @@
 package com.business.discovery.agents.architect.nodes;
 
 import com.business.discovery.agents.architect.ArchitectAgentState;
+import com.business.discovery.dto.GoogleMapsScraperJobRequest;
+import com.business.discovery.model.AgentRun;
 import com.business.discovery.model.BusinessEntity;
 import com.business.discovery.services.agent.AgentEventService;
 import com.business.discovery.services.agent.architect.ArchitectAgentRunService;
@@ -28,25 +30,39 @@ public class ScrapeBusinessesNode implements NodeAction<ArchitectAgentState> {
         UUID runId = UUID.fromString(state.runId().orElseThrow());
         String keyword = state.keyword().orElseThrow();
 
+        // Read scraper config from state
+        Map<String, Object> config = state.scraperConfig().orElse(Map.of());
+
         long start = System.currentTimeMillis();
-        agentRunService.updateRunStatus(runId, com.business.discovery.model.AgentRun.AgentRunStatus.IN_PROGRESS, NODE_NAME);
+        agentRunService.updateRunStatus(runId, AgentRun.AgentRunStatus.IN_PROGRESS, NODE_NAME);
         eventService.stepStarted(runId, NODE_NAME);
 
         try {
-            log.info("[{}] Scraping businesses for keyword: {}", runId, keyword);
-            eventService.toolCall(runId, NODE_NAME, "GoogleMapsScraper",
-                        Map.of("keyword", keyword));
+            log.info("[{}] Scraping with config: {}", runId, config);
 
-            List<BusinessEntity> businesses = scraperService.scrapeAndPersist(keyword, runId);
+            // Build request from state config
+            GoogleMapsScraperJobRequest scraperRequest = GoogleMapsScraperJobRequest.builder()
+                    .name(keyword)
+                    .keywords(List.of(keyword))
+                    .lang((String)  config.getOrDefault("lang",     "en"))
+                    .depth((Integer) config.getOrDefault("depth",   5))
+                    .zoom((Integer)  config.getOrDefault("zoom",    15))
+                    .fastMode((Boolean) config.getOrDefault("fastMode", false))
+                    .radius((Integer) config.getOrDefault("radius", 10000))
+                    .email((Boolean) config.getOrDefault("email",   false))
+                    .maxTime((Integer) config.getOrDefault("maxTime", 0))
+                    .lat((String)   config.get("lat"))
+                    .lon((String)   config.get("lon"))
+                    .proxies((List<String>) config.get("proxies"))
+                    .build();
+
+            List<BusinessEntity> businesses = scraperService.scrapeAndPersist(
+                    scraperRequest, runId);
 
             long duration = System.currentTimeMillis() - start;
             eventService.stepCompleted(runId, NODE_NAME, duration);
 
-            log.info("[{}] Scraped {} businesses in {}ms", runId, businesses.size(), duration);
-
-            return Map.of(
-                    ArchitectAgentState.SCRAPED_COUNT, businesses.size()
-            );
+            return Map.of(ArchitectAgentState.SCRAPED_COUNT, businesses.size());
 
         } catch (Exception e) {
             eventService.stepFailed(runId, NODE_NAME, e.getMessage());

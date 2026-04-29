@@ -22,6 +22,7 @@ public class ArchitectAgentState extends AgentState {
     public static final String SEO_RESEARCH        = "seo_research";
     public static final String TECH_STACK_RESEARCH = "tech_stack_research";
     public static final String ERROR               = "error";
+    public static final String SCRAPER_CONFIG      = "scraper_config";
 
     // Replace
     public static final String ARCHITECT_BRIEF_ID  = "architect_brief_id";
@@ -95,5 +96,9 @@ public class ArchitectAgentState extends AgentState {
 
     public Optional<String> error() {
         return value(ERROR);
+    }
+
+    public Optional<Map<String, Object>> scraperConfig() {
+        return value(SCRAPER_CONFIG);
     }
 }

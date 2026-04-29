@@ -1,5 +1,6 @@
 package com.business.discovery.services.agent.architect;
 
+import com.business.discovery.dto.ArchitectRunRequest;
 import com.business.discovery.model.AgentRun;
 import com.business.discovery.repository.AgentRunRepository;
 import lombok.RequiredArgsConstructor;
@@ -18,27 +19,19 @@ public class ArchitectAgentRunService {
     private final AgentRunRepository agentRunRepository;
 
     // Creates the AgentRun record and triggers the graph asynchronously
-    public AgentRun startRun(String keyword) {
-        // Parse category and location from keyword
-        // e.g. "restaurants in Khadki, Pune" → category=restaurants, location=Khadki, Pune
-        String[] parts = parseKeyword(keyword);
+    public AgentRun startRun(ArchitectRunRequest request) {
+        String[] parts = parseKeyword(request.keyword());
         String category = parts[0];
         String location = parts[1];
 
         AgentRun run = AgentRun.builder()
-                .keyword(keyword)
+                .keyword(request.keyword())
                 .category(category)
                 .location(location)
                 .status(AgentRun.AgentRunStatus.PENDING)
                 .build();
 
-        AgentRun saved = agentRunRepository.save(run);
-        log.info("AgentRun created — id: {}, keyword: {}", saved.getId(), keyword);
-
-        // Trigger async — returns immediately to the controller
-        //executeAsync(saved.getId(), keyword, category, location);
-
-        return saved;
+        return agentRunRepository.save(run);
     }
 
     public com.business.discovery.dto.architect.ArchitectRunStatusResponse getRunStatus(UUID runId) {
