@@ -12,18 +12,24 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - shared-network
 
   app:
     build: .
     container_name: phase1-app
+    env_file:
+      - .env
     ports:
-      - "8080:8080"
-    environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/business_discovery
-      SPRING_DATASOURCE_USERNAME: amardahat
-      SPRING_DATASOURCE_PASSWORD: 94227
+      - "${SERVER_PORT}:${SERVER_PORT}"
     depends_on:
       - postgres
+    networks:
+      - shared-network
 
 volumes:
   pgdata:
+
+networks:
+  shared-network:
+    name: shared-network

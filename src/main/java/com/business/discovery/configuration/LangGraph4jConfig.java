@@ -15,10 +15,10 @@ import java.sql.SQLException;
 @Configuration
 public class LangGraph4jConfig {
 
-    @Value("${langgraph4j.postgres.host}")
+    @Value("${langgraph4j.postgres.host:localhost}")
     private String host;
 
-    @Value("${langgraph4j.postgres.port}")
+    @Value("${langgraph4j.postgres.port:5432}")
     private int port;
 
     @Value("${langgraph4j.postgres.database}")
