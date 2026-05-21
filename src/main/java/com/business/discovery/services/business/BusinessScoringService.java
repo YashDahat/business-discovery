@@ -101,24 +101,177 @@ public class BusinessScoringService {
     private String estimateRevenueRange(BusinessEntity business) {
         int reviewCount = business.getReviewCount() != null
                 ? business.getReviewCount() : 0;
-        String priceRange = business.getPriceRange();
+        double rating = business.getRating() != null
+                ? business.getRating() : 0.0;
+        String category = business.getCategory() != null
+                ? business.getCategory().toLowerCase() : "";
+        String priceRange = business.getPriceRange() != null
+                ? business.getPriceRange() : "";
 
-        // Rough multiplier based on price range
-        int avgOrder = switch (priceRange != null ? priceRange : "") {
-            case "₹₹₹₹" -> 1500;
+        if (reviewCount == 0) return "Insufficient data";
+
+        // ── Step 1: Category-specific average transaction value ──
+        // Based on typical Indian local business transaction sizes
+        int avgTransactionMin = getAvgTransactionMin(category, priceRange);
+        int avgTransactionMax = getAvgTransactionMax(category, priceRange);
+
+        // ── Step 2: Estimate annual customers from review count ──────
+        double reviewRate = getReviewRate(category);
+
+        // Lower bound: 2× the standard review rate (fewer customers)
+        // Upper bound: 0.5× the standard review rate (more customers)
+        long conservativeCustomers = (long) (reviewCount / (reviewRate * 2));
+        long aggressiveCustomers   = (long) (reviewCount / (reviewRate * 0.5));
+
+        // ── Step 3: Apply rating quality multiplier ──────────────
+        // Higher rating → higher repeat visit rate → higher revenue per customer
+        double ratingMultiplier = getRatingMultiplier(rating);
+
+        // ── Step 4: Calculate revenue range ─────────────────────
+        long minRevenue = (long) (conservativeCustomers * avgTransactionMin * ratingMultiplier);
+        long maxRevenue = (long) (aggressiveCustomers   * avgTransactionMax * ratingMultiplier);
+
+        // ── Step 5: Format output ────────────────────────────────
+        return formatRevenueRange(minRevenue, maxRevenue);
+    }
+
+// ── Category-specific transaction values (INR) ──────────────
+
+    private int getAvgTransactionMin(String category, String priceRange) {
+        if (matches(category, "restaurant", "cafe", "dhaba", "food", "bakery", "pizza")) {
+            return switch (priceRange) {
+                case "₹₹₹₹" -> 1200;
+                case "₹₹₹"  -> 600;
+                case "₹₹"   -> 300;
+                default      -> 150;
+            };
+        }
+        if (matches(category, "gym", "fitness", "yoga", "crossfit", "pilates")) {
+            return 800;   // monthly membership ÷ ~12 visits → per-visit equivalent
+        }
+        if (matches(category, "stationar", "book store", "art supply", "print")) {
+            return 200;   // typical stationery purchase
+        }
+        if (matches(category, "salon", "spa", "beauty", "parlour", "barber")) {
+            return 400;
+        }
+        if (matches(category, "clinic", "doctor", "dentist", "hospital", "medical")) {
+            return 500;
+        }
+        if (matches(category, "pharmacy", "chemist", "drug")) {
+            return 250;
+        }
+        if (matches(category, "grocery", "supermarket", "mart")) {
+            return 400;
+        }
+        if (matches(category, "clothing", "fashion", "garment", "textile")) {
+            return switch (priceRange) {
+                case "₹₹₹₹" -> 3000;
+                case "₹₹₹"  -> 1500;
+                case "₹₹"   -> 600;
+                default      -> 300;
+            };
+        }
+        if (matches(category, "jewellery", "jewelry", "gold")) {
+            return 5000;
+        }
+        if (matches(category, "electronics", "mobile", "laptop", "computer")) {
+            return 2000;
+        }
+        if (matches(category, "hardware", "tools", "plumbing")) {
+            return 500;
+        }
+        if (matches(category, "coaching", "tuition", "institute", "academy")) {
+            return 1500;  // monthly fee ÷ visits
+        }
+        if (matches(category, "real estate", "realty", "property", "builder",
+                "developer", "housing", "apartments", "flats", "plots",
+                "broker", "estate agent")) {
+
+            // Real estate transactions are per deal — not per visit
+            // A broker earns 1-2% commission on property value
+            // Pune residential property: ₹50L-2Cr range
+            // Commission per deal: ₹50,000 - ₹4,00,000
+            // A busy broker closes 1-3 deals per month
+            return switch (priceRange) {
+                case "₹₹₹₹" -> 300000;  // luxury — high-value deals, 2Cr+ properties
+                case "₹₹₹"  -> 150000;  // premium — 1Cr+ properties
+                case "₹₹"   -> 75000;   // mid-segment — 50L-1Cr properties
+                default      -> 40000;   // affordable segment
+            };
+        }
+        // Default — unknown category
+        return switch (priceRange) {
+            case "₹₹₹₹" -> 2000;
             case "₹₹₹"  -> 800;
             case "₹₹"   -> 400;
             default      -> 200;
         };
+    }
 
-        // Assume 2% review rate, 30 days/month, 12 months
-        long estimatedCoversPerYear = (long) reviewCount * 50;
-        long minRevenue = estimatedCoversPerYear * avgOrder;
-        long maxRevenue = minRevenue * 3;
+    private int getAvgTransactionMax(String category, String priceRange) {
+        // Max is typically 2-3x the min for the same category
+        return (int) (getAvgTransactionMin(category, priceRange) * 2.5);
+    }
 
-        return "₹%sL — ₹%sL".formatted(
-                minRevenue / 100000, maxRevenue / 100000
-        );
+// ── Rating multiplier ────────────────────────────────────────
+// High rating → more repeat customers → higher effective revenue
+
+    private double getRatingMultiplier(double rating) {
+        if (rating >= 4.5) return 1.3;   // exceptional — high loyalty, repeat visits
+        if (rating >= 4.0) return 1.1;   // good — solid repeat base
+        if (rating >= 3.5) return 1.0;   // average — baseline
+        if (rating >= 3.0) return 0.85;  // below average — higher churn
+        return 0.7;                        // poor — mostly one-time visitors
+    }
+
+// ── Category keyword matcher ─────────────────────────────────
+
+    private boolean matches(String category, String... keywords) {
+        for (String kw : keywords) {
+            if (category.contains(kw)) return true;
+        }
+        return false;
+    }
+
+// ── Format revenue range ─────────────────────────────────────
+
+    private String formatRevenueRange(long min, long max) {
+        // Convert to Lakhs or Crores depending on magnitude
+        if (max >= 10_000_000) {  // 1 Crore+
+            return "₹%.1fCr — ₹%.1fCr".formatted(
+                    min / 10_000_000.0,
+                    max / 10_000_000.0
+            );
+        }
+        if (max >= 100_000) {  // 1 Lakh+
+            return "₹%dL — ₹%dL".formatted(
+                    min / 100_000,
+                    max / 100_000
+            );
+        }
+        return "₹%d — ₹%d".formatted(min, max);
+    }
+
+    // ── Step 2: Category-specific review rate ────────────────────
+
+    private double getReviewRate(String category) {
+        // Real estate — clients almost always leave a review (high stakes purchase)
+        if (matches(category, "real estate", "realty", "property",
+                "builder", "developer", "broker", "estate agent")) {
+            return 0.25;  // 25% review rate — most clients review after a deal
+        }
+        // Clinics/doctors — patients frequently review
+        if (matches(category, "clinic", "doctor", "dentist",
+                "hospital", "medical")) {
+            return 0.15;
+        }
+        // Coaching/education — students often review
+        if (matches(category, "coaching", "tuition", "institute", "academy")) {
+            return 0.10;
+        }
+        // Standard retail and services
+        return 0.02;  // 2% default — midpoint of 1-3% range
     }
 
     private boolean isPremiumPriceRange(String priceRange) {

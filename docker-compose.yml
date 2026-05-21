@@ -12,8 +12,35 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amardahat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - shared-network
+
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy
+    container_name: docker-proxy
+    hostname: docker-proxy        # ← explicitly set hostname
+    privileged: true
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      NETWORKS: 1
+      VOLUMES: 0
+      AUTH: 0
+      POST: 1
+      DELETE: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "2375:2375"
+    networks:
+      shared-network:
+        aliases:
+          - docker-proxy          # ← DNS alias on the network
 
   app:
     build: .
@@ -23,7 +50,10 @@ services:
     ports:
       - "${SERVER_PORT}:${SERVER_PORT}"
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+      docker-proxy:
+        condition: service_started
     networks:
       - shared-network
 
@@ -33,3 +63,6 @@ volumes:
 networks:
   shared-network:
     name: shared-network
+    driver: bridge
+  discovery-network:
+    external: true
