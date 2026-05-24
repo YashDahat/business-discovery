@@ -1,8 +1,27 @@
-FROM alpine:3.19
+# Stage 1 — Build worker JAR
+FROM maven:3.9-eclipse-temurin-17 AS builder
+WORKDIR /build
 
-RUN apk add --no-cache bash
+# Resolve dependencies first so this layer is cached on source-only changes
+COPY discovery-worker/pom.xml .
+RUN mvn dependency:go-offline -q --no-transfer-progress
 
-COPY worker-entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY discovery-worker/src ./src
+RUN mvn package -q -DskipTests --no-transfer-progress
 
-ENTRYPOINT ["/entrypoint.sh"]
+# Stage 2 — Minimal runtime: JRE 17 + git + node/npm + maven
+# maven is required at runtime: BackendValidationNode runs `mvn compile` on the generated project
+# nodejs/npm are required at runtime: FrontendValidationNode runs `npm install && npm run build`
+FROM eclipse-temurin:17-jre-alpine
+RUN apk add --no-cache git nodejs npm bash
+
+COPY --from=builder /usr/share/maven /usr/share/maven
+ENV MAVEN_HOME=/usr/share/maven
+ENV PATH="${MAVEN_HOME}/bin:${PATH}"
+
+WORKDIR /app
+COPY --from=builder /build/target/discovery-worker-*.jar app.jar
+
+RUN mkdir -p /workspace
+
+ENTRYPOINT ["java", "-jar", "app.jar"]

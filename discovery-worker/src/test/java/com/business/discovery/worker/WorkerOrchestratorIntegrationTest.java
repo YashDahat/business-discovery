@@ -1,0 +1,221 @@
+package com.business.discovery.worker;
+
+import com.business.discovery.worker.constants.FileType;
+import com.business.discovery.worker.context.WorkerContext;
+import com.business.discovery.worker.model.ArchitectBrief;
+import com.business.discovery.worker.model.BusinessEntity;
+import com.business.discovery.worker.model.ContainerTask;
+import com.business.discovery.worker.model.GeneratedFile;
+import com.business.discovery.worker.model.GeneratedFile.FileStatus;
+import com.business.discovery.worker.orchestrator.WorkerOrchestrator;
+import com.business.discovery.worker.repository.ArchitectBriefRepository;
+import com.business.discovery.worker.repository.BusinessEntityRepository;
+import com.business.discovery.worker.repository.ContainerTaskRepository;
+import com.business.discovery.worker.repository.GeneratedFileRepository;
+import com.business.discovery.worker.service.BuildToolService;
+import com.business.discovery.worker.service.GitHubApiService;
+import com.business.discovery.worker.service.GitService;
+import com.business.discovery.worker.service.llm.FileEntry;
+import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.ActiveProfiles;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.util.ReflectionTestUtils;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.when;
+
+/**
+ * End-to-end integration test for the full 14-node worker pipeline.
+ * Git, GitHub API, LLM, and build tools are mocked; DB and filesystem run for real.
+ * Prereq: local Postgres with business_discovery_test DB.
+ */
+@SpringBootTest(properties = {
+        "spring.datasource.url=jdbc:postgresql://localhost:5432/business_discovery_test",
+        "spring.datasource.username=amardahat",
+        "spring.datasource.password=94227",
+        "spring.jpa.hibernate.ddl-auto=create-drop",
+        "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
+        "worker.task.id=",
+        "worker.task.brief-id=",
+        "worker.task.business-id=",
+        "worker.task.attempt-number=1",
+        "worker.github.token=test-token",
+        "worker.github.owner=test-owner",
+        "worker.github.branch=feature/shree-cafe-attempt-1",
+        "worker.github.repo-url=",
+        "worker.llm.anthropic.api-key=test-key",
+})
+@ActiveProfiles("test")
+class WorkerOrchestratorIntegrationTest {
+
+    private static final String REPO_URL = "https://github.com/test-owner/shree-cafe";
+    private static final String PR_URL   = "https://github.com/test-owner/shree-cafe/pull/1";
+    static final Path WORKSPACE = Path.of(System.getProperty("java.io.tmpdir"), "worker-oit");
+
+    @DynamicPropertySource
+    static void dynamicProps(DynamicPropertyRegistry registry) {
+        registry.add("worker.workspace.dir", WORKSPACE::toString);
+    }
+
+    // ── Mocked external services ──────────────────────────────────────────
+    @MockitoBean LlmGeneratorService llm;
+    @MockitoBean GitService gitService;
+    @MockitoBean GitHubApiService gitHubApiService;
+    @MockitoBean BuildToolService buildToolService;
+
+    // ── Real Spring beans ─────────────────────────────────────────────────
+    @Autowired WorkerOrchestrator orchestrator;
+    @Autowired WorkerContext ctx;
+    @Autowired ArchitectBriefRepository briefRepo;
+    @Autowired BusinessEntityRepository businessRepo;
+    @Autowired ContainerTaskRepository taskRepo;
+    @Autowired GeneratedFileRepository fileRepo;
+
+    // Generated per-test IDs (Hibernate assigns them; we inject into WorkerContext)
+    private UUID taskId;
+    private UUID briefId;
+    private UUID businessId;
+
+    @BeforeEach
+    void setUp() throws IOException {
+        // Reset WorkerContext runtime fields — it is a singleton, carries state between tests
+        ctx.setGithubRepoUrl("");
+        ctx.setGithubPrUrl(null);
+        ctx.setBrief(null);
+        ctx.setBusiness(null);
+        ctx.setTask(null);
+        ctx.setFileManifest(new ArrayList<>());
+        ctx.setBriefCtx(null);
+
+        // Fresh workspace
+        deleteRecursive(WORKSPACE);
+        Files.createDirectories(WORKSPACE);
+
+        // Persist test rows — let Hibernate generate UUIDs to avoid merge-vs-insert conflicts
+        ArchitectBrief brief = briefRepo.saveAndFlush(ArchitectBrief.builder()
+                .runId(UUID.randomUUID())
+                .businessCategory("Restaurant")
+                .location("Pune")
+                .mustHaveFeatures(List.of("Menu", "Reservations", "Contact"))
+                .recommendedTechStack(Map.of("frontend", "React 19", "backend", "Spring Boot 3"))
+                .websiteType(ArchitectBrief.WebsiteType.INFORMATIONAL)
+                .build());
+        briefId = brief.getId();
+
+        BusinessEntity business = businessRepo.saveAndFlush(BusinessEntity.builder()
+                .runId(UUID.randomUUID())
+                .title("Shree Cafe")
+                .category("Restaurant")
+                .build());
+        businessId = business.getId();
+
+        ContainerTask task = taskRepo.saveAndFlush(ContainerTask.builder()
+                .briefId(briefId)
+                .businessId(businessId)
+                .runId(UUID.randomUUID())
+                .taskDescription(Map.of("test", "integration"))
+                .status(ContainerTask.ContainerTaskStatus.RUNNING)
+                .build());
+        taskId = task.getId();
+
+        // Inject generated IDs into WorkerContext (initial @Value was blank)
+        ReflectionTestUtils.setField(ctx, "taskIdStr", taskId.toString());
+        ReflectionTestUtils.setField(ctx, "briefIdStr", briefId.toString());
+        ReflectionTestUtils.setField(ctx, "businessIdStr", businessId.toString());
+
+        // LLM stub: 1 BACKEND + 1 FRONTEND file — minimal manifest to keep the test fast
+        when(llm.generateFileManifest(any())).thenReturn(List.of(
+                new FileEntry(
+                        "backend/src/main/java/com/shreecafe/controller/HomeController.java",
+                        FileType.BACKEND,
+                        "Home REST controller"),
+                new FileEntry(
+                        "frontend/src/App.tsx",
+                        FileType.FRONTEND,
+                        "Root React component")
+        ));
+        when(llm.generateFileContent(any(), any(), any(), any())).thenReturn("// generated");
+
+        // GitHub stubs
+        when(gitHubApiService.createRepo(any(), any())).thenReturn(REPO_URL);
+        when(gitHubApiService.createPullRequest(any(), any(), any(), any())).thenReturn(PR_URL);
+
+        // Build tools: succeed so validation nodes pass without real builds
+        BuildToolService.BuildResult ok = new BuildToolService.BuildResult(0, "");
+        when(buildToolService.runMvnCompile(any())).thenReturn(ok);
+        when(buildToolService.runNpmInstall(any())).thenReturn(ok);
+        when(buildToolService.runNpmBuild(any())).thenReturn(ok);
+    }
+
+    @AfterEach
+    void tearDown() throws IOException {
+        deleteRecursive(WORKSPACE);
+        fileRepo.deleteAll();
+        if (taskId != null) taskRepo.deleteById(taskId);
+        if (briefId != null) briefRepo.deleteById(briefId);
+        if (businessId != null) businessRepo.deleteById(businessId);
+    }
+
+    @Test
+    void allNodesExecute_generatedFilesInDb_projectHistoryOnDisk() throws IOException {
+        orchestrator.run();
+
+        // DB: 1 BACKEND + 1 FRONTEND GeneratedFile row, all GENERATED status
+        List<GeneratedFile> files = fileRepo.findByTaskId(taskId);
+        assertThat(files).hasSize(2);
+        assertThat(files)
+                .extracting(GeneratedFile::getFileType)
+                .containsExactlyInAnyOrder(GeneratedFile.FileType.BACKEND, GeneratedFile.FileType.FRONTEND);
+        assertThat(files).allMatch(f -> f.getStatus() == FileStatus.GENERATED);
+
+        // Filesystem: docs/PROJECT_HISTORY.md written with attempt section
+        Path history = WORKSPACE.resolve("docs/PROJECT_HISTORY.md");
+        assertThat(history).exists();
+        String historyContent = Files.readString(history);
+        assertThat(historyContent)
+                .contains("Attempt 1")
+                .contains("Shree Cafe");
+
+        // Filesystem: README.md and CI workflow written
+        assertThat(WORKSPACE.resolve("README.md")).exists();
+        assertThat(WORKSPACE.resolve(".github/workflows/ci.yml")).exists();
+    }
+
+    @Test
+    void workerUpdatesGithubUrls_masterCanReadThemBack() {
+        orchestrator.run();
+
+        // Each findById here starts a fresh transaction with a clean L1 cache,
+        // so it always reads the committed values written by the nodes.
+        ContainerTask updated = taskRepo.findById(taskId).orElseThrow();
+        assertThat(updated.getGithubRepoUrl()).isEqualTo(REPO_URL);
+        assertThat(updated.getGithubPrUrl()).isEqualTo(PR_URL);
+    }
+
+    // ── Helper ────────────────────────────────────────────────────────────
+
+    private static void deleteRecursive(Path dir) throws IOException {
+        if (!Files.exists(dir)) return;
+        try (var walk = Files.walk(dir)) {
+            walk.sorted(Comparator.reverseOrder())
+                    .forEach(p -> { try { Files.delete(p); } catch (IOException ignored) {} });
+        }
+    }
+}
