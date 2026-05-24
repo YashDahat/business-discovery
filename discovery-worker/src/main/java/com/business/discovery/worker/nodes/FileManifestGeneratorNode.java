@@ -12,8 +12,8 @@ import com.business.discovery.worker.repository.ContainerTaskRepository;
 import com.business.discovery.worker.service.llm.BriefContext;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
@@ -23,13 +23,22 @@ import java.util.Map;
 @Component
 @Order(1)
 @Slf4j
-@RequiredArgsConstructor
 public class FileManifestGeneratorNode implements WorkerNode {
 
     private final ArchitectBriefRepository briefRepo;
     private final BusinessEntityRepository businessRepo;
     private final ContainerTaskRepository taskRepo;
     private final LlmGeneratorService llm;
+
+    public FileManifestGeneratorNode(ArchitectBriefRepository briefRepo,
+                                     BusinessEntityRepository businessRepo,
+                                     ContainerTaskRepository taskRepo,
+                                     @Qualifier("geminiPro") LlmGeneratorService llm) {
+        this.briefRepo = briefRepo;
+        this.businessRepo = businessRepo;
+        this.taskRepo = taskRepo;
+        this.llm = llm;
+    }
 
     @Override
     public void execute(WorkerContext ctx) {

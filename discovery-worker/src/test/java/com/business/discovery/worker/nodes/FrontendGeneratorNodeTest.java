@@ -125,6 +125,6 @@ class FrontendGeneratorNodeTest {
     private BriefContext mockBriefContext() {
         return new BriefContext("Test Business", "Restaurant", "Pune",
                 "INFORMATIONAL", List.of(), List.of(), Map.of(), List.of(),
-                "modern", "blue", "professional", "", "", "");
+                "modern", "blue", "professional", "", "", "", null);
     }
 }

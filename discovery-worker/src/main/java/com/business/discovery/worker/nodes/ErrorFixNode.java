@@ -13,8 +13,8 @@ import dev.langchain4j.web.search.WebSearchResults;
 import dev.langchain4j.web.search.WebSearchOrganicResult;
 
 import java.util.stream.Collectors;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -33,7 +33,6 @@ import java.util.regex.Pattern;
  */
 @Component
 @Slf4j
-@RequiredArgsConstructor
 public class ErrorFixNode {
 
     private static final Pattern MAVEN_FILE = Pattern.compile(
@@ -46,6 +45,14 @@ public class ErrorFixNode {
     private final LlmGeneratorService llm;
     private final GeneratedFileRepository fileRepo;
     private final WebSearchEngine webSearch;
+
+    public ErrorFixNode(@Qualifier("claudeSonnet") LlmGeneratorService llm,
+                        GeneratedFileRepository fileRepo,
+                        WebSearchEngine webSearch) {
+        this.llm = llm;
+        this.fileRepo = fileRepo;
+        this.webSearch = webSearch;
+    }
 
     public boolean fix(String errorOutput, FileType fileType, WorkerContext ctx) {
         Optional<String> maybeAbs = parseAbsolutePath(errorOutput, fileType);

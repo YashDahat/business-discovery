@@ -128,6 +128,6 @@ class BackendGeneratorNodeTest {
     private BriefContext mockBriefContext() {
         return new BriefContext("Test Business", "Restaurant", "Pune",
                 "INFORMATIONAL", List.of(), List.of(), java.util.Map.of(), List.of(),
-                "modern", "blue", "professional", "", "", "");
+                "modern", "blue", "professional", "", "", "", null);
     }
 }

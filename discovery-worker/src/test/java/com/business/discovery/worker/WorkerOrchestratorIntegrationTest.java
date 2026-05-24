@@ -75,7 +75,9 @@ class WorkerOrchestratorIntegrationTest {
     }
 
     // ── Mocked external services ──────────────────────────────────────────
-    @MockitoBean LlmGeneratorService llm;
+    @MockitoBean("geminiPro")   LlmGeneratorService geminiProLlm;
+    @MockitoBean("geminiFlash") LlmGeneratorService geminiFlashLlm;
+    @MockitoBean("claudeSonnet") LlmGeneratorService claudeSonnetLlm;
     @MockitoBean GitService gitService;
     @MockitoBean GitHubApiService gitHubApiService;
     @MockitoBean BuildToolService buildToolService;
@@ -140,8 +142,8 @@ class WorkerOrchestratorIntegrationTest {
         ReflectionTestUtils.setField(ctx, "briefIdStr", briefId.toString());
         ReflectionTestUtils.setField(ctx, "businessIdStr", businessId.toString());
 
-        // LLM stub: 1 BACKEND + 1 FRONTEND file — minimal manifest to keep the test fast
-        when(llm.generateFileManifest(any())).thenReturn(List.of(
+        // LLM stubs — each bean is wired to its specific node role
+        when(geminiProLlm.generateFileManifest(any())).thenReturn(List.of(
                 new FileEntry(
                         "backend/src/main/java/com/shreecafe/controller/HomeController.java",
                         FileType.BACKEND,
@@ -151,7 +153,8 @@ class WorkerOrchestratorIntegrationTest {
                         FileType.FRONTEND,
                         "Root React component")
         ));
-        when(llm.generateFileContent(any(), any(), any(), any())).thenReturn("// generated");
+        when(geminiFlashLlm.generateFileContent(any(), any(), any(), any()))
+                .thenReturn("// generated");
 
         // GitHub stubs
         when(gitHubApiService.createRepo(any(), any())).thenReturn(REPO_URL);

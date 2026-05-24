@@ -46,6 +46,9 @@ public class DockerContainerService {
     @Value("${langchain4j.google-ai-gemini.chat-model.api-key}")
     private String geminiApiKey;
 
+    @Value("${worker.llm.anthropic.api-key:}")
+    private String anthropicApiKey;
+
     // ─── Spawn a sub-container for a task ─────────────────
 
     @Transactional
@@ -160,6 +163,7 @@ public class DockerContainerService {
 
         // LLM
         env.add("GEMINI_API_KEY=" + geminiApiKey);
+        env.add("ANTHROPIC_API_KEY=" + anthropicApiKey);
 
         return env;
     }

@@ -8,8 +8,8 @@ import com.business.discovery.worker.model.GeneratedFile;
 import com.business.discovery.worker.repository.GeneratedFileRepository;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
@@ -21,11 +21,16 @@ import java.util.List;
 @Component
 @Order(6)
 @Slf4j
-@RequiredArgsConstructor
 public class FrontendGeneratorNode implements WorkerNode {
 
     private final LlmGeneratorService llm;
     private final GeneratedFileRepository fileRepo;
+
+    public FrontendGeneratorNode(@Qualifier("geminiFlash") LlmGeneratorService llm,
+                                 GeneratedFileRepository fileRepo) {
+        this.llm = llm;
+        this.fileRepo = fileRepo;
+    }
 
     @Override
     public void execute(WorkerContext ctx) {
