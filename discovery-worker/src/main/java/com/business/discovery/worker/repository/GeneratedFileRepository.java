@@ -19,4 +19,6 @@ public interface GeneratedFileRepository extends JpaRepository<GeneratedFile, UU
     List<GeneratedFile> findByTaskIdAndFileType(UUID taskId, FileType fileType);
 
     long countByTaskIdAndStatus(UUID taskId, FileStatus status);
+
+    java.util.Optional<GeneratedFile> findByTaskIdAndFilePath(UUID taskId, String filePath);
 }
