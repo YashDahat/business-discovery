@@ -55,6 +55,11 @@ public class GitService {
                 "git push failed for branch " + branch);
     }
 
+    public void pullRebase(Path repoDir, String branch) {
+        run(repoDir, List.of("git", "pull", "--rebase", "origin", branch),
+                "git pull --rebase failed for branch " + branch);
+    }
+
     // ── Internal ──────────────────────────────────────────────────────────
 
     private void run(Path workDir, List<String> cmd, String errorMsg) {
