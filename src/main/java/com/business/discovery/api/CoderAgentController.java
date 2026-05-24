@@ -81,6 +81,11 @@ public class CoderAgentController {
         ));
     }
 
+    @org.springframework.web.bind.annotation.ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<Map<String, String>> handleNotFound(IllegalArgumentException ex) {
+        return ResponseEntity.status(404).body(Map.of("error", ex.getMessage()));
+    }
+
     public record CoderRunRequest(
             UUID runId,
             UUID briefId,
