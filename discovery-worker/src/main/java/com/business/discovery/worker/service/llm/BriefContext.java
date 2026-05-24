@@ -21,6 +21,7 @@ public record BriefContext(
         String tone,
         String competitorInsights,
         String industryInsights,
-        String architecturalNotes
+        String architecturalNotes,
+        String requestedChanges
 ) {
 }

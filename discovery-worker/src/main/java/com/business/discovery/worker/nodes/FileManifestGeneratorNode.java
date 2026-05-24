@@ -73,7 +73,8 @@ public class FileManifestGeneratorNode implements WorkerNode {
                 nullSafe(brief.getTone(), "professional"),
                 nullSafe(brief.getCompetitorInsights(), ""),
                 nullSafe(brief.getIndustryInsights(), ""),
-                nullSafe(brief.getArchitecturalNotes(), "")
+                nullSafe(brief.getArchitecturalNotes(), ""),
+                brief.getRequestedChanges()
         );
     }
 

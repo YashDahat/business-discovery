@@ -5,6 +5,7 @@ import com.business.discovery.model.ContainerTask.ContainerFailureType;
 import com.business.discovery.model.ContainerTask.ContainerTaskStatus;
 import com.business.discovery.model.MasterAgentHeartbeat;
 import com.business.discovery.model.MasterAgentHeartbeat.MasterStatus;
+import com.business.discovery.repository.ArchitectBriefRepository;
 import com.business.discovery.repository.ContainerTaskRepository;
 import com.business.discovery.repository.MasterAgentHeartbeatRepository;
 import com.business.discovery.services.agent.AgentEventService;
@@ -28,6 +29,7 @@ public class ContainerMonitorService {
     private final DockerContainerService dockerContainerService;
     private final ContainerPoolManager poolManager;
     private final AgentEventService agentEventService;
+    private final ArchitectBriefRepository architectBriefRepository;
 
     @Value("${docker.container.max-lifetime-minutes:30}")
     private int maxLifetimeMinutes;
@@ -124,6 +126,9 @@ public class ContainerMonitorService {
         task.setStatus(ContainerTaskStatus.COMPLETED);
         task.setCompletedAt(LocalDateTime.now());
         containerTaskRepository.save(task);
+
+        // Clear requested_changes — change cycle is done; null = no cycle in flight
+        architectBriefRepository.updateRequestedChanges(task.getBriefId(), null);
 
         poolManager.releaseSlot();
 

@@ -98,6 +98,9 @@ public class ArchitectBrief {
     @Column(name = "raw_llm_output", columnDefinition = "TEXT")
     private String rawLlmOutput;
 
+    @Column(name = "requested_changes", columnDefinition = "TEXT")
+    private String requestedChanges;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

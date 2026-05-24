@@ -106,6 +106,9 @@ public abstract class LlmGeneratorService {
     // ── Private prompt builders ───────────────────────────────────────────
 
     private String buildManifestPrompt(BriefContext b) {
+        String changesSection = (b.requestedChanges() != null && !b.requestedChanges().isBlank())
+                ? "\nClient-requested changes (MUST be reflected in the file list):\n" + b.requestedChanges()
+                : "";
         return String.format("""
                 Business: %s
                 Category: %s
@@ -116,18 +119,22 @@ public abstract class LlmGeneratorService {
                 Tech stack: %s
                 SEO keywords: %s
                 Design direction: %s
-                Competitor insights: %s
+                Competitor insights: %s%s
                 """,
                 b.businessName(), b.category(), b.location(), b.websiteType(),
                 b.mustHaveFeatures(), b.niceToHaveFeatures(),
                 b.techStack(), b.seoKeywords(), b.designDirection(),
-                b.competitorInsights());
+                b.competitorInsights(), changesSection);
     }
 
     private String buildFileContentPrompt(String filePath,
                                           String description,
                                           BriefContext b,
                                           List<String> existing) {
+        String changesSection = (b.requestedChanges() != null && !b.requestedChanges().isBlank())
+                ? "\nClient-requested changes (MUST be applied in this file where applicable):\n"
+                        + b.requestedChanges() + "\n"
+                : "";
         return String.format("""
                 File to generate: %s
                 Description: %s
@@ -139,7 +146,7 @@ public abstract class LlmGeneratorService {
                   Tech stack: %s
                   Design direction: %s | Color: %s | Tone: %s
                   Architectural notes: %s
-
+                %s
                 Already generated files (do NOT re-generate these):
                 %s
                 """,
@@ -147,7 +154,7 @@ public abstract class LlmGeneratorService {
                 b.businessName(), b.category(), b.location(),
                 b.websiteType(), b.mustHaveFeatures(), b.techStack(),
                 b.designDirection(), b.colorScheme(), b.tone(),
-                b.architecturalNotes(),
+                b.architecturalNotes(), changesSection,
                 String.join("\n", existing));
     }
 

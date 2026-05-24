@@ -112,6 +112,10 @@ public class DocumentationGeneratorNode implements WorkerNode {
                 .map(p -> "- " + p)
                 .collect(Collectors.joining("\n"));
 
+        String changesSection = (brief.getRequestedChanges() != null && !brief.getRequestedChanges().isBlank())
+                ? "\n**Requested Changes Applied:**\n" + brief.getRequestedChanges() + "\n"
+                : "";
+
         String section = """
                 ## Attempt %d — %s
 
@@ -121,7 +125,7 @@ public class DocumentationGeneratorNode implements WorkerNode {
 
                 **Must-Have Features:**
                 %s
-
+                %s
                 **Generated Files (%d):**
                 %s
 
@@ -133,6 +137,7 @@ public class DocumentationGeneratorNode implements WorkerNode {
                 nullSafe(brief.getBusinessCategory(), nullSafe(business.getCategory(), "General")),
                 brief.getWebsiteType() != null ? brief.getWebsiteType().name() : "INFORMATIONAL",
                 featureList,
+                changesSection,
                 generatedPaths.size(),
                 fileList);
 

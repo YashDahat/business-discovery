@@ -143,7 +143,7 @@ public class DockerContainerService {
         env.add("TASK_ID=" + task.getId().toString());
         env.add("BRIEF_ID=" + task.getBriefId().toString());
         env.add("BUSINESS_ID=" + task.getBusinessId().toString());
-        env.add("ATTEMPT_NUMBER=" + task.getAttemptCount());
+        env.add("ATTEMPT_NUMBER=" + (task.getAttemptCount() + 1));
 
         // Task description — the ArchitectBrief JSON
         env.add("TASK_DESC=" + taskDescJson);
