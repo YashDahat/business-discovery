@@ -6,6 +6,7 @@ import com.business.discovery.worker.context.WorkerContext;
 import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.model.GeneratedFile;
 import com.business.discovery.worker.repository.GeneratedFileRepository;
+import com.business.discovery.worker.service.llm.CodebaseContextBuilder;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import lombok.extern.slf4j.Slf4j;
@@ -17,9 +18,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 @Component
-@Order(5)
+@Order(7)
 @Slf4j
 public class BackendGeneratorNode implements WorkerNode {
 
@@ -42,12 +44,29 @@ public class BackendGeneratorNode implements WorkerNode {
                 .map(FileEntry::path)
                 .toList();
 
+        boolean requestedChangesMode = ctx.getBriefCtx().requestedChanges() != null
+                && !ctx.getBriefCtx().requestedChanges().isBlank();
+
+        Map<String, String> codebaseContext = CodebaseContextBuilder.build(ctx.getWorkspaceDir(), "");
+        log.info("[BackendGeneratorNode] Codebase context: {} files ({} chars)",
+                codebaseContext.size(),
+                codebaseContext.values().stream().mapToInt(String::length).sum());
+
         try {
             for (FileEntry entry : backendFiles) {
-                String content = llm.generateFileContent(
-                        entry.path(), entry.description(), ctx.getBriefCtx(), allPaths);
-
                 Path filePath = ctx.getWorkspaceDir().resolve(entry.path());
+
+                if (!requestedChangesMode && Files.exists(filePath)) {
+                    log.info("[BackendGeneratorNode] Skipping already-generated: {}", entry.path());
+                    continue;
+                }
+
+                String existingContent = readExistingIfPresent(filePath, ctx);
+
+                String content = llm.generateFileContent(
+                        entry.path(), entry.description(), ctx.getBriefCtx(), allPaths,
+                        existingContent, codebaseContext);
+
                 Files.createDirectories(filePath.getParent());
                 Files.writeString(filePath, content);
 
@@ -69,5 +88,15 @@ public class BackendGeneratorNode implements WorkerNode {
         }
 
         log.info("[BackendGeneratorNode] Generated {} backend files", backendFiles.size());
+    }
+
+    private String readExistingIfPresent(Path filePath, WorkerContext ctx) {
+        if (!Files.exists(filePath)) return null;
+        try {
+            return Files.readString(filePath);
+        } catch (IOException e) {
+            log.warn("[BackendGeneratorNode] Could not read existing {}: {}", filePath, e.getMessage());
+            return null;
+        }
     }
 }

@@ -8,7 +8,7 @@ import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 @Component
-@Order(12)
+@Order(13)
 @Slf4j
 @RequiredArgsConstructor
 public class GitCommitNode implements WorkerNode {

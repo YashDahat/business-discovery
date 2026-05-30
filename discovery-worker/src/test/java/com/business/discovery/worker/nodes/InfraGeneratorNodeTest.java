@@ -53,7 +53,7 @@ class InfraGeneratorNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(taskId);
         when(ctx.getAttemptNumber()).thenReturn(1);
-        when(llm.generateFileContent(anyString(), anyString(), eq(briefCtx), anyList()))
+        when(llm.generateFileContent(anyString(), anyString(), eq(briefCtx), anyList(), any(), any()))
                 .thenReturn("# generated infra content");
 
         node.execute(ctx);
@@ -71,6 +71,7 @@ class InfraGeneratorNodeTest {
     void ciWorkflow_alwaysWrittenIfAbsent() throws Exception {
         when(ctx.getFileManifest()).thenReturn(List.of());
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
 
         node.execute(ctx);
 
@@ -90,6 +91,7 @@ class InfraGeneratorNodeTest {
 
         when(ctx.getFileManifest()).thenReturn(List.of());
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
 
         node.execute(ctx);
 
@@ -102,6 +104,7 @@ class InfraGeneratorNodeTest {
                 new FileEntry("backend/src/main/java/com/test/model/Product.java", FileType.BACKEND, "Product entity")
         ));
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
 
         node.execute(ctx);
 
@@ -110,9 +113,52 @@ class InfraGeneratorNodeTest {
         assertThat(tempDir.resolve(".github/workflows/ci.yml")).exists();
     }
 
+    @Test
+    void retryMode_existingInfraFile_isSkipped() throws Exception {
+        Files.writeString(tempDir.resolve("Dockerfile"), "# existing");
+
+        when(ctx.getFileManifest()).thenReturn(List.of(
+                new FileEntry("Dockerfile", FileType.INFRA, "Multi-stage build")
+        ));
+        when(ctx.getBriefCtx()).thenReturn(mockBriefContext()); // requestedChanges = null
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+
+        node.execute(ctx);
+
+        verifyNoInteractions(llm);
+        verifyNoInteractions(fileRepo);
+        assertThat(Files.readString(tempDir.resolve("Dockerfile"))).isEqualTo("# existing");
+    }
+
+    @Test
+    void requestedChangesMode_existingInfraFile_isRegenerated() throws Exception {
+        Files.writeString(tempDir.resolve("Dockerfile"), "# old");
+
+        BriefContext briefCtxWithChanges = new BriefContext(
+                "Test Business", "Restaurant", "Pune", "INFORMATIONAL",
+                List.of(), List.of(), Map.of(), List.of(),
+                "modern", "blue", "professional", "", "", "",
+                "Add Redis service", null);
+
+        when(ctx.getFileManifest()).thenReturn(List.of(
+                new FileEntry("Dockerfile", FileType.INFRA, "Multi-stage build")
+        ));
+        when(ctx.getBriefCtx()).thenReturn(briefCtxWithChanges);
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
+        when(ctx.getAttemptNumber()).thenReturn(2);
+        when(llm.generateFileContent(anyString(), anyString(), any(), anyList(), any(), any()))
+                .thenReturn("# updated Dockerfile");
+
+        node.execute(ctx);
+
+        verify(llm).generateFileContent(anyString(), anyString(), any(), anyList(), any(), any());
+        assertThat(Files.readString(tempDir.resolve("Dockerfile"))).isEqualTo("# updated Dockerfile");
+    }
+
     private BriefContext mockBriefContext() {
         return new BriefContext("Test Business", "Restaurant", "Pune",
                 "INFORMATIONAL", List.of(), List.of(), Map.of(), List.of(),
-                "modern", "blue", "professional", "", "", "", null);
+                "modern", "blue", "professional", "", "", "", null, null);
     }
 }

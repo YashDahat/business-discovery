@@ -6,6 +6,7 @@ import com.business.discovery.worker.context.WorkerContext;
 import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.model.GeneratedFile;
 import com.business.discovery.worker.repository.GeneratedFileRepository;
+import com.business.discovery.worker.service.llm.CodebaseContextBuilder;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import lombok.extern.slf4j.Slf4j;
@@ -17,9 +18,10 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 @Component
-@Order(7)
+@Order(9)
 @Slf4j
 public class InfraGeneratorNode implements WorkerNode {
 
@@ -42,12 +44,29 @@ public class InfraGeneratorNode implements WorkerNode {
                 .map(FileEntry::path)
                 .toList();
 
+        boolean requestedChangesMode = ctx.getBriefCtx().requestedChanges() != null
+                && !ctx.getBriefCtx().requestedChanges().isBlank();
+
+        Map<String, String> codebaseContext = CodebaseContextBuilder.build(ctx.getWorkspaceDir(), "");
+        log.info("[InfraGeneratorNode] Codebase context: {} files ({} chars)",
+                codebaseContext.size(),
+                codebaseContext.values().stream().mapToInt(String::length).sum());
+
         try {
             for (FileEntry entry : infraFiles) {
-                String content = llm.generateFileContent(
-                        entry.path(), entry.description(), ctx.getBriefCtx(), allPaths);
-
                 Path filePath = ctx.getWorkspaceDir().resolve(entry.path());
+
+                if (!requestedChangesMode && Files.exists(filePath)) {
+                    log.info("[InfraGeneratorNode] Skipping already-generated: {}", entry.path());
+                    continue;
+                }
+
+                String existingContent = readExistingIfPresent(filePath, ctx);
+
+                String content = llm.generateFileContent(
+                        entry.path(), entry.description(), ctx.getBriefCtx(), allPaths,
+                        existingContent, codebaseContext);
+
                 Files.createDirectories(filePath.getParent());
                 Files.writeString(filePath, content);
 
@@ -71,6 +90,16 @@ public class InfraGeneratorNode implements WorkerNode {
         }
 
         log.info("[InfraGeneratorNode] Generated {} infra files + CI workflow", infraFiles.size());
+    }
+
+    private String readExistingIfPresent(Path filePath, WorkerContext ctx) {
+        if (!Files.exists(filePath)) return null;
+        try {
+            return Files.readString(filePath);
+        } catch (IOException e) {
+            log.warn("[InfraGeneratorNode] Could not read existing {}: {}", filePath, e.getMessage());
+            return null;
+        }
     }
 
     private void writeCiWorkflowIfAbsent(Path workspace) throws IOException {

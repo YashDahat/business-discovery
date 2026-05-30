@@ -57,7 +57,7 @@ class FrontendGeneratorNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(taskId);
         when(ctx.getAttemptNumber()).thenReturn(1);
-        when(llm.generateFileContent(anyString(), anyString(), eq(briefCtx), anyList()))
+        when(llm.generateFileContent(anyString(), anyString(), eq(briefCtx), anyList(), any(), any()))
                 .thenReturn("export default function Component() { return null; }");
 
         node.execute(ctx);
@@ -80,6 +80,8 @@ class FrontendGeneratorNodeTest {
         when(ctx.getFileManifest()).thenReturn(List.of(
                 new FileEntry("backend/src/main/java/com/test/model/Order.java", FileType.BACKEND, "Order entity")
         ));
+        when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
 
         node.execute(ctx);
 
@@ -88,12 +90,60 @@ class FrontendGeneratorNodeTest {
     }
 
     @Test
+    void retryMode_existingFile_isSkipped() throws Exception {
+        Path existingFile = tempDir.resolve("frontend/src/App.tsx");
+        Files.createDirectories(existingFile.getParent());
+        Files.writeString(existingFile, "// existing");
+
+        when(ctx.getFileManifest()).thenReturn(List.of(
+                new FileEntry("frontend/src/App.tsx", FileType.FRONTEND, "Root component")
+        ));
+        when(ctx.getBriefCtx()).thenReturn(mockBriefContext()); // requestedChanges = null
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+
+        node.execute(ctx);
+
+        verifyNoInteractions(llm);
+        verifyNoInteractions(fileRepo);
+        assertThat(Files.readString(existingFile)).isEqualTo("// existing");
+    }
+
+    @Test
+    void requestedChangesMode_existingFile_isRegenerated() throws Exception {
+        Path existingFile = tempDir.resolve("frontend/src/App.tsx");
+        Files.createDirectories(existingFile.getParent());
+        Files.writeString(existingFile, "// old");
+
+        BriefContext briefCtxWithChanges = new BriefContext(
+                "Test Business", "Restaurant", "Pune", "INFORMATIONAL",
+                List.of(), List.of(), Map.of(), List.of(),
+                "modern", "blue", "professional", "", "", "",
+                "Change color scheme to red", null);
+
+        when(ctx.getFileManifest()).thenReturn(List.of(
+                new FileEntry("frontend/src/App.tsx", FileType.FRONTEND, "Root component")
+        ));
+        when(ctx.getBriefCtx()).thenReturn(briefCtxWithChanges);
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
+        when(ctx.getAttemptNumber()).thenReturn(2);
+        when(llm.generateFileContent(anyString(), anyString(), any(), anyList(), any(), any()))
+                .thenReturn("// updated");
+
+        node.execute(ctx);
+
+        verify(llm).generateFileContent(anyString(), anyString(), any(), anyList(), any(), any());
+        assertThat(Files.readString(existingFile)).isEqualTo("// updated");
+    }
+
+    @Test
     void llmThrowsInfra_propagates() {
         when(ctx.getFileManifest()).thenReturn(List.of(
                 new FileEntry("frontend/src/App.tsx", FileType.FRONTEND, "Root component")
         ));
         when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
-        when(llm.generateFileContent(anyString(), anyString(), any(), anyList()))
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(llm.generateFileContent(anyString(), anyString(), any(), anyList(), any(), any()))
                 .thenThrow(new WorkerException(FailureType.INFRA, "LLM timeout"));
 
         assertThatThrownBy(() -> node.execute(ctx))
@@ -113,7 +163,7 @@ class FrontendGeneratorNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(1);
-        when(llm.generateFileContent(anyString(), anyString(), any(), anyList()))
+        when(llm.generateFileContent(anyString(), anyString(), any(), anyList(), any(), any()))
                 .thenReturn("export const Header = () => <header>Hello</header>;");
 
         node.execute(ctx);
@@ -125,6 +175,6 @@ class FrontendGeneratorNodeTest {
     private BriefContext mockBriefContext() {
         return new BriefContext("Test Business", "Restaurant", "Pune",
                 "INFORMATIONAL", List.of(), List.of(), Map.of(), List.of(),
-                "modern", "blue", "professional", "", "", "", null);
+                "modern", "blue", "professional", "", "", "", null, null);
     }
 }

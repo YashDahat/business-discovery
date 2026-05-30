@@ -1,6 +1,5 @@
 package com.business.discovery.worker;
 
-import com.business.discovery.worker.constants.FileType;
 import com.business.discovery.worker.context.WorkerContext;
 import com.business.discovery.worker.model.ArchitectBrief;
 import com.business.discovery.worker.model.BusinessEntity;
@@ -15,7 +14,9 @@ import com.business.discovery.worker.repository.GeneratedFileRepository;
 import com.business.discovery.worker.service.BuildToolService;
 import com.business.discovery.worker.service.GitHubApiService;
 import com.business.discovery.worker.service.GitService;
-import com.business.discovery.worker.service.llm.FileEntry;
+import com.business.discovery.worker.service.llm.ArchitectureSpec;
+import com.business.discovery.worker.service.llm.FileSpec;
+import com.business.discovery.worker.service.llm.ProjectDependencies;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -105,10 +106,20 @@ class WorkerOrchestratorIntegrationTest {
         ctx.setTask(null);
         ctx.setFileManifest(new ArrayList<>());
         ctx.setBriefCtx(null);
+        ctx.setProjectHistory(null);
 
-        // Fresh workspace
+        // Fresh workspace with pre-scaffolded structure so ProjectPlanningNode
+        // skips CLI scaffold (Spring Initializr + Vite) during tests
         deleteRecursive(WORKSPACE);
-        Files.createDirectories(WORKSPACE);
+        Files.createDirectories(WORKSPACE.resolve("backend/src/main/java/com/shreecafe/controller"));
+        Files.createDirectories(WORKSPACE.resolve("backend/src/main/java/com/shreecafe/model"));
+        Files.createDirectories(WORKSPACE.resolve("backend/src/main/java/com/shreecafe/service"));
+        Files.createDirectories(WORKSPACE.resolve("backend/src/main/java/com/shreecafe/repository"));
+        Files.createDirectories(WORKSPACE.resolve("backend/src/main/resources/static"));
+        Files.createDirectories(WORKSPACE.resolve("frontend/src/api"));
+        Files.createDirectories(WORKSPACE.resolve("frontend/src/pages"));
+        Files.createDirectories(WORKSPACE.resolve("frontend/public"));
+        Files.writeString(WORKSPACE.resolve("backend/pom.xml"), "<project/>");
 
         // Persist test rows — let Hibernate generate UUIDs to avoid merge-vs-insert conflicts
         ArchitectBrief brief = briefRepo.saveAndFlush(ArchitectBrief.builder()
@@ -143,17 +154,29 @@ class WorkerOrchestratorIntegrationTest {
         ReflectionTestUtils.setField(ctx, "businessIdStr", businessId.toString());
 
         // LLM stubs — each bean is wired to its specific node role
-        when(geminiProLlm.generateFileManifest(any())).thenReturn(List.of(
-                new FileEntry(
-                        "backend/src/main/java/com/shreecafe/controller/HomeController.java",
-                        FileType.BACKEND,
-                        "Home REST controller"),
-                new FileEntry(
-                        "frontend/src/App.tsx",
-                        FileType.FRONTEND,
-                        "Root React component")
-        ));
-        when(geminiFlashLlm.generateFileContent(any(), any(), any(), any()))
+        ArchitectureSpec spec = ArchitectureSpec.builder()
+                .generatedAt("2026-05-30T10:00:00")
+                .businessName("Shree Cafe")
+                .basePackage("com.shreecafe")
+                .projectDependencies(ProjectDependencies.builder()
+                        .springBootStarters(List.of("web", "data-jpa", "postgresql", "lombok", "validation", "actuator"))
+                        .npmPackages(List.of("@tanstack/react-query", "axios", "react-router-dom"))
+                        .build())
+                .files(List.of(
+                        FileSpec.builder()
+                                .fileName("HomeController.java")
+                                .filePath("backend/src/main/java/com/shreecafe/controller/HomeController.java")
+                                .fileType("BACKEND").layer("CONTROLLER").status("PLANNED")
+                                .description("Home REST controller").build(),
+                        FileSpec.builder()
+                                .fileName("App.tsx")
+                                .filePath("frontend/src/App.tsx")
+                                .fileType("FRONTEND").layer("PAGE").status("PLANNED")
+                                .description("Root React component").build()
+                ))
+                .build();
+        when(geminiProLlm.generateArchitectureSpec(any(), any())).thenReturn(spec);
+        when(geminiFlashLlm.generateFileContent(any(), any(), any(), any(), any(), any()))
                 .thenReturn("// generated");
 
         // GitHub stubs

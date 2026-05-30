@@ -33,6 +33,36 @@ public class GitService {
                 "git clone failed for " + repoUrl);
     }
 
+    public void fetchAll(Path repoDir) {
+        run(repoDir, List.of("git", "fetch", "origin"), "git fetch failed");
+    }
+
+    // Creates a new local branch from origin/main so existing code is present in workspace.
+    // Falls back to an empty branch if origin/main doesn't exist (edge case: empty remote).
+    public void checkoutFromMain(Path repoDir, String branch) {
+        checkoutFromRef(repoDir, branch, "origin/main");
+    }
+
+    // Creates a new local branch from an arbitrary start point (e.g. origin/prev-attempt-branch).
+    // Falls back to origin/main, then to an empty orphan branch, so this never hard-fails.
+    public void checkoutFromRef(Path repoDir, String branch, String startPoint) {
+        try {
+            run(repoDir, List.of("git", "checkout", "-b", branch, startPoint),
+                    "git checkout from " + startPoint + " failed for branch " + branch);
+        } catch (WorkerException e) {
+            log.warn("[GitService] '{}' not found — falling back to origin/main for branch '{}'",
+                    startPoint, branch);
+            try {
+                run(repoDir, List.of("git", "checkout", "-b", branch, "origin/main"),
+                        "git checkout from origin/main fallback failed");
+            } catch (WorkerException e2) {
+                log.warn("[GitService] origin/main also not available — creating empty branch '{}'", branch);
+                run(repoDir, List.of("git", "checkout", "-b", branch),
+                        "git checkout empty branch failed for " + branch);
+            }
+        }
+    }
+
     public void checkout(Path repoDir, String branch, boolean create) {
         List<String> cmd = create
                 ? List.of("git", "checkout", "-b", branch)

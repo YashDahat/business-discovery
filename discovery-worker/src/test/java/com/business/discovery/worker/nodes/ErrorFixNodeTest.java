@@ -56,7 +56,7 @@ class ErrorFixNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(taskId);
         when(webSearch.search(any(WebSearchRequest.class))).thenReturn(sr);
-        when(llm.fixFileContent(anyString(), anyString(), anyString(), anyString()))
+        when(llm.fixFileContent(anyString(), anyString(), anyString(), anyString(), any()))
                 .thenReturn("public class MenuService { @Autowired MenuRepository repo; }");
         when(fileRepo.findByTaskIdAndFilePath(eq(taskId), anyString())).thenReturn(Optional.empty());
 
@@ -79,7 +79,7 @@ class ErrorFixNodeTest {
 
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(webSearch.search(any(WebSearchRequest.class))).thenReturn(sr);
-        when(llm.fixFileContent(anyString(), anyString(), anyString(), anyString())).thenReturn("");
+        when(llm.fixFileContent(anyString(), anyString(), anyString(), anyString(), any())).thenReturn("");
 
         boolean result = node.fix(errorOutput, FileType.BACKEND, ctx);
 
@@ -130,7 +130,7 @@ class ErrorFixNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(taskId);
         when(webSearch.search(any(WebSearchRequest.class))).thenReturn(sr);
-        when(llm.fixFileContent(anyString(), anyString(), anyString(), anyString())).thenReturn("fixed content");
+        when(llm.fixFileContent(anyString(), anyString(), anyString(), anyString(), any())).thenReturn("fixed content");
         when(fileRepo.findByTaskIdAndFilePath(taskId, "backend/src/main/java/com/test/controller/OrderController.java"))
                 .thenReturn(Optional.of(dbRow));
 

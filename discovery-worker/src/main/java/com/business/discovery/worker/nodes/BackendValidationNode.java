@@ -12,7 +12,7 @@ import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 @Component
-@Order(9)
+@Order(11)
 @Slf4j
 @RequiredArgsConstructor
 public class BackendValidationNode implements WorkerNode {

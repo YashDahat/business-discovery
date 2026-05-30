@@ -9,15 +9,24 @@ RUN mvn dependency:go-offline -q --no-transfer-progress
 COPY discovery-worker/src ./src
 RUN mvn package -q -DskipTests --no-transfer-progress
 
-# Stage 2 — Minimal runtime: JRE 17 + git + node/npm + maven
-# maven is required at runtime: BackendValidationNode runs `mvn compile` on the generated project
-# nodejs/npm are required at runtime: FrontendValidationNode runs `npm install && npm run build`
-FROM eclipse-temurin:17-jre-alpine
-RUN apk add --no-cache git nodejs npm bash
+# Stage 2 — Runtime: JDK 17 (javac required for mvn compile) + git + node/npm + maven
+# jammy (Ubuntu) used instead of alpine — eclipse-temurin alpine has no ARM64 variant
+# JDK not JRE: BackendValidationNode runs `mvn compile` on the generated project which needs javac
+# nodejs/npm: FrontendValidationNode runs `npm install && npm run build`
+FROM eclipse-temurin:17-jdk-jammy
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git curl bash \
+    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/share/maven /usr/share/maven
 ENV MAVEN_HOME=/usr/share/maven
 ENV PATH="${MAVEN_HOME}/bin:${PATH}"
+
+# Git identity required for git commit — no interactive config inside container
+RUN git config --global user.email "worker@discovery.ai" \
+ && git config --global user.name "Discovery Worker"
 
 WORKDIR /app
 COPY --from=builder /build/target/discovery-worker-*.jar app.jar

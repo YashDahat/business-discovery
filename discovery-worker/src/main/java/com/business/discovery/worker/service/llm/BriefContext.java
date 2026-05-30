@@ -22,6 +22,7 @@ public record BriefContext(
         String competitorInsights,
         String industryInsights,
         String architecturalNotes,
-        String requestedChanges
+        String requestedChanges,
+        String projectHistory   // null on first run; docs/PROJECT_HISTORY.md content on retries/changes
 ) {
 }

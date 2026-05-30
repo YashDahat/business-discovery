@@ -18,7 +18,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 @Component
-@Order(8)
+@Order(10)
 @Slf4j
 public class DocumentationGeneratorNode implements WorkerNode {
 
@@ -100,24 +100,16 @@ public class DocumentationGeneratorNode implements WorkerNode {
         ArchitectBrief brief = ctx.getBrief();
         BusinessEntity business = ctx.getBusiness();
 
-        List<String> generatedPaths = ctx.getFileManifest().stream()
-                .map(FileEntry::path)
-                .toList();
-
         String featureList = brief.getMustHaveFeatures() != null && !brief.getMustHaveFeatures().isEmpty()
                 ? brief.getMustHaveFeatures().stream().map(f -> "- " + f).collect(Collectors.joining("\n"))
                 : "- Standard features";
-
-        String fileList = generatedPaths.stream()
-                .map(p -> "- " + p)
-                .collect(Collectors.joining("\n"));
 
         String changesSection = (brief.getRequestedChanges() != null && !brief.getRequestedChanges().isBlank())
                 ? "\n**Requested Changes Applied:**\n" + brief.getRequestedChanges() + "\n"
                 : "";
 
-        String section = """
-                ## Attempt %d — %s
+        String completedEntry = """
+                ## Attempt %d — %s [COMPLETED]
 
                 **Business:** %s
                 **Category:** %s
@@ -126,9 +118,6 @@ public class DocumentationGeneratorNode implements WorkerNode {
                 **Must-Have Features:**
                 %s
                 %s
-                **Generated Files (%d):**
-                %s
-
                 ---
                 """.formatted(
                 ctx.getAttemptNumber(),
@@ -137,21 +126,26 @@ public class DocumentationGeneratorNode implements WorkerNode {
                 nullSafe(brief.getBusinessCategory(), nullSafe(business.getCategory(), "General")),
                 brief.getWebsiteType() != null ? brief.getWebsiteType().name() : "INFORMATIONAL",
                 featureList,
-                changesSection,
-                generatedPaths.size(),
-                fileList);
+                changesSection);
 
         if (Files.exists(historyPath)) {
+            // Replace the [IN PROGRESS] stub for this attempt with the [COMPLETED] entry
             String existing = Files.readString(historyPath);
-            Files.writeString(historyPath, existing + "\n" + section);
+            String inProgressMarker = "## Attempt " + ctx.getAttemptNumber() + " — " + LocalDate.now() + " [IN PROGRESS]";
+            if (existing.contains(inProgressMarker)) {
+                // Remove everything from the IN_PROGRESS stub to the next "---" separator, then append COMPLETED
+                int stubStart = existing.indexOf(inProgressMarker);
+                int stubEnd = existing.indexOf("---", stubStart);
+                String beforeStub = stubEnd >= 0
+                        ? existing.substring(0, stubStart)
+                        : existing.substring(0, stubStart);
+                Files.writeString(historyPath, beforeStub + completedEntry);
+            } else {
+                Files.writeString(historyPath, existing + "\n" + completedEntry);
+            }
         } else {
-            String header = """
-                    # Project History
-
-                    This file tracks each generation attempt for this project.
-
-                    """;
-            Files.writeString(historyPath, header + section);
+            String header = "# Project History\n\nThis file tracks each generation attempt.\n\n";
+            Files.writeString(historyPath, header + completedEntry);
         }
     }
 

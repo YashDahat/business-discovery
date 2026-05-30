@@ -6,6 +6,7 @@ import com.business.discovery.worker.context.WorkerContext;
 import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.model.GeneratedFile;
 import com.business.discovery.worker.repository.GeneratedFileRepository;
+import com.business.discovery.worker.service.llm.CodebaseContextBuilder;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import dev.langchain4j.web.search.WebSearchEngine;
 import dev.langchain4j.web.search.WebSearchRequest;
@@ -79,7 +80,8 @@ public class ErrorFixNode {
         try {
             String currentContent = Files.readString(absPath);
             String searchResult = search(buildSearchQuery(errorOutput));
-            String fixedContent = llm.fixFileContent(relPath, currentContent, errorOutput, searchResult);
+            var codebaseContext = CodebaseContextBuilder.build(ctx.getWorkspaceDir(), relPath);
+            String fixedContent = llm.fixFileContent(relPath, currentContent, errorOutput, searchResult, codebaseContext);
 
             if (fixedContent == null || fixedContent.isBlank()) {
                 log.warn("[ErrorFixNode] LLM returned empty fix for {}", relPath);

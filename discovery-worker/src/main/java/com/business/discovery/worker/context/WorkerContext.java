@@ -49,7 +49,7 @@ public class WorkerContext {
 
     @Setter
     @Value("${worker.github.repo-url:}")
-    private String githubRepoUrl;      // may be updated by GitHubRepoNode
+    private String githubRepoUrl;      // may be updated by GitWorkspaceNode
 
     @Value("${worker.github.branch:}")
     private String githubBranch;
@@ -83,6 +83,10 @@ public class WorkerContext {
 
     @Setter
     private String githubPrUrl; // set by PullRequestNode
+
+    // Populated by GitWorkspaceNode — null on first run
+    @Setter
+    private String projectHistory;
 
     // ── Convenience accessors ─────────────────────────────────────────────
 

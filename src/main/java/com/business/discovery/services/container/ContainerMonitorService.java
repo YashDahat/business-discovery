@@ -94,8 +94,15 @@ public class ContainerMonitorService {
             return;
         }
 
-        // Check if container is still running
-        boolean running = dockerContainerService.isContainerRunning(containerId);
+        // Check if container is still running — network errors skip this cycle
+        boolean running;
+        try {
+            running = dockerContainerService.isContainerRunning(containerId);
+        } catch (Exception e) {
+            log.warn("Monitor: Docker API unreachable for container {} — skipping cycle: {}",
+                    containerId.substring(0, 12), e.getMessage());
+            return;
+        }
 
         if (running) {
             log.debug("Monitor: container {} still running for task {}",
@@ -235,7 +242,16 @@ public class ContainerMonitorService {
                 || lowerLogs.contains("timeout")
                 || lowerLogs.contains("connection refused")
                 || lowerLogs.contains("connection reset")
-                || lowerLogs.contains("no space left")) {
+                || lowerLogs.contains("no space left")
+                || lowerLogs.contains("429")
+                || lowerLogs.contains("quota")
+                || lowerLogs.contains("resource exhausted")
+                || lowerLogs.contains("rate limit")) {
+            return ContainerFailureType.INFRA;
+        }
+
+        // SIGTERM (Docker stop / OOM killer / credits exhausted mid-run)
+        if (exitCode != null && exitCode == 143) {
             return ContainerFailureType.INFRA;
         }
 

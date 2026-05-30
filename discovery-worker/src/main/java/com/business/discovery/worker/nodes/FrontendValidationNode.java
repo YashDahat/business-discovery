@@ -14,7 +14,7 @@ import org.springframework.stereotype.Component;
 import java.nio.file.Path;
 
 @Component
-@Order(10)
+@Order(12)
 @Slf4j
 @RequiredArgsConstructor
 public class FrontendValidationNode implements WorkerNode {

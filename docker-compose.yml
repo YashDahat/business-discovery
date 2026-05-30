@@ -64,5 +64,3 @@ networks:
   shared-network:
     name: shared-network
     driver: bridge
-  discovery-network:
-    external: true

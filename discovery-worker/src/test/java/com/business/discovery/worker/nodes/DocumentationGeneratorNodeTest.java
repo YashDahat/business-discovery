@@ -1,10 +1,8 @@
 package com.business.discovery.worker.nodes;
 
-import com.business.discovery.worker.constants.FileType;
 import com.business.discovery.worker.context.WorkerContext;
 import com.business.discovery.worker.model.ArchitectBrief;
 import com.business.discovery.worker.model.BusinessEntity;
-import com.business.discovery.worker.service.llm.FileEntry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -12,6 +10,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 
@@ -29,7 +28,7 @@ class DocumentationGeneratorNodeTest {
 
     @Test
     void readme_containsBusinessNameAndFeatures() throws Exception {
-        WorkerContext ctx = buildContext("Shree Cafe", 1, false);
+        WorkerContext ctx = buildContext("Shree Cafe", 1);
 
         node.execute(ctx);
 
@@ -42,13 +41,14 @@ class DocumentationGeneratorNodeTest {
     }
 
     @Test
-    void projectHistory_hasAttempt1Section() throws Exception {
-        WorkerContext ctx = buildContext("Pizza Hub", 1, false);
+    void projectHistory_hasAttempt1CompletedSection() throws Exception {
+        WorkerContext ctx = buildContext("Pizza Hub", 1);
 
         node.execute(ctx);
 
         String history = Files.readString(tempDir.resolve("docs/PROJECT_HISTORY.md"));
         assertThat(history).contains("## Attempt 1");
+        assertThat(history).contains("[COMPLETED]");
         assertThat(history).contains("Pizza Hub");
         assertThat(history).contains("INFORMATIONAL");
         assertThat(history).contains("# Project History");
@@ -56,12 +56,10 @@ class DocumentationGeneratorNodeTest {
 
     @Test
     void projectHistory_attempt2AppendsToExisting() throws Exception {
-        // First run — attempt 1
-        WorkerContext ctx1 = buildContext("Coffee Corner", 1, false);
+        WorkerContext ctx1 = buildContext("Coffee Corner", 1);
         node.execute(ctx1);
 
-        // Second run — attempt 2, existing history file already present
-        WorkerContext ctx2 = buildContext("Coffee Corner", 2, true);
+        WorkerContext ctx2 = buildContext("Coffee Corner", 2);
         node.execute(ctx2);
 
         String history = Files.readString(tempDir.resolve("docs/PROJECT_HISTORY.md"));
@@ -73,18 +71,32 @@ class DocumentationGeneratorNodeTest {
     }
 
     @Test
-    void generatedFilesListedInHistory() throws Exception {
-        WorkerContext ctx = buildContext("Tandoor Palace", 1, false);
+    void inProgressStub_replacedWithCompleted() throws Exception {
+        // Simulate what ProjectScaffoldNode writes before generators run
+        Path historyPath = tempDir.resolve("docs/PROJECT_HISTORY.md");
+        Files.createDirectories(historyPath.getParent());
+        Files.writeString(historyPath,
+                "# Project History\n\n" +
+                "## Attempt 1 — " + LocalDate.now() + " [IN PROGRESS]\n\n" +
+                "**Business:** Tandoor Palace\n" +
+                "**Planned Files (2):**\n" +
+                "- backend/src/main/java/com/test/model/Menu.java\n" +
+                "- frontend/src/App.tsx\n\n" +
+                "---\n");
 
+        WorkerContext ctx = buildContext("Tandoor Palace", 1);
         node.execute(ctx);
 
-        String history = Files.readString(tempDir.resolve("docs/PROJECT_HISTORY.md"));
-        assertThat(history).contains("backend/src/main/java/com/test/model/Menu.java");
-        assertThat(history).contains("frontend/src/App.tsx");
-        assertThat(history).contains("Generated Files (2)");
+        String history = Files.readString(historyPath);
+        // [IN PROGRESS] replaced with [COMPLETED]
+        assertThat(history).doesNotContain("[IN PROGRESS]");
+        assertThat(history).contains("[COMPLETED]");
+        // Header still appears only once
+        assertThat(history.indexOf("# Project History"))
+                .isEqualTo(history.lastIndexOf("# Project History"));
     }
 
-    private WorkerContext buildContext(String businessName, int attemptNumber, boolean reuseWorkspace) {
+    private WorkerContext buildContext(String businessName, int attemptNumber) {
         WorkerContext ctx = mock(WorkerContext.class);
 
         BusinessEntity business = BusinessEntity.builder()
@@ -100,14 +112,8 @@ class DocumentationGeneratorNodeTest {
                 .recommendedTechStack(Map.of("frontend", "React 19", "backend", "Spring Boot 3"))
                 .build();
 
-        List<FileEntry> manifest = List.of(
-                new FileEntry("backend/src/main/java/com/test/model/Menu.java", FileType.BACKEND, "Menu entity"),
-                new FileEntry("frontend/src/App.tsx", FileType.FRONTEND, "Root component")
-        );
-
         when(ctx.getBusiness()).thenReturn(business);
         when(ctx.getBrief()).thenReturn(brief);
-        when(ctx.getFileManifest()).thenReturn(manifest);
         when(ctx.getAttemptNumber()).thenReturn(attemptNumber);
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
 

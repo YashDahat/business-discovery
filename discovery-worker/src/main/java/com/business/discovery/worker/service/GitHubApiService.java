@@ -46,6 +46,10 @@ public class GitHubApiService {
             throw new WorkerException(FailureType.CONFIG_AUTH,
                     "GitHub auth failed creating repo — check GITHUB_TOKEN. HTTP " + status);
         }
+        if (status == 422) {
+            // Repo already exists — find and return the existing URL
+            return findExistingRepoUrl(repoName);
+        }
         if (status != 201) {
             throw new WorkerException(FailureType.INFRA,
                     "GitHub createRepo failed HTTP " + status + ": " + resp.body());
@@ -96,6 +100,19 @@ public class GitHubApiService {
     }
 
     // ── Private helpers ──────────────────────────────────────────────────
+
+    private String findExistingRepoUrl(String repoName) {
+        HttpResponse<String> resp = get("/repos/" + owner + "/" + repoName);
+        if (resp.statusCode() != 200) {
+            throw new WorkerException(FailureType.INFRA,
+                    "Repo already exists but couldn't locate it: " + repoName);
+        }
+        try {
+            return mapper.readTree(resp.body()).path("html_url").asText();
+        } catch (Exception e) {
+            throw new WorkerException(FailureType.INFRA, "Failed to parse existing repo response", e);
+        }
+    }
 
     private String findExistingPrUrl(String repoName, String branch) {
         HttpResponse<String> resp = get(

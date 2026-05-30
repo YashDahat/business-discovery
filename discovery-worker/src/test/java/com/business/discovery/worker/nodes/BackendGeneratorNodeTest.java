@@ -56,7 +56,7 @@ class BackendGeneratorNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(taskId);
         when(ctx.getAttemptNumber()).thenReturn(1);
-        when(llm.generateFileContent(anyString(), anyString(), eq(briefCtx), anyList()))
+        when(llm.generateFileContent(anyString(), anyString(), eq(briefCtx), anyList(), any(), any()))
                 .thenReturn("// generated content");
 
         node.execute(ctx);
@@ -82,7 +82,8 @@ class BackendGeneratorNodeTest {
                 new FileEntry("backend/src/main/java/com/test/model/Order.java", FileType.BACKEND, "Order entity")
         ));
         when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
-        when(llm.generateFileContent(anyString(), anyString(), any(), anyList()))
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(llm.generateFileContent(anyString(), anyString(), any(), anyList(), any(), any()))
                 .thenThrow(new WorkerException(FailureType.INFRA, "LLM timeout"));
 
         assertThatThrownBy(() -> node.execute(ctx))
@@ -98,11 +99,60 @@ class BackendGeneratorNodeTest {
         when(ctx.getFileManifest()).thenReturn(List.of(
                 new FileEntry("frontend/src/App.tsx", FileType.FRONTEND, "Root component")
         ));
+        when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
 
         node.execute(ctx);
 
         verifyNoInteractions(fileRepo);
         verifyNoInteractions(llm);
+    }
+
+    @Test
+    void retryMode_existingFile_isSkipped() throws Exception {
+        Path existingFile = tempDir.resolve("backend/src/main/java/com/test/model/Product.java");
+        Files.createDirectories(existingFile.getParent());
+        Files.writeString(existingFile, "// existing content");
+
+        when(ctx.getFileManifest()).thenReturn(List.of(
+                new FileEntry("backend/src/main/java/com/test/model/Product.java", FileType.BACKEND, "Product entity")
+        ));
+        when(ctx.getBriefCtx()).thenReturn(mockBriefContext()); // requestedChanges = null
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+
+        node.execute(ctx);
+
+        verifyNoInteractions(llm);
+        verifyNoInteractions(fileRepo);
+        assertThat(Files.readString(existingFile)).isEqualTo("// existing content");
+    }
+
+    @Test
+    void requestedChangesMode_existingFile_isRegenerated() throws Exception {
+        Path existingFile = tempDir.resolve("backend/src/main/java/com/test/model/Product.java");
+        Files.createDirectories(existingFile.getParent());
+        Files.writeString(existingFile, "// old content");
+
+        BriefContext briefCtxWithChanges = new BriefContext(
+                "Test Business", "Restaurant", "Pune", "INFORMATIONAL",
+                List.of(), List.of(), java.util.Map.of(), List.of(),
+                "modern", "blue", "professional", "", "", "",
+                "Add inventory field", null);
+
+        when(ctx.getFileManifest()).thenReturn(List.of(
+                new FileEntry("backend/src/main/java/com/test/model/Product.java", FileType.BACKEND, "Product entity")
+        ));
+        when(ctx.getBriefCtx()).thenReturn(briefCtxWithChanges);
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
+        when(ctx.getAttemptNumber()).thenReturn(2);
+        when(llm.generateFileContent(anyString(), anyString(), any(), anyList(), any(), any()))
+                .thenReturn("// updated content");
+
+        node.execute(ctx);
+
+        verify(llm).generateFileContent(anyString(), anyString(), any(), anyList(), any(), any());
+        assertThat(Files.readString(existingFile)).isEqualTo("// updated content");
     }
 
     @Test
@@ -115,7 +165,7 @@ class BackendGeneratorNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(taskId);
         when(ctx.getAttemptNumber()).thenReturn(1);
-        when(llm.generateFileContent(anyString(), anyString(), any(), anyList()))
+        when(llm.generateFileContent(anyString(), anyString(), any(), anyList(), any(), any()))
                 .thenReturn("public class MenuService {}");
 
         node.execute(ctx);
@@ -128,6 +178,6 @@ class BackendGeneratorNodeTest {
     private BriefContext mockBriefContext() {
         return new BriefContext("Test Business", "Restaurant", "Pune",
                 "INFORMATIONAL", List.of(), List.of(), java.util.Map.of(), List.of(),
-                "modern", "blue", "professional", "", "", "", null);
+                "modern", "blue", "professional", "", "", "", null, null);
     }
 }
