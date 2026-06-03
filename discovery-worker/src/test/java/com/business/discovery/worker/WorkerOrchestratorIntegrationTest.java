@@ -176,7 +176,7 @@ class WorkerOrchestratorIntegrationTest {
                 ))
                 .build();
         when(geminiProLlm.generateArchitectureSpec(any(), any())).thenReturn(spec);
-        when(geminiFlashLlm.generateFileContent(any(), any(), any(), any(), any(), any()))
+        when(geminiFlashLlm.generateFileContent(any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn("// generated");
 
         // GitHub stubs

@@ -50,6 +50,14 @@ public class ContainerQueueProcessor {
     }
 
     private void processTask(ContainerTask task) {
+        // OLD: no guard — CONFIG_AUTH tasks could slip through if manually reset to RETRYING
+        // New: skip tasks that had a config/auth failure — require human fix first
+        if (task.getFailureType() == ContainerTask.ContainerFailureType.CONFIG_AUTH) {
+            log.error("[QUEUE] Skipping task {} — CONFIG_AUTH failure requires human intervention",
+                    task.getId());
+            return;
+        }
+
         try {
             log.info("Queue processor: spawning container for task: {} (attempt {})",
                     task.getId(), task.getAttemptCount() + 1);

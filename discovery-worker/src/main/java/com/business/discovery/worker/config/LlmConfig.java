@@ -25,16 +25,34 @@ public class LlmConfig {
     @Value("${worker.llm.gemini.flash-model:gemini-2.5-flash-preview-04-17}")
     private String geminiFlashModel;
 
-    // File manifest planning — needs Gemini Pro's reasoning depth
+    // arch spec JSON can be 500+ lines for a full-platform project — needs room
+    @Value("${worker.llm.gemini.pro-max-tokens:65536}")
+    private int geminiProMaxTokens;
+
+    // single-file generation — 8192 is sufficient per file
+    @Value("${worker.llm.gemini.flash-max-tokens:8192}")
+    private int geminiFlashMaxTokens;
+
+    // Pro generates large arch spec JSON with deep reasoning — can take 3-5 min
+    @Value("${worker.llm.gemini.pro-timeout-seconds:300}")
+    private int geminiProTimeoutSeconds;
+
+    // Flash generates one file at a time — 90s is generous
+    @Value("${worker.llm.gemini.flash-timeout-seconds:90}")
+    private int geminiFlashTimeoutSeconds;
+
+    // Architecture spec planning — needs Gemini Pro's reasoning depth + high output limit
     @Bean("geminiPro")
     public LlmGeneratorService geminiPro() {
-        return new GeminiLlmGeneratorService(geminiApiKey, geminiProModel);
+        return new GeminiLlmGeneratorService(geminiApiKey, geminiProModel,
+                geminiProMaxTokens, java.time.Duration.ofSeconds(geminiProTimeoutSeconds));
     }
 
     // Backend / frontend / infra code generation — repetitive, Flash is sufficient and 10-15x cheaper
     @Bean("geminiFlash")
     public LlmGeneratorService geminiFlash() {
-        return new GeminiLlmGeneratorService(geminiApiKey, geminiFlashModel);
+        return new GeminiLlmGeneratorService(geminiApiKey, geminiFlashModel,
+                geminiFlashMaxTokens, java.time.Duration.ofSeconds(geminiFlashTimeoutSeconds));
     }
 
     // Validation error fixing — Claude Sonnet excels at spotting and correcting subtle code bugs

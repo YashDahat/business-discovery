@@ -30,6 +30,7 @@ RUN git config --global user.email "worker@discovery.ai" \
 
 WORKDIR /app
 COPY --from=builder /build/target/discovery-worker-*.jar app.jar
+COPY prompts/ /app/prompts/
 
 RUN mkdir -p /workspace
 

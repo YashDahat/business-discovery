@@ -75,6 +75,25 @@ public class GitService {
                 "git add -A failed");
     }
 
+    /**
+     * Returns true if there are staged or unstaged changes in the working tree.
+     * Uses --porcelain so the output is empty on a clean tree.
+     */
+    public boolean hasChanges(Path repoDir) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder("git", "status", "--porcelain");
+            pb.redirectErrorStream(true);
+            pb.directory(repoDir.toFile());
+            Process proc = pb.start();
+            String output = new String(proc.getInputStream().readAllBytes());
+            proc.waitFor();
+            return !output.isBlank();
+        } catch (Exception e) {
+            log.warn("[GitService] Could not check git status: {}", e.getMessage());
+            return false;
+        }
+    }
+
     public void commit(Path repoDir, String message) {
         run(repoDir, List.of("git", "commit", "-m", message),
                 "git commit failed");
@@ -88,6 +107,25 @@ public class GitService {
     public void pullRebase(Path repoDir, String branch) {
         run(repoDir, List.of("git", "pull", "--rebase", "origin", branch),
                 "git pull --rebase failed for branch " + branch);
+    }
+
+    /**
+     * Returns true if the branch already exists on origin (checked after a fetch).
+     */
+    public boolean remoteBranchExists(Path repoDir, String branch) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(
+                    "git", "ls-remote", "--heads", "origin", branch);
+            pb.redirectErrorStream(true);
+            pb.directory(repoDir.toFile());
+            Process proc = pb.start();
+            String output = new String(proc.getInputStream().readAllBytes());
+            proc.waitFor();
+            return !output.isBlank();
+        } catch (Exception e) {
+            log.warn("[GitService] Could not check remote branch '{}': {}", branch, e.getMessage());
+            return false;
+        }
     }
 
     // ── Internal ──────────────────────────────────────────────────────────
@@ -112,7 +150,8 @@ public class GitService {
             throw e;
         } catch (IOException | InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new WorkerException(FailureType.INFRA, errorMsg + ": " + e.getMessage(), e);
+            String detail = e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+            throw new WorkerException(FailureType.INFRA, errorMsg + ": " + detail, e);
         }
     }
 }

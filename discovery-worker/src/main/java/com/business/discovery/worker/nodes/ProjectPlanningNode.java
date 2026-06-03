@@ -10,6 +10,7 @@ import com.business.discovery.worker.service.llm.ArchitectureSpec;
 import com.business.discovery.worker.service.llm.BriefContext;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.ProjectDependencies;
+import com.business.discovery.worker.service.SpringInitializrClient;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import com.business.discovery.worker.util.SlugUtil;
@@ -47,9 +48,12 @@ public class ProjectPlanningNode implements WorkerNode {
             List.of("@tanstack/react-query", "react-hook-form", "zod", "axios", "react-router-dom");
 
     private final LlmGeneratorService llm;
+    private final SpringInitializrClient initializrClient;
 
-    public ProjectPlanningNode(@Qualifier("geminiPro") LlmGeneratorService llm) {
+    public ProjectPlanningNode(@Qualifier("geminiPro") LlmGeneratorService llm,
+                               SpringInitializrClient initializrClient) {
         this.llm = llm;
+        this.initializrClient = initializrClient;
     }
 
     @Override
@@ -94,9 +98,18 @@ public class ProjectPlanningNode implements WorkerNode {
 
     private void scaffoldSpringBoot(Path workspace, String slug, String businessName,
                                     List<String> starters) throws IOException {
-        String deps = String.join(",", starters);
+        // Validate dependency IDs against Initializr's real list — drops LLM hallucinations
+        List<String> validStarters = initializrClient.filterValidDependencies(starters);
+        String deps = String.join(",", validStarters);
+
+        // Use the API's current default boot version — never hardcode a version that can go EOL
+        String bootVersion = initializrClient.getDefaultBootVersion();
+        String versionParam = (bootVersion != null && !bootVersion.isBlank())
+                ? "&bootVersion=" + bootVersion : "";
+
         String url = "https://start.spring.io/starter.zip"
-                + "?type=maven-project&language=java&bootVersion=3.3.4"
+                + "?type=maven-project&language=java"
+                + versionParam
                 + "&baseDir=backend"
                 + "&groupId=com." + slug
                 + "&artifactId=" + slug + "-backend"

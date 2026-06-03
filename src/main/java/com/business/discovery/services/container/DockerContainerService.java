@@ -56,6 +56,9 @@ public class DockerContainerService {
     @Value("${worker.llm.gemini.flash-model:gemini-2.5-flash}")
     private String geminiFlashModel;
 
+    @Value("${tavily.api-key:}")
+    private String tavilyApiKey;
+
     @Value("${worker.github.owner:}")
     private String githubOwner;
 
@@ -80,6 +83,15 @@ public class DockerContainerService {
                     task.getId(), lockedTask.getStatus());
             throw new IllegalStateException(
                     "Task already claimed — status: " + lockedTask.getStatus());
+        }
+
+        // OLD: no guard on failure type — CONFIG_AUTH tasks could be manually reset and re-spawned
+        // New: block spawn if previous failure was a config/auth error — requires human fix first
+        if (lockedTask.getFailureType() == ContainerTask.ContainerFailureType.CONFIG_AUTH) {
+            log.error("[SPAWN] Refusing to spawn task {} — CONFIG_AUTH failure requires human intervention before retry",
+                    task.getId());
+            throw new IllegalStateException(
+                    "Spawn blocked — task has CONFIG_AUTH failure. Fix credentials before retrying.");
         }
 
         // Acquire pool slot — also uses a locked read, atomic within this transaction
@@ -180,6 +192,7 @@ public class DockerContainerService {
         env.add("GEMINI_PRO_MODEL=" + geminiProModel);
         env.add("GEMINI_FLASH_MODEL=" + geminiFlashModel);
         env.add("ANTHROPIC_API_KEY=" + anthropicApiKey);
+        env.add("TAVILY_API_KEY=" + tavilyApiKey);
 
         return env;
     }

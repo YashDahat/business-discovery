@@ -5,10 +5,6 @@ import com.business.discovery.worker.context.WorkerContext;
 import com.business.discovery.worker.model.GeneratedFile;
 import com.business.discovery.worker.repository.GeneratedFileRepository;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
-import dev.langchain4j.web.search.WebSearchEngine;
-import dev.langchain4j.web.search.WebSearchOrganicResult;
-import dev.langchain4j.web.search.WebSearchRequest;
-import dev.langchain4j.web.search.WebSearchResults;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -16,10 +12,8 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -32,7 +26,6 @@ class ErrorFixNodeTest {
 
     @Mock private LlmGeneratorService llm;
     @Mock private GeneratedFileRepository fileRepo;
-    @Mock private WebSearchEngine webSearch;
     @Mock private WorkerContext ctx;
 
     @InjectMocks
@@ -50,13 +43,9 @@ class ErrorFixNodeTest {
 
         String errorOutput = "[ERROR] " + backendFile + ":[15,32] error: cannot find symbol\n  symbol: class MenuRepository";
 
-        // Build mock BEFORE any when() chain to avoid UnfinishedStubbing
-        WebSearchResults sr = buildSearchResults("Use @Autowired to inject the repository");
-
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(taskId);
-        when(webSearch.search(any(WebSearchRequest.class))).thenReturn(sr);
-        when(llm.fixFileContent(anyString(), anyString(), anyString(), anyString(), any()))
+        when(llm.fixFileContent(anyString(), anyString(), anyString(), any()))
                 .thenReturn("public class MenuService { @Autowired MenuRepository repo; }");
         when(fileRepo.findByTaskIdAndFilePath(eq(taskId), anyString())).thenReturn(Optional.empty());
 
@@ -75,11 +64,8 @@ class ErrorFixNodeTest {
 
         String errorOutput = "[ERROR] " + backendFile + ":[5,1] error: class expected";
 
-        WebSearchResults sr = buildSearchResults("some answer");
-
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
-        when(webSearch.search(any(WebSearchRequest.class))).thenReturn(sr);
-        when(llm.fixFileContent(anyString(), anyString(), anyString(), anyString(), any())).thenReturn("");
+        when(llm.fixFileContent(anyString(), anyString(), anyString(), any())).thenReturn("");
 
         boolean result = node.fix(errorOutput, FileType.BACKEND, ctx);
 
@@ -89,24 +75,22 @@ class ErrorFixNodeTest {
 
     @Test
     void cannotParseFilePath_returnsFalse() {
-        // No file path in error → returns false immediately, never calls ctx.getWorkspaceDir()
         boolean result = node.fix("some unrecognised error output", FileType.BACKEND, ctx);
 
         assertThat(result).isFalse();
-        verifyNoInteractions(llm, webSearch, ctx);
+        verifyNoInteractions(llm, ctx);
     }
 
     @Test
     void fileNotFound_returnsFalse() {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
 
-        // Error references a file that doesn't exist on disk
         String errorOutput = "[ERROR] " + tempDir + "/backend/src/main/java/com/test/Missing.java:[1,1] error: class expected";
 
         boolean result = node.fix(errorOutput, FileType.BACKEND, ctx);
 
         assertThat(result).isFalse();
-        verifyNoInteractions(llm, webSearch);
+        verifyNoInteractions(llm);
     }
 
     @Test
@@ -125,12 +109,9 @@ class ErrorFixNodeTest {
                 .status(GeneratedFile.FileStatus.GENERATED)
                 .build();
 
-        WebSearchResults sr = buildSearchResults("fix hint");
-
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(taskId);
-        when(webSearch.search(any(WebSearchRequest.class))).thenReturn(sr);
-        when(llm.fixFileContent(anyString(), anyString(), anyString(), anyString(), any())).thenReturn("fixed content");
+        when(llm.fixFileContent(anyString(), anyString(), anyString(), any())).thenReturn("fixed content");
         when(fileRepo.findByTaskIdAndFilePath(taskId, "backend/src/main/java/com/test/controller/OrderController.java"))
                 .thenReturn(Optional.of(dbRow));
 
@@ -139,15 +120,25 @@ class ErrorFixNodeTest {
         verify(fileRepo).save(argThat(f -> f.getStatus() == GeneratedFile.FileStatus.FAILED));
     }
 
-    // ── Helper ──────────────────────────────────────────────────────────────
+    @Test
+    void longErrorOutput_isTrimmedToFirst30Lines() throws Exception {
+        Path file = tempDir.resolve("backend/src/main/java/com/test/model/Order.java");
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "broken");
 
-    private WebSearchResults buildSearchResults(String snippet) {
-        WebSearchOrganicResult organic = mock(WebSearchOrganicResult.class);
-        when(organic.url()).thenReturn(URI.create("https://stackoverflow.com/q/1"));
-        when(organic.snippet()).thenReturn(snippet);
+        StringBuilder sb = new StringBuilder();
+        sb.append("[ERROR] ").append(file).append(":[1,1] error: root cause\n");
+        for (int i = 2; i <= 60; i++) sb.append("[ERROR] cascading error line ").append(i).append("\n");
+        String longError = sb.toString();
 
-        WebSearchResults results = mock(WebSearchResults.class);
-        when(results.results()).thenReturn(List.of(organic));
-        return results;
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
+        when(llm.fixFileContent(anyString(), anyString(), anyString(), any())).thenReturn("fixed");
+        when(fileRepo.findByTaskIdAndFilePath(any(), anyString())).thenReturn(Optional.empty());
+
+        node.fix(longError, FileType.BACKEND, ctx);
+
+        verify(llm).fixFileContent(anyString(), anyString(),
+                argThat(err -> err.lines().count() <= 30), any());
     }
 }

@@ -6,6 +6,9 @@ import com.business.discovery.worker.context.WorkerContext;
 import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.service.BuildToolService;
 import com.business.discovery.worker.service.BuildToolService.BuildResult;
+import com.business.discovery.worker.service.llm.ArchitectureSpec;
+import com.business.discovery.worker.service.llm.FileSpec;
+import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -14,6 +17,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.file.Path;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -74,6 +78,24 @@ class BackendValidationNodeTest {
 
         verify(buildTool, times(3)).runMvnCompile(any());
         verify(errorFix, times(2)).fix(anyString(), eq(FileType.BACKEND), eq(ctx));
+    }
+
+    @Test
+    void compilePasses_marksBackendFilesAsValidated() throws Exception {
+        FileSpec backendFile = FileSpec.builder()
+                .filePath("backend/src/main/java/Model.java")
+                .fileType("BACKEND")
+                .status("GENERATED")
+                .build();
+        ArchitectureJsonUtil.write(tempDir, ArchitectureSpec.builder().files(List.of(backendFile)).build());
+
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(buildTool.runMvnCompile(tempDir.resolve("backend"))).thenReturn(new BuildResult(0, ""));
+
+        node.execute(ctx);
+
+        ArchitectureSpec updated = ArchitectureJsonUtil.read(tempDir);
+        assertThat(updated.getFiles().get(0).getStatus()).isEqualTo("VALIDATED");
     }
 
     @Test

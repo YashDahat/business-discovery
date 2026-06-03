@@ -1,0 +1,22 @@
+== TARGET FILE ==
+File: {{filePath}}
+Layer: {{layer}}
+Description: {{description}}
+
+== ARCHITECTURE BRIEF ==
+Business: {{businessName}} ({{category}}, {{location}})
+Website type: {{websiteType}}
+Must-have features:
+{{mustHaveFeatures}}
+Tech stack: {{techStack}}
+Design: {{designDirection}} | Colors: {{colorScheme}} | Tone: {{tone}}
+Architectural notes: {{architecturalNotes}}
+{{changesSection}}
+== ARCHITECTURE SPEC (UPDATED — files marked GENERATED already exist on disk) ==
+{{architectureSpec}}
+{{historySection}}
+== DEPENDENCY FILES (files this file imports from — already generated and on disk) ==
+{{dependencySection}}
+{{existingSection}}
+== ALL PROJECT FILES (reference only — do not re-generate any of these) ==
+{{allFilePaths}}

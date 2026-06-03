@@ -6,14 +6,8 @@ import com.business.discovery.worker.context.WorkerContext;
 import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.model.GeneratedFile;
 import com.business.discovery.worker.repository.GeneratedFileRepository;
-import com.business.discovery.worker.service.llm.CodebaseContextBuilder;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
-import dev.langchain4j.web.search.WebSearchEngine;
-import dev.langchain4j.web.search.WebSearchRequest;
-import dev.langchain4j.web.search.WebSearchResults;
-import dev.langchain4j.web.search.WebSearchOrganicResult;
-
-import java.util.stream.Collectors;
+import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
@@ -21,20 +15,29 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * Helper component — called by BackendValidationNode and FrontendValidationNode on failure.
  * Not a WorkerNode; not executed by the orchestrator directly.
  *
- * Flow: parse failing file → Tavily search → LLM fix → overwrite file → mark FAILED in DB.
+ * Flow: parse failing file → targeted context → LLM fix → overwrite file → mark FAILED in DB.
  * Returns true if a fix was applied; false if parsing failed or LLM returned nothing.
  */
 @Component
 @Slf4j
 public class ErrorFixNode {
+
+    // Targeted context cap — much tighter than the general 200K file-generation budget.
+    // Error fixing only needs ARCHITECTURE.json + a few related files, not the whole codebase.
+    private static final int ERROR_CONTEXT_MAX_CHARS = 30_000;
 
     private static final Pattern MAVEN_FILE = Pattern.compile(
             "\\[ERROR\\] (.+\\.java):\\[\\d+,\\d+\\]");
@@ -45,14 +48,11 @@ public class ErrorFixNode {
 
     private final LlmGeneratorService llm;
     private final GeneratedFileRepository fileRepo;
-    private final WebSearchEngine webSearch;
 
     public ErrorFixNode(@Qualifier("claudeSonnet") LlmGeneratorService llm,
-                        GeneratedFileRepository fileRepo,
-                        WebSearchEngine webSearch) {
+                        GeneratedFileRepository fileRepo) {
         this.llm = llm;
         this.fileRepo = fileRepo;
-        this.webSearch = webSearch;
     }
 
     public boolean fix(String errorOutput, FileType fileType, WorkerContext ctx) {
@@ -68,7 +68,6 @@ public class ErrorFixNode {
         try {
             relPath = workspace.relativize(absPath).toString();
         } catch (IllegalArgumentException e) {
-            // path wasn't under workspace — use the raw parse result stripped of workspace prefix
             relPath = maybeAbs.get().replace(workspace.toString() + "/", "");
         }
 
@@ -79,9 +78,13 @@ public class ErrorFixNode {
 
         try {
             String currentContent = Files.readString(absPath);
-            String searchResult = search(buildSearchQuery(errorOutput));
-            var codebaseContext = CodebaseContextBuilder.build(ctx.getWorkspaceDir(), relPath);
-            String fixedContent = llm.fixFileContent(relPath, currentContent, errorOutput, searchResult, codebaseContext);
+            String trimmedError = trimError(errorOutput);
+            Map<String, String> context = buildTargetedContext(workspace, relPath);
+
+            log.info("[ErrorFixNode] Fix context: {} files ({} chars)",
+                    context.size(), context.values().stream().mapToInt(String::length).sum());
+
+            String fixedContent = llm.fixFileContent(relPath, currentContent, trimmedError, context);
 
             if (fixedContent == null || fixedContent.isBlank()) {
                 log.warn("[ErrorFixNode] LLM returned empty fix for {}", relPath);
@@ -102,7 +105,86 @@ public class ErrorFixNode {
         }
     }
 
-    // ── Private helpers ──────────────────────────────────────────────────
+    // ── Context builder ──────────────────────────────────────────────────
+
+    // Builds a targeted context: ARCHITECTURE.json + files the failing file depends on.
+    // Falls back to same-directory files if ARCHITECTURE.json has no dependsOn for this file.
+    // Capped at ERROR_CONTEXT_MAX_CHARS to keep the fix prompt lean.
+    private Map<String, String> buildTargetedContext(Path workspace, String failingFilePath) {
+        Map<String, String> ctx = new LinkedHashMap<>();
+        int budget = ERROR_CONTEXT_MAX_CHARS;
+
+        Path archPath = workspace.resolve(ArchitectureJsonUtil.ARCH_PATH);
+        if (Files.exists(archPath)) {
+            try {
+                String arch = Files.readString(archPath);
+                ctx.put(ArchitectureJsonUtil.ARCH_PATH, arch);
+                budget -= arch.length();
+            } catch (IOException ignored) {}
+        }
+
+        Set<String> deps = getDepsFromSpec(workspace, failingFilePath);
+        if (deps.isEmpty()) {
+            deps = getSameDirectoryFiles(workspace, failingFilePath);
+        }
+
+        for (String dep : deps) {
+            if (budget <= 0) break;
+            Path file = workspace.resolve(dep);
+            if (!Files.exists(file)) continue;
+            try {
+                String content = Files.readString(file);
+                if (content.length() > budget) {
+                    content = content.substring(0, budget) + "\n// [truncated]";
+                }
+                ctx.put(dep, content);
+                budget -= content.length();
+            } catch (IOException ignored) {}
+        }
+
+        return ctx;
+    }
+
+    private Set<String> getDepsFromSpec(Path workspace, String failingFilePath) {
+        if (!ArchitectureJsonUtil.exists(workspace)) return Set.of();
+        try {
+            return ArchitectureJsonUtil.findByPath(workspace, failingFilePath)
+                    .map(spec -> {
+                        Set<String> deps = new LinkedHashSet<>();
+                        if (spec.getDependsOn() != null) deps.addAll(spec.getDependsOn());
+                        if (spec.getImportsFrom() != null) deps.addAll(spec.getImportsFrom());
+                        return deps;
+                    })
+                    .orElse(Set.of());
+        } catch (IOException e) {
+            return Set.of();
+        }
+    }
+
+    private Set<String> getSameDirectoryFiles(Path workspace, String failingFilePath) {
+        Path dir = workspace.resolve(failingFilePath).getParent();
+        if (dir == null || !Files.exists(dir)) return Set.of();
+        try {
+            return Files.list(dir)
+                    .filter(p -> !workspace.relativize(p).toString().equals(failingFilePath))
+                    .map(p -> workspace.relativize(p).toString())
+                    .limit(5)
+                    .collect(Collectors.toCollection(LinkedHashSet::new));
+        } catch (IOException e) {
+            return Set.of();
+        }
+    }
+
+    // ── Error trimmer ────────────────────────────────────────────────────
+
+    // Maven and npm can dump 50+ cascading errors. Fixing the first error usually fixes the rest.
+    // Take the first 30 lines — enough to capture the root cause without noise.
+    private String trimError(String errorOutput) {
+        String trimmed = errorOutput.lines().limit(30).collect(Collectors.joining("\n"));
+        return trimmed.length() > 2000 ? trimmed.substring(0, 2000) : trimmed;
+    }
+
+    // ── Other helpers ────────────────────────────────────────────────────
 
     private Optional<String> parseAbsolutePath(String errorOutput, FileType fileType) {
         if (fileType == FileType.BACKEND) {
@@ -115,28 +197,6 @@ public class ErrorFixNode {
             if (m.find()) return Optional.of(m.group(1));
         }
         return Optional.empty();
-    }
-
-    private String buildSearchQuery(String errorOutput) {
-        // Extract the first meaningful error line (skip [INFO]/[WARNING] Maven noise)
-        return errorOutput.lines()
-                .filter(l -> l.contains("error") || l.contains("ERROR") || l.contains("TS"))
-                .findFirst()
-                .map(l -> l.replaceAll("\\[ERROR\\]\\s*", "").trim())
-                .orElse(errorOutput.substring(0, Math.min(200, errorOutput.length())));
-    }
-
-    private String search(String query) {
-        try {
-            WebSearchResults results = webSearch.search(
-                    WebSearchRequest.builder().searchTerms(query).build());
-            return results.results().stream()
-                    .map(r -> "Source: %s\n%s".formatted(r.url(), r.snippet()))
-                    .collect(Collectors.joining("\n\n---\n\n"));
-        } catch (Exception e) {
-            log.warn("[ErrorFixNode] Tavily search failed: {}", e.getMessage());
-            return "Search unavailable.";
-        }
     }
 
     private void markFailed(String relPath, String errorOutput, WorkerContext ctx) {

@@ -64,17 +64,16 @@ public class GitWorkspaceNode implements WorkerNode {
         gitService.remoteAdd(workspace, "origin", authedUrl);
         gitService.fetchAll(workspace);
 
-        int attempt = ctx.getAttemptNumber();
-        if (attempt > 1) {
-            String prevBranch = derivePreviousBranch(branch, attempt);
-            log.info("[GitWorkspaceNode] Retry attempt {} — branching '{}' from 'origin/{}'",
-                    attempt, branch, prevBranch);
-            gitService.checkoutFromRef(workspace, branch, "origin/" + prevBranch);
+        if (gitService.remoteBranchExists(workspace, branch)) {
+            log.info("[GitWorkspaceNode] Remote branch '{}' exists — checking out and pulling latest", branch);
+            gitService.checkoutFromRef(workspace, branch, "origin/" + branch);
+            gitService.pullRebase(workspace, branch);
         } else {
+            log.info("[GitWorkspaceNode] Remote branch '{}' not found — creating new branch from main", branch);
             gitService.checkoutFromMain(workspace, branch);
         }
 
-        log.info("[GitWorkspaceNode] Checked out branch '{}' (attempt {})", branch, attempt);
+        log.info("[GitWorkspaceNode] Checked out branch '{}' (attempt {})", branch, ctx.getAttemptNumber());
     }
 
     // ── Step 3: Load project history from cloned workspace ────────────────
@@ -107,11 +106,5 @@ public class GitWorkspaceNode implements WorkerNode {
                 .replaceAll("^-+|-+$", "");
     }
 
-    static String derivePreviousBranch(String branch, int attempt) {
-        String suffix = "-attempt-" + attempt;
-        if (branch.endsWith(suffix)) {
-            return branch.substring(0, branch.length() - suffix.length()) + "-attempt-" + (attempt - 1);
-        }
-        return "main";
-    }
+
 }

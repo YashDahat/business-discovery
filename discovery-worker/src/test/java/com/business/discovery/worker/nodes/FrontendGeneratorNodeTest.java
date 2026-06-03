@@ -6,9 +6,12 @@ import com.business.discovery.worker.context.WorkerContext;
 import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.model.GeneratedFile;
 import com.business.discovery.worker.repository.GeneratedFileRepository;
+import com.business.discovery.worker.service.llm.ArchitectureSpec;
 import com.business.discovery.worker.service.llm.BriefContext;
 import com.business.discovery.worker.service.llm.FileEntry;
+import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
+import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
@@ -57,7 +60,7 @@ class FrontendGeneratorNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(taskId);
         when(ctx.getAttemptNumber()).thenReturn(1);
-        when(llm.generateFileContent(anyString(), anyString(), eq(briefCtx), anyList(), any(), any()))
+        when(llm.generateFileContent(anyString(), anyString(), anyString(), eq(briefCtx), anyList(), any(), anyString(), any()))
                 .thenReturn("export default function Component() { return null; }");
 
         node.execute(ctx);
@@ -90,15 +93,17 @@ class FrontendGeneratorNodeTest {
     }
 
     @Test
-    void retryMode_existingFile_isSkipped() throws Exception {
-        Path existingFile = tempDir.resolve("frontend/src/App.tsx");
+    void retryMode_validatedFile_isSkipped() throws Exception {
+        String filePath = "frontend/src/App.tsx";
+        Path existingFile = tempDir.resolve(filePath);
         Files.createDirectories(existingFile.getParent());
         Files.writeString(existingFile, "// existing");
+        writeArchitectureJson(tempDir, filePath, "FRONTEND", "VALIDATED");
 
         when(ctx.getFileManifest()).thenReturn(List.of(
-                new FileEntry("frontend/src/App.tsx", FileType.FRONTEND, "Root component")
+                new FileEntry(filePath, FileType.FRONTEND, "Root component")
         ));
-        when(ctx.getBriefCtx()).thenReturn(mockBriefContext()); // requestedChanges = null
+        when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
 
         node.execute(ctx);
@@ -106,6 +111,31 @@ class FrontendGeneratorNodeTest {
         verifyNoInteractions(llm);
         verifyNoInteractions(fileRepo);
         assertThat(Files.readString(existingFile)).isEqualTo("// existing");
+    }
+
+    @Test
+    void retryMode_existingFileNotValidated_passedToLlmForReview() throws Exception {
+        String filePath = "frontend/src/App.tsx";
+        Path existingFile = tempDir.resolve(filePath);
+        Files.createDirectories(existingFile.getParent());
+        Files.writeString(existingFile, "// broken tsx from last attempt");
+
+        when(ctx.getFileManifest()).thenReturn(List.of(
+                new FileEntry(filePath, FileType.FRONTEND, "Root component")
+        ));
+        when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
+        when(ctx.getAttemptNumber()).thenReturn(2);
+        when(llm.generateFileContent(anyString(), anyString(), anyString(), any(), anyList(),
+                eq("// broken tsx from last attempt"), anyString(), any()))
+                .thenReturn("// fixed tsx");
+
+        node.execute(ctx);
+
+        verify(llm).generateFileContent(anyString(), anyString(), anyString(), any(), anyList(),
+                eq("// broken tsx from last attempt"), anyString(), any());
+        assertThat(Files.readString(existingFile)).isEqualTo("// fixed tsx");
     }
 
     @Test
@@ -127,12 +157,12 @@ class FrontendGeneratorNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(2);
-        when(llm.generateFileContent(anyString(), anyString(), any(), anyList(), any(), any()))
+        when(llm.generateFileContent(anyString(), anyString(), anyString(), any(), anyList(), any(), anyString(), any()))
                 .thenReturn("// updated");
 
         node.execute(ctx);
 
-        verify(llm).generateFileContent(anyString(), anyString(), any(), anyList(), any(), any());
+        verify(llm).generateFileContent(anyString(), anyString(), anyString(), any(), anyList(), any(), anyString(), any());
         assertThat(Files.readString(existingFile)).isEqualTo("// updated");
     }
 
@@ -143,7 +173,7 @@ class FrontendGeneratorNodeTest {
         ));
         when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
-        when(llm.generateFileContent(anyString(), anyString(), any(), anyList(), any(), any()))
+        when(llm.generateFileContent(anyString(), anyString(), anyString(), any(), anyList(), any(), anyString(), any()))
                 .thenThrow(new WorkerException(FailureType.INFRA, "LLM timeout"));
 
         assertThatThrownBy(() -> node.execute(ctx))
@@ -163,7 +193,7 @@ class FrontendGeneratorNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(1);
-        when(llm.generateFileContent(anyString(), anyString(), any(), anyList(), any(), any()))
+        when(llm.generateFileContent(anyString(), anyString(), anyString(), any(), anyList(), any(), anyString(), any()))
                 .thenReturn("export const Header = () => <header>Hello</header>;");
 
         node.execute(ctx);
@@ -176,5 +206,17 @@ class FrontendGeneratorNodeTest {
         return new BriefContext("Test Business", "Restaurant", "Pune",
                 "INFORMATIONAL", List.of(), List.of(), Map.of(), List.of(),
                 "modern", "blue", "professional", "", "", "", null, null);
+    }
+
+    private void writeArchitectureJson(Path workspace, String filePath, String fileType, String status) throws Exception {
+        FileSpec fileSpec = FileSpec.builder()
+                .filePath(filePath)
+                .fileType(fileType)
+                .status(status)
+                .build();
+        ArchitectureSpec spec = ArchitectureSpec.builder()
+                .files(List.of(fileSpec))
+                .build();
+        ArchitectureJsonUtil.write(workspace, spec);
     }
 }

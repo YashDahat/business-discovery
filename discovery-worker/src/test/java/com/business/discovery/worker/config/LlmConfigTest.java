@@ -17,6 +17,10 @@ class LlmConfigTest {
         ReflectionTestUtils.setField(config, "geminiApiKey", "test-gemini-key");
         ReflectionTestUtils.setField(config, "geminiProModel", "gemini-2.5-pro-preview-03-25");
         ReflectionTestUtils.setField(config, "geminiFlashModel", "gemini-2.5-flash-preview-04-17");
+        ReflectionTestUtils.setField(config, "geminiProMaxTokens", 65536);
+        ReflectionTestUtils.setField(config, "geminiFlashMaxTokens", 8192);
+        ReflectionTestUtils.setField(config, "geminiProTimeoutSeconds", 300);
+        ReflectionTestUtils.setField(config, "geminiFlashTimeoutSeconds", 90);
         return config;
     }
 

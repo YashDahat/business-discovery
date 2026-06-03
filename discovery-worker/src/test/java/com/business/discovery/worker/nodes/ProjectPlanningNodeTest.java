@@ -9,6 +9,7 @@ import com.business.discovery.worker.service.llm.BriefContext;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.ProjectDependencies;
+import com.business.discovery.worker.service.SpringInitializrClient;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.util.SlugUtil;
 import org.junit.jupiter.api.Test;
@@ -31,11 +32,17 @@ import static org.mockito.Mockito.when;
 class ProjectPlanningNodeTest {
 
     @Mock private LlmGeneratorService llm;
+    @Mock private SpringInitializrClient initializrClient;
     @Mock private WorkerContext ctx;
 
     @Test
     void execute_setsManifestFromArchSpec() {
-        ProjectPlanningNode node = new ProjectPlanningNode(llm);
+        org.mockito.Mockito.lenient().when(initializrClient.filterValidDependencies(any()))
+                .thenAnswer(inv -> inv.getArgument(0));
+        org.mockito.Mockito.lenient().when(initializrClient.getDefaultBootVersion())
+                .thenReturn("3.4.5");
+
+        ProjectPlanningNode node = new ProjectPlanningNode(llm, initializrClient);
 
         ArchitectBrief brief = ArchitectBrief.builder()
                 .id(UUID.randomUUID())

@@ -4,6 +4,8 @@ import com.business.discovery.worker.constants.FailureType;
 import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.service.llm.ArchitectureSpec;
 import com.business.discovery.worker.service.llm.BriefContext;
+import com.business.discovery.worker.util.PromptLoader;
+import com.business.discovery.worker.util.PromptTemplate;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
@@ -15,8 +17,7 @@ import java.util.stream.Collectors;
 
 /**
  * Abstract base for all LLM code-generation operations.
- * Subclasses implement only callLlm(); prompt engineering lives here.
- * Swap providers by changing worker.llm.provider env var.
+ * Subclasses implement only callLlm(); prompt engineering lives in prompts/.
  */
 @Slf4j
 public abstract class LlmGeneratorService {
@@ -32,17 +33,10 @@ public abstract class LlmGeneratorService {
     public ArchitectureSpec generateArchitectureSpec(BriefContext brief, String slug) {
         boolean isUpdate = brief.requestedChanges() != null && !brief.requestedChanges().isBlank();
 
-        String system = """
-                You are a senior software architect creating a machine-readable project blueprint.
-                This JSON is the authoritative spec — every subsequent code generation call receives it as context.
-                Be specific: exact field names, parameter types, endpoint paths, return types.
-                If two files must integrate (e.g. MenuService used by MenuController), their specs must be consistent.
-                Return ONLY valid JSON matching the schema exactly. No markdown fences, no explanation, no preamble.
-                """;
+        String system = PromptLoader.load("system/arch_spec.txt");
+        String user   = buildArchSpecUserPrompt(brief, slug, isUpdate);
 
-        String raw = callLlm(system, buildArchSpecPrompt(brief, slug, isUpdate));
-        String json = stripMarkdown(raw);
-
+        String json = stripMarkdown(callLlm(system, user));
         try {
             return objectMapper.readValue(json, ArchitectureSpec.class);
         } catch (Exception e) {
@@ -53,57 +47,37 @@ public abstract class LlmGeneratorService {
 
     public String generateFileContent(String filePath,
                                       String fileDescription,
+                                      String layer,
                                       BriefContext brief,
-                                      List<String> existingFilePaths,
+                                      List<String> allFilePaths,
                                       String existingContent,
-                                      Map<String, String> codebaseContext) {
+                                      String architectureSpec,
+                                      Map<String, String> dependencyFiles) {
         boolean isUpdate = existingContent != null;
 
-        String system = isUpdate ? """
-                You are a senior Java Spring Boot and React developer updating an existing file.
-                Return ONLY the updated file content — no markdown code fences, no explanation, no preamble.
-                Preserve all logic that is not affected by the requested changes.
-                All models and SQL queries belong in the backend. Frontend calls backend REST APIs only.
-                Match naming conventions, import styles, and patterns from the existing codebase.
-                """ : """
-                You are a senior Java Spring Boot and React developer generating production-quality code.
-                Return ONLY the file content — no markdown code fences, no explanation, no preamble.
-                All models and SQL queries belong in the backend. Frontend calls backend REST APIs only.
-                Match naming conventions, import styles, and patterns from the existing codebase.
-                """;
+        String system = PromptLoader.load(isUpdate
+                ? "system/file_update.txt"
+                : "system/file_generate.txt");
 
-        return stripMarkdown(callLlm(system,
-                buildFileContentPrompt(filePath, fileDescription, brief,
-                        existingFilePaths, existingContent, codebaseContext)));
+        String user = buildFileContentUserPrompt(
+                filePath, fileDescription, layer, brief,
+                allFilePaths, existingContent, architectureSpec, dependencyFiles);
+
+        return stripMarkdown(callLlm(system, user));
     }
 
     public String fixFileContent(String filePath,
                                  String currentContent,
                                  String compilerError,
-                                 String tavilySearchResult,
                                  Map<String, String> codebaseContext) {
-        String system = """
-                You are a senior Java developer fixing a compilation error.
-                Return ONLY the corrected file content — no markdown code fences, no explanation.
-                Use the existing codebase context to resolve symbol references, import paths, and dependencies.
-                """;
+        String system = PromptLoader.load("system/fix_file.txt");
 
-        String codebaseSection = formatCodebaseSection(codebaseContext, filePath);
-
-        String user = String.format("""
-                File: %s
-
-                Current content:
-                %s
-
-                Compilation / build error:
-                %s
-
-                Relevant search result:
-                %s
-                %s
-                Return the fully corrected file content.
-                """, filePath, currentContent, compilerError, tavilySearchResult, codebaseSection);
+        String user = PromptTemplate.from(PromptLoader.load("user/fix_file.txt"))
+                .with("filePath",        filePath)
+                .with("currentContent",  currentContent)
+                .with("compilerError",   compilerError)
+                .with("codebaseSection", formatFilesSection(codebaseContext, filePath))
+                .render();
 
         return stripMarkdown(callLlm(system, user));
     }
@@ -112,146 +86,91 @@ public abstract class LlmGeneratorService {
 
     protected abstract String callLlm(String systemPrompt, String userPrompt);
 
-    // ── Private prompt builders ───────────────────────────────────────────
+    // ── User prompt builders ──────────────────────────────────────────────
 
-    private String buildArchSpecPrompt(BriefContext b, String slug, boolean isUpdate) {
+    private String buildArchSpecUserPrompt(BriefContext b, String slug, boolean isUpdate) {
         String changesSection = isUpdate
                 ? "\nClient-requested changes:\n" + b.requestedChanges()
-                  + (b.projectHistory() != null ? "\n\nPrevious project state:\n" + b.projectHistory() : "")
+                  + (b.projectHistory() != null
+                        ? "\n\nPrevious project state:\n" + b.projectHistory()
+                        : "")
                 : "";
 
-        String manifestList = b.mustHaveFeatures().stream()
-                .map(f -> "- " + f).collect(Collectors.joining("\n"));
+        String mustHaveList = b.mustHaveFeatures().stream()
+                .map(f -> "- " + f)
+                .collect(Collectors.joining("\n"));
 
-        return """
-                Business: %s
-                Category: %s | Location: %s
-                Base Java package: com.%s
-                Tech stack: %s
-                Must-have features:
-                %s
-                Nice-to-have features: %s
-                Architectural notes: %s
-                SEO keywords: %s
-                Design direction: %s | Color: %s | Tone: %s
-                %s
-
-                Generate ARCHITECTURE.json following this schema exactly:
-                {
-                  "generated_at": "<ISO-8601 timestamp>",
-                  "business_name": "<business name>",
-                  "base_package": "com.%s",
-                  "project_dependencies": {
-                    "spring_boot_starters": ["web", "data-jpa", "postgresql", "lombok", "validation", "actuator", "<add security/mail/etc. if features require>"],
-                    "npm_packages": ["@tanstack/react-query", "react-hook-form", "zod", "axios", "react-router-dom", "<add extras if features require>"]
-                  },
-                  "files": [
-                    {
-                      "file_name": "<FileName.java or Component.tsx — filename only>",
-                      "file_path": "<relative path from project root>",
-                      "file_type": "<BACKEND|FRONTEND|INFRA|CONFIG>",
-                      "layer": "<MODEL|REPOSITORY|SERVICE|CONTROLLER|DTO|EXCEPTION|CONFIG|PAGE|COMPONENT|HOOK|CONTEXT|UTIL|INFRA>",
-                      "created_date": "<YYYY-MM-DD>",
-                      "updated_date": "<YYYY-MM-DD>",
-                      "status": "PLANNED",
-                      "description": "<one sentence — what this file does>",
-                      "public_functions": [
-                        { "name": "<method or component name>", "parameters": ["<Type paramName>"], "return_type": "<Type>", "description": "<what it does>" }
-                      ],
-                      "public_variables": [
-                        { "name": "<fieldName>", "type": "<Java or TS type>", "description": "<purpose + constraints e.g. not null, max 100>" }
-                      ],
-                      "api_endpoints": [
-                        { "method": "GET|POST|PUT|DELETE", "path": "/api/...", "request_body": "<JSON shape or null>", "response_body": "<type>", "description": "<...>" }
-                      ],
-                      "api_endpoints_consumed": [
-                        { "method": "GET|POST", "path": "/api/...", "description": "<...>" }
-                      ],
-                      "imports_from": ["<OtherFile.java or Component.tsx — filenames only>"],
-                      "depends_on": ["<OtherFile.java — filenames only>"]
-                    }
-                  ]
-                }
-
-                Layer-specific rules:
-                - MODEL: public_variables = ALL @Column fields with Java type + constraints; api_endpoints = null; api_endpoints_consumed = null
-                - REPOSITORY: public_functions = ALL custom query methods with exact signatures; api_endpoints = null
-                - SERVICE: public_functions = ALL public methods using Request/Response DTOs (not entities); api_endpoints = null
-                - CONTROLLER: api_endpoints = FULL endpoint list; public_functions = handler method signatures
-                - DTO: public_variables = ALL fields with Java type + Bean Validation annotations; api_endpoints = null
-                - EXCEPTION: minimal public_functions; api_endpoints = null
-                - PAGE (frontend): api_endpoints_consumed = backend endpoints this page calls; api_endpoints = null
-                - COMPONENT (frontend): public_functions = component name with props type; api_endpoints = null; api_endpoints_consumed = null
-                - HOOK (frontend): api_endpoints_consumed = backend endpoints this hook calls; public_functions = the hook signature
-
-                ALWAYS include these files regardless of business type:
-                - backend/src/main/java/com/%s/exception/GlobalExceptionHandler.java (layer: EXCEPTION)
-                - backend/src/main/java/com/%s/dto/ErrorResponse.java (layer: DTO)
-                - frontend/src/App.tsx (layer: PAGE) — root component with React Router routes
-                - frontend/src/api/client.ts (layer: UTIL) — Axios singleton with base URL from env
-
-                Do NOT include these — they are generated by CLI scaffold tools:
-                - pom.xml, mvnw, mvnw.cmd (Spring Initializr)
-                - Application.java (Spring Initializr generates this)
-                - package.json, tsconfig.json, vite.config.ts, index.html, main.tsx (Vite scaffold)
-                - Dockerfile, docker-compose.yml, application.properties, .env.example
-                """.formatted(
-                        b.businessName(), b.category(), b.location(), slug,
-                        b.techStack(), manifestList, b.niceToHaveFeatures(),
-                        b.architecturalNotes(), b.seoKeywords(),
-                        b.designDirection(), b.colorScheme(), b.tone(),
-                        changesSection,
-                        slug, slug, slug);
+        return PromptTemplate.from(PromptLoader.load("user/arch_spec.txt"))
+                .with("businessName",      b.businessName())
+                .with("category",          b.category())
+                .with("location",          b.location())
+                .with("slug",              slug)
+                .with("techStack",         b.techStack().toString())
+                .with("mustHaveFeatures",  mustHaveList)
+                .with("niceToHaveFeatures", b.niceToHaveFeatures().toString())
+                .with("architecturalNotes", b.architecturalNotes())
+                .with("seoKeywords",       b.seoKeywords().toString())
+                .with("designDirection",   b.designDirection())
+                .with("colorScheme",       b.colorScheme())
+                .with("tone",              b.tone())
+                .with("changesSection",    changesSection)
+                .render();
     }
 
-    private String buildFileContentPrompt(String filePath,
-                                          String description,
-                                          BriefContext b,
-                                          List<String> existingPaths,
-                                          String existingContent,
-                                          Map<String, String> codebaseContext) {
+    private String buildFileContentUserPrompt(String filePath,
+                                              String description,
+                                              String layer,
+                                              BriefContext b,
+                                              List<String> allFilePaths,
+                                              String existingContent,
+                                              String architectureSpec,
+                                              Map<String, String> dependencyFiles) {
         String changesSection = (b.requestedChanges() != null && !b.requestedChanges().isBlank())
                 ? "\nClient-requested changes (MUST be applied in this file where applicable):\n"
-                        + b.requestedChanges() + "\n"
+                  + b.requestedChanges() + "\n"
                 : "";
         String historySection = (b.projectHistory() != null && !b.projectHistory().isBlank())
-                ? "\nPROJECT_HISTORY:\n" + b.projectHistory() + "\n"
+                ? "\n== PROJECT HISTORY (previous attempts — avoid repeating the same mistakes) ==\n"
+                  + b.projectHistory() + "\n"
                 : "";
-        String existingSection = (existingContent != null)
-                ? "\nEXISTING FILE CONTENT (update this — preserve logic not touched by requested changes):\n"
-                        + existingContent + "\n"
+        String existingSection = existingContent != null
+                ? "\n== EXISTING FILE CONTENT (update — preserve logic not touched by the changes) ==\n"
+                  + existingContent + "\n"
                 : "";
-        String codebaseSection = formatCodebaseSection(codebaseContext, filePath);
 
-        return String.format("""
-                File to generate: %s
-                Description: %s
+        String mustHaveList = b.mustHaveFeatures().stream()
+                .map(f -> "- " + f)
+                .collect(Collectors.joining("\n"));
 
-                Business context:
-                  Name: %s | Category: %s | Location: %s
-                  Website type: %s
-                  Must-have features: %s
-                  Tech stack: %s
-                  Design direction: %s | Color: %s | Tone: %s
-                  Architectural notes: %s
-                %s%s%s%s
-                All files in project (do NOT re-generate these unless listed above):
-                %s
-                """,
-                filePath, description,
-                b.businessName(), b.category(), b.location(),
-                b.websiteType(), b.mustHaveFeatures(), b.techStack(),
-                b.designDirection(), b.colorScheme(), b.tone(),
-                b.architecturalNotes(),
-                changesSection, historySection, existingSection, codebaseSection,
-                String.join("\n", existingPaths));
+        return PromptTemplate.from(PromptLoader.load("user/file_content.txt"))
+                .with("filePath",           filePath)
+                .with("layer",              layer)
+                .with("description",        description)
+                .with("businessName",       b.businessName())
+                .with("category",           b.category())
+                .with("location",           b.location())
+                .with("websiteType",        b.websiteType())
+                .with("mustHaveFeatures",   mustHaveList)
+                .with("techStack",          b.techStack().toString())
+                .with("designDirection",    b.designDirection())
+                .with("colorScheme",        b.colorScheme())
+                .with("tone",               b.tone())
+                .with("architecturalNotes", b.architecturalNotes())
+                .with("changesSection",     changesSection)
+                .with("architectureSpec",   architectureSpec != null ? architectureSpec : "")
+                .with("historySection",     historySection)
+                .with("dependencySection",  formatFilesSection(dependencyFiles, filePath))
+                .with("existingSection",    existingSection)
+                .with("allFilePaths",       String.join("\n", allFilePaths))
+                .render();
     }
 
-    private String formatCodebaseSection(Map<String, String> codebaseContext, String currentFilePath) {
+    // ── Shared helpers ────────────────────────────────────────────────────
+
+    private String formatFilesSection(Map<String, String> codebaseContext, String currentFilePath) {
         if (codebaseContext == null || codebaseContext.isEmpty()) return "";
 
-        StringBuilder sb = new StringBuilder("\nEXISTING CODEBASE " +
-                "(read for consistency — match naming, imports, and patterns):\n");
+        StringBuilder sb = new StringBuilder();
         for (Map.Entry<String, String> entry : codebaseContext.entrySet()) {
             if (!entry.getKey().equals(currentFilePath)) {
                 sb.append("\n--- ").append(entry.getKey()).append(" ---\n");
@@ -271,5 +190,4 @@ public abstract class LlmGeneratorService {
         }
         return trimmed;
     }
-
 }

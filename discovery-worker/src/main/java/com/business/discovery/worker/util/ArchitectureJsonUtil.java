@@ -66,6 +66,23 @@ public final class ArchitectureJsonUtil {
 
     // ── Update ────────────────────────────────────────────────────────────
 
+    /**
+     * Bulk-marks every file of the given type as VALIDATED in a single read-write.
+     * Called by validation nodes after a successful compile/build.
+     */
+    public static void markAllByTypeAsValidated(Path workspace, String fileType) throws IOException {
+        if (!exists(workspace)) return;
+        ArchitectureSpec spec = read(workspace);
+        String today = LocalDate.now().toString();
+        spec.getFiles().stream()
+                .filter(f -> fileType.equalsIgnoreCase(f.getFileType()))
+                .forEach(f -> {
+                    f.setStatus("VALIDATED");
+                    f.setUpdatedDate(today);
+                });
+        write(workspace, spec);
+    }
+
     public static void updateFileStatus(Path workspace, String filePath, String newStatus) throws IOException {
         ArchitectureSpec spec = read(workspace);
         spec.getFiles().stream()

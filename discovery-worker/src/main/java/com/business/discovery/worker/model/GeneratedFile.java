@@ -9,7 +9,10 @@ import java.time.LocalDateTime;
 import java.util.UUID;
 
 @Entity
-@Table(name = "generated_file")
+@Table(name = "generated_file",
+        uniqueConstraints = @UniqueConstraint(
+                name = "uq_generated_file_task_path",
+                columnNames = {"task_id", "file_path"}))
 @Getter
 @Setter
 @NoArgsConstructor

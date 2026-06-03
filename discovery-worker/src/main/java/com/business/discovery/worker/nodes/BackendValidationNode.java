@@ -6,10 +6,13 @@ import com.business.discovery.worker.context.WorkerContext;
 import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.service.BuildToolService;
 import com.business.discovery.worker.service.BuildToolService.BuildResult;
+import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
+
+import java.io.IOException;
 
 @Component
 @Order(11)
@@ -31,11 +34,12 @@ public class BackendValidationNode implements WorkerNode {
 
             if (result.success()) {
                 log.info("[BackendValidationNode] mvn compile passed on attempt {}", attempt);
+                markFilesValidated(ctx);
                 return;
             }
 
             lastError = result.output();
-            log.warn("[BackendValidationNode] mvn compile failed (attempt {})", attempt);
+            log.warn("[BackendValidationNode] mvn compile failed (attempt {})", attempt, lastError);
 
             if (attempt < MAX_RETRIES) {
                 boolean fixed = errorFix.fix(lastError, FileType.BACKEND, ctx);
@@ -48,5 +52,14 @@ public class BackendValidationNode implements WorkerNode {
 
         throw new WorkerException(FailureType.CODE,
                 "Backend compilation failed after " + MAX_RETRIES + " attempts:\n" + lastError);
+    }
+
+    private void markFilesValidated(WorkerContext ctx) {
+        try {
+            ArchitectureJsonUtil.markAllByTypeAsValidated(ctx.getWorkspaceDir(), "BACKEND");
+            log.info("[BackendValidationNode] Marked backend files as VALIDATED in ARCHITECTURE.json");
+        } catch (IOException e) {
+            log.warn("[BackendValidationNode] Could not update ARCHITECTURE.json: {}", e.getMessage());
+        }
     }
 }

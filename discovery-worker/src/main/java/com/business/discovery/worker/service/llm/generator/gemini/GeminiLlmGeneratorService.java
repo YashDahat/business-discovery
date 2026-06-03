@@ -19,11 +19,13 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
 
     private final ChatModel model;
 
-    public GeminiLlmGeneratorService(String apiKey, String modelName) {
+    public GeminiLlmGeneratorService(String apiKey, String modelName, int maxOutputTokens,
+                                      java.time.Duration timeout) {
         this.model = GoogleAiGeminiChatModel.builder()
                 .apiKey(apiKey)
                 .modelName(modelName)
-                .maxOutputTokens(MAX_TOKENS)
+                .maxOutputTokens(maxOutputTokens)
+                .timeout(timeout)
                 .temperature(0.3)
                 .build();
     }

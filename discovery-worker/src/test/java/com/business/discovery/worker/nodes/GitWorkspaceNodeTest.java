@@ -107,13 +107,14 @@ class GitWorkspaceNodeTest {
     // ── Workspace init ────────────────────────────────────────────────────
 
     @Test
-    void firstAttempt_callsGitOpsInOrder() {
+    void remoteBranchAbsent_callsCheckoutFromMain() {
         when(ctx.getGithubRepoUrl()).thenReturn("https://github.com/owner/test-repo");
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getGithubToken()).thenReturn("ghp_mytoken");
         when(ctx.getGithubBranch()).thenReturn("feature/shree-cafe");
         when(ctx.getAttemptNumber()).thenReturn(1);
         when(ctx.getBusiness()).thenReturn(BusinessEntity.builder().title("Shree Cafe").build());
+        when(gitService.remoteBranchExists(tempDir, "feature/shree-cafe")).thenReturn(false);
 
         node.execute(ctx);
 
@@ -122,6 +123,23 @@ class GitWorkspaceNodeTest {
         verify(gitService).fetchAll(tempDir);
         verify(gitService).checkoutFromMain(tempDir, "feature/shree-cafe");
         verify(gitService, never()).checkoutFromRef(any(), any(), any());
+    }
+
+    @Test
+    void remoteBranchExists_checksOutFromRemoteBranch() {
+        when(ctx.getGithubRepoUrl()).thenReturn("https://github.com/owner/test-repo");
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(ctx.getGithubToken()).thenReturn("ghp_mytoken");
+        when(ctx.getGithubBranch()).thenReturn("feature/shree-cafe");
+        when(ctx.getAttemptNumber()).thenReturn(2);
+        when(ctx.getBusiness()).thenReturn(BusinessEntity.builder().title("Shree Cafe").build());
+        when(gitService.remoteBranchExists(tempDir, "feature/shree-cafe")).thenReturn(true);
+
+        node.execute(ctx);
+
+        verify(gitService).checkoutFromRef(tempDir, "feature/shree-cafe", "origin/feature/shree-cafe");
+        verify(gitService).pullRebase(tempDir, "feature/shree-cafe");
+        verify(gitService, never()).checkoutFromMain(any(), any());
     }
 
     @Test
@@ -137,22 +155,6 @@ class GitWorkspaceNodeTest {
 
         verify(gitService).remoteAdd(eq(tempDir), eq("origin"),
                 eq("https://x-access-token:ghp_secret123@github.com/owner/my-repo"));
-    }
-
-    @Test
-    void retryAttempt_branchesFromPreviousAttemptBranch() {
-        when(ctx.getGithubRepoUrl()).thenReturn("https://github.com/owner/repo");
-        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
-        when(ctx.getGithubToken()).thenReturn("token");
-        when(ctx.getGithubBranch()).thenReturn("feature/shree-cafe-attempt-2");
-        when(ctx.getAttemptNumber()).thenReturn(2);
-        when(ctx.getBusiness()).thenReturn(BusinessEntity.builder().title("Shree Cafe").build());
-
-        node.execute(ctx);
-
-        verify(gitService).checkoutFromRef(tempDir,
-                "feature/shree-cafe-attempt-2", "origin/feature/shree-cafe-attempt-1");
-        verify(gitService, never()).checkoutFromMain(any(), any());
     }
 
     @Test
@@ -199,18 +201,6 @@ class GitWorkspaceNodeTest {
         assertThat(GitWorkspaceNode.toRepoName("Pizza & Co.!")).isEqualTo("pizza-co");
         assertThat(GitWorkspaceNode.toRepoName("  My Cafe  ")).isEqualTo("my-cafe");
         assertThat(GitWorkspaceNode.toRepoName(null)).isEqualTo("business-site");
-    }
-
-    @Test
-    void derivePreviousBranch_standardPattern() {
-        assertThat(GitWorkspaceNode.derivePreviousBranch("feature/cafe-attempt-3", 3))
-                .isEqualTo("feature/cafe-attempt-2");
-    }
-
-    @Test
-    void derivePreviousBranch_nonMatchingPattern_fallsBackToMain() {
-        assertThat(GitWorkspaceNode.derivePreviousBranch("feature/some-branch", 2))
-                .isEqualTo("main");
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
