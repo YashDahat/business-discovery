@@ -1,0 +1,27 @@
+== ARCHITECTURE SPEC ==
+{{archSpec}}
+
+== FILES CURRENTLY ON DISK ==
+{{fileList}}
+
+== BUSINESS CONTEXT ==
+Business: {{businessName}} ({{category}})
+Tech stack: {{techStack}}
+
+== DESIGN CONTEXT ==
+Visual direction: {{designDirection}}
+Color palette: {{colorScheme}}
+Tone: {{tone}}
+
+Apply the design context when writing coding_instruction for PAGE and COMPONENT files.
+Translate visual direction into named page sections; translate color palette into exact
+Tailwind arbitrary-value classes; use tone to guide placeholder copy in CTAs and headings.
+{{requestedChangesSection}}
+
+For each file entry in the spec above:
+1. Add "coding_instruction": write a precise, complete coding brief following all rules
+   in the system prompt. Call read_file(path) for any file you need to inspect before
+   writing the instruction.
+2. Add "change_required": true or false per the rules in the system prompt.
+
+Return the complete updated JSON with these two fields added to every file entry.
