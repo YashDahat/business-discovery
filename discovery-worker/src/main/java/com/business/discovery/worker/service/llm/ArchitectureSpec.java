@@ -19,4 +19,10 @@ public class ArchitectureSpec {
     private String basePackage;
     private ProjectDependencies projectDependencies;
     private List<FileSpec> files;
+
+    /**
+     * Feature groups — each maps to a set of files sharing one business domain.
+     * Null on old specs (deserializes safely via @JsonIgnoreProperties).
+     */
+    private List<FeatureSpec> features;
 }

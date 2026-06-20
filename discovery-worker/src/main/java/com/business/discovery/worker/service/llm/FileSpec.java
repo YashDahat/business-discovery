@@ -28,4 +28,14 @@ public class FileSpec {
     private List<ApiEndpoint> apiEndpointsConsumed;
     private List<String> importsFrom;
     private List<String> dependsOn;
+
+    /** References FeatureSpec.featureName. Set by the planning LLM during generateArchitectureSpec. */
+    private String featureName;
+
+    /**
+     * Short structural role of this file within its feature. Set by the planning LLM (not enrichment).
+     * e.g. "SERVICE layer — implements createOrder(CreateOrderRequestDTO): OrderResponseDTO
+     * and getOrderById(UUID): OrderResponseDTO using OrderRepository and PaymentService"
+     */
+    private String fileRole;
 }

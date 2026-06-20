@@ -1,0 +1,29 @@
+== FEATURE BEING ENRICHED ==
+Feature name: {{featureName}}
+Feature display name: {{featureDisplayName}}
+Feature type: {{featureType}}
+
+== THIS FEATURE'S FILES (full spec — use these to write the instruction) ==
+{{featureFiles}}
+
+== OTHER FEATURES' API CONTRACTS (what this feature may call — do not invent signatures absent from here) ==
+{{peerApiSummaries}}
+
+== BUSINESS CONTEXT ==
+Business: {{businessName}} ({{category}})
+Address: {{address}}
+Phone: {{phone}}
+Coordinates: {{latitude}}, {{longitude}}
+Opening hours: {{openHours}}
+Tech stack: {{techStack}}
+
+== DESIGN CONTEXT ==
+Visual direction: {{designDirection}}
+Color palette: {{colorScheme}}
+Tone: {{tone}}
+
+Apply design context when writing about PAGE and COMPONENT files in this feature. Translate visual direction into named page sections; translate color palette into exact Tailwind arbitrary-value classes; use tone to guide placeholder copy in CTAs and headings.
+{{requestedChangesSection}}
+Write the featureInstruction for {{featureDisplayName}} following all rules in the system prompt. Call read_file(path) for any existing workspace file you need to inspect before writing.
+
+Return ONLY the JSON object with "feature_instruction" (and "change_required" if requestedChanges was provided). No markdown fences. No prose.

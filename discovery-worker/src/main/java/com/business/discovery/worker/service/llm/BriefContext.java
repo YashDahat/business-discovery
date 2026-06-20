@@ -14,6 +14,7 @@ public record BriefContext(
         String websiteType,
         List<String> mustHaveFeatures,
         List<String> niceToHaveFeatures,
+        List<String> recommendedPages,
         Map<String, String> techStack,
         List<String> seoKeywords,
         String designDirection,
@@ -23,6 +24,11 @@ public record BriefContext(
         String industryInsights,
         String architecturalNotes,
         String requestedChanges,
-        String projectHistory   // null on first run; docs/PROJECT_HISTORY.md content on retries/changes
+        String projectHistory,  // null on first run; docs/PROJECT_HISTORY.md content on retries/changes
+        String address,         // full street address from scraped business data
+        String phone,           // business phone number
+        String latitude,        // for Google Maps embed
+        String longitude,       // for Google Maps embed
+        String openHours        // formatted opening hours string
 ) {
 }

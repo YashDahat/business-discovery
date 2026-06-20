@@ -5,6 +5,7 @@ import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 
 @Service
@@ -16,11 +17,43 @@ public class BuildToolService {
     }
 
     public BuildResult runNpmInstall(Path frontendDir) {
-        return run(frontendDir, List.of("npm", "install", "--silent"));
+        return run(frontendDir, List.of("npm", "ci", "--silent"));
     }
 
     public BuildResult runNpmBuild(Path frontendDir) {
         return run(frontendDir, List.of("npm", "run", "build"));
+    }
+
+    public BuildResult runTscCheck(Path frontendDir) {
+        return run(frontendDir, List.of("npm", "exec", "tsc", "--", "--project", "tsconfig.app.json"));
+    }
+
+    public BuildResult runNpmInstallPackage(Path frontendDir, String packageName) {
+        return run(frontendDir, List.of("npm", "install", "--save", packageName, "--silent"));
+    }
+
+    public BuildResult runNpmInstallDevPackages(Path frontendDir, String... packages) {
+        List<String> cmd = new ArrayList<>(List.of("npm", "install", "--save-dev", "--silent"));
+        cmd.addAll(List.of(packages));
+        return run(frontendDir, cmd);
+    }
+
+    public BuildResult runShadcnAdd(Path frontendDir, java.util.Collection<String> components) {
+        List<String> cmd = new ArrayList<>(List.of("npx", "--yes", "shadcn@latest", "add", "--yes", "--overwrite"));
+        cmd.addAll(components);
+        return run(frontendDir, cmd);
+    }
+
+    /**
+     * Runs eslint --fix using the worker-managed eslint.fix.config.mjs.
+     * Exit code 1 means unfixable issues remain — that is expected and not a failure.
+     * Exit code 2 means eslint itself crashed (config error, missing plugin).
+     */
+    public BuildResult runEslintFix(Path frontendDir) {
+        return run(frontendDir, List.of(
+                "npx", "eslint", "--fix",
+                "--config", "eslint.fix.config.mjs",
+                "src/"));
     }
 
     // ── Internal ──────────────────────────────────────────────────────────

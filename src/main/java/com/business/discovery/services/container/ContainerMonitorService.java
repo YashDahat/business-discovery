@@ -117,22 +117,16 @@ public class ContainerMonitorService {
 
         if (exitCode != null && exitCode == 0) {
             handleSuccess(task, containerId);
-            // Remove only on success — failed containers are kept for inspection
-            dockerContainerService.removeContainer(containerId);
         } else {
             String logs = dockerContainerService.getContainerLogs(containerId);
             ContainerFailureType failureType = classifyFailure(logs, exitCode);
             handleFailure(task, logs, failureType);
-            // Keep failed container for manual inspection — retrieve logs via:
-            // GET /api/v3/containers/tasks/{taskId}/logs
-            // Remove manually after inspection via:
-            // POST /api/v3/containers/cleanup/all
-            log.warn("[MONITOR] Container {} kept for inspection (exit code {}) — task {}",
-                    containerId.substring(0, 12), exitCode, task.getId());
         }
 
-        // OLD: removed unconditionally — now handled per branch above
+        // Container kept for manual inspection — re-enable when auto-cleanup is needed:
         // dockerContainerService.removeContainer(containerId);
+        log.info("[MONITOR] Container {} retained for inspection (exit {}) — task {}",
+                containerId.substring(0, 12), exitCode, task.getId());
     }
 
     // ─── Success handler ──────────────────────────────────

@@ -20,38 +20,26 @@ import java.io.IOException;
 @RequiredArgsConstructor
 public class BackendValidationNode implements WorkerNode {
 
-    private static final int MAX_RETRIES = 3;
-
     private final BuildToolService buildTool;
-    private final ErrorFixNode errorFix;
+    private final ErrorFixAgent errorFixAgent;
 
     @Override
     public void execute(WorkerContext ctx) {
-        String lastError = null;
+        BuildResult initial = buildTool.runMvnCompile(ctx.getWorkspaceDir().resolve("backend"));
 
-        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-            BuildResult result = buildTool.runMvnCompile(ctx.getWorkspaceDir().resolve("backend"));
-
-            if (result.success()) {
-                log.info("[BackendValidationNode] mvn compile passed on attempt {}", attempt);
-                markFilesValidated(ctx);
-                return;
-            }
-
-            lastError = result.output();
-            log.warn("[BackendValidationNode] mvn compile failed (attempt {})", attempt, lastError);
-
-            if (attempt < MAX_RETRIES) {
-                boolean fixed = errorFix.fix(lastError, FileType.BACKEND, ctx);
-                if (!fixed) {
-                    log.warn("[BackendValidationNode] ErrorFixNode could not apply a fix — stopping retries");
-                    break;
-                }
-            }
+        if (initial.success()) {
+            log.info("[BackendValidationNode] mvn compile passed — no fixes needed");
+            markFilesValidated(ctx);
+            return;
         }
 
-        throw new WorkerException(FailureType.CODE,
-                "Backend compilation failed after " + MAX_RETRIES + " attempts:\n" + lastError);
+        log.warn("[BackendValidationNode] mvn compile failed — starting ErrorFixAgent loop");
+        boolean fixed = errorFixAgent.fix(FileType.BACKEND, ctx);
+
+        if (!fixed) throw new WorkerException(FailureType.CODE,
+                "Backend compilation could not be fixed after " + ErrorFixAgent.MAX_TOOL_ROUNDS + " agent tool rounds");
+
+        markFilesValidated(ctx);
     }
 
     private void markFilesValidated(WorkerContext ctx) {

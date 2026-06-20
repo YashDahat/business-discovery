@@ -70,8 +70,10 @@ public class GeneratedFile {
 
     public enum FileStatus {
         PENDING,
-        GENERATED,      // file written to disk
-        VALIDATED,      // compilation/build passed
-        FAILED          // caused a compilation or build error
+        GENERATED,          // file written to disk
+        VALIDATED,          // compilation/build passed
+        SPEC_COMPLIANT,     // passed spec compliance check (Pro verified against coding_instruction)
+        GENERATION_FAILED,  // gave up after max fix attempts — flagged for human attention
+        FAILED              // caused a compilation or build error (legacy)
     }
 }

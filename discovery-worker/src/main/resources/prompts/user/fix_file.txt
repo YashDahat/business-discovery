@@ -1,0 +1,9 @@
+File: {{filePath}}
+
+Current content:
+{{currentContent}}
+
+Compilation / build error:
+{{compilerError}}
+{{codebaseSection}}
+Return the fully corrected file content.

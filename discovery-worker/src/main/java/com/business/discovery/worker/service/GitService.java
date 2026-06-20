@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
@@ -14,6 +15,11 @@ import java.util.List;
 public class GitService {
 
     public void init(Path dir) {
+        try {
+            Files.createDirectories(dir);
+        } catch (IOException e) {
+            throw new WorkerException(FailureType.INFRA, "Failed to create workspace directory: " + dir, e);
+        }
         run(dir, List.of("git", "init"), "git init failed in " + dir);
     }
 

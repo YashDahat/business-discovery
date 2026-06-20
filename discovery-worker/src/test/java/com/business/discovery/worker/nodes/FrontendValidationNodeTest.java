@@ -21,14 +21,15 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
-import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
 class FrontendValidationNodeTest {
 
     @Mock private BuildToolService buildTool;
-    @Mock private ErrorFixNode errorFix;
+    @Mock private ErrorFixAgent errorFixAgent;
     @Mock private WorkerContext ctx;
 
     @InjectMocks
@@ -38,7 +39,7 @@ class FrontendValidationNodeTest {
     Path tempDir;
 
     @Test
-    void npmInstallAndBuildSucceed_noRetry() {
+    void npmInstallAndBuildSucceed_agentNotCalled() {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(buildTool.runNpmInstall(tempDir.resolve("frontend")))
                 .thenReturn(new BuildResult(0, ""));
@@ -48,7 +49,7 @@ class FrontendValidationNodeTest {
         node.execute(ctx);
 
         verify(buildTool, times(1)).runNpmBuild(any());
-        verifyNoInteractions(errorFix);
+        verifyNoInteractions(errorFixAgent);
     }
 
     @Test
@@ -62,23 +63,54 @@ class FrontendValidationNodeTest {
                 .satisfies(ex -> assertThat(((WorkerException) ex).getFailureType())
                         .isEqualTo(FailureType.INFRA));
 
-        verifyNoInteractions(errorFix);
+        verifyNoInteractions(errorFixAgent);
     }
 
     @Test
-    void buildFailsThenPassesAfterFix_passes() {
+    void buildFails_agentFixes_finalBuildPasses() {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(buildTool.runNpmInstall(tempDir.resolve("frontend")))
                 .thenReturn(new BuildResult(0, ""));
         when(buildTool.runNpmBuild(tempDir.resolve("frontend")))
-                .thenReturn(new BuildResult(1, "ERROR in src/App.tsx\nTS2304: Cannot find name 'x'"))
+                .thenReturn(new BuildResult(1, "TypeScript error"))
                 .thenReturn(new BuildResult(0, ""));
-        when(errorFix.fix(anyString(), eq(FileType.FRONTEND), eq(ctx))).thenReturn(true);
+        when(errorFixAgent.fix(eq(FileType.FRONTEND), eq(ctx))).thenReturn(true);
 
         node.execute(ctx);
 
-        verify(buildTool, times(2)).runNpmBuild(any());
-        verify(errorFix, times(1)).fix(anyString(), eq(FileType.FRONTEND), eq(ctx));
+        verify(errorFixAgent).fix(FileType.FRONTEND, ctx);
+        verify(buildTool, times(2)).runNpmBuild(any()); // initial fail + final authoritative build
+    }
+
+    @Test
+    void buildFails_agentCannotFix_throwsCodeException() {
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(buildTool.runNpmInstall(tempDir.resolve("frontend")))
+                .thenReturn(new BuildResult(0, ""));
+        when(buildTool.runNpmBuild(tempDir.resolve("frontend")))
+                .thenReturn(new BuildResult(1, "TypeScript error"));
+        when(errorFixAgent.fix(eq(FileType.FRONTEND), eq(ctx))).thenReturn(false);
+
+        assertThatThrownBy(() -> node.execute(ctx))
+                .isInstanceOf(WorkerException.class)
+                .satisfies(ex -> assertThat(((WorkerException) ex).getFailureType())
+                        .isEqualTo(FailureType.CODE));
+    }
+
+    @Test
+    void buildFails_agentFixes_butFinalBuildStillFails_throwsCodeException() {
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(buildTool.runNpmInstall(tempDir.resolve("frontend")))
+                .thenReturn(new BuildResult(0, ""));
+        when(buildTool.runNpmBuild(tempDir.resolve("frontend")))
+                .thenReturn(new BuildResult(1, "TypeScript error"))
+                .thenReturn(new BuildResult(1, "still broken after agent"));
+        when(errorFixAgent.fix(eq(FileType.FRONTEND), eq(ctx))).thenReturn(true);
+
+        assertThatThrownBy(() -> node.execute(ctx))
+                .isInstanceOf(WorkerException.class)
+                .satisfies(ex -> assertThat(((WorkerException) ex).getFailureType())
+                        .isEqualTo(FailureType.CODE));
     }
 
     @Test
@@ -98,23 +130,5 @@ class FrontendValidationNodeTest {
 
         ArchitectureSpec updated = ArchitectureJsonUtil.read(tempDir);
         assertThat(updated.getFiles().get(0).getStatus()).isEqualTo("VALIDATED");
-    }
-
-    @Test
-    void buildFailsThreeTimes_throwsCodeException() {
-        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
-        when(buildTool.runNpmInstall(tempDir.resolve("frontend")))
-                .thenReturn(new BuildResult(0, ""));
-        when(buildTool.runNpmBuild(tempDir.resolve("frontend")))
-                .thenReturn(new BuildResult(1, "TypeScript error"));
-        when(errorFix.fix(anyString(), eq(FileType.FRONTEND), eq(ctx))).thenReturn(true);
-
-        assertThatThrownBy(() -> node.execute(ctx))
-                .isInstanceOf(WorkerException.class)
-                .satisfies(ex -> assertThat(((WorkerException) ex).getFailureType())
-                        .isEqualTo(FailureType.CODE));
-
-        verify(buildTool, times(3)).runNpmBuild(any());
-        verify(errorFix, times(2)).fix(anyString(), eq(FileType.FRONTEND), eq(ctx));
     }
 }

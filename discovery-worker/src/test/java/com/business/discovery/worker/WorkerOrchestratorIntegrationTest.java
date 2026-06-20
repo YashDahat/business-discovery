@@ -15,6 +15,7 @@ import com.business.discovery.worker.service.BuildToolService;
 import com.business.discovery.worker.service.GitHubApiService;
 import com.business.discovery.worker.service.GitService;
 import com.business.discovery.worker.service.llm.ArchitectureSpec;
+import com.business.discovery.worker.service.llm.FeatureSpec;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.ProjectDependencies;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
@@ -40,6 +41,8 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
 /**
@@ -154,6 +157,10 @@ class WorkerOrchestratorIntegrationTest {
         ReflectionTestUtils.setField(ctx, "businessIdStr", businessId.toString());
 
         // LLM stubs — each bean is wired to its specific node role
+        String backendPath   = "backend/src/main/java/com/shreecafe/controller/HomeController.java";
+        String frontendPath  = "frontend/src/App.tsx";
+        String instruction   = "// feature instruction from Pro";
+
         ArchitectureSpec spec = ArchitectureSpec.builder()
                 .generatedAt("2026-05-30T10:00:00")
                 .businessName("Shree Cafe")
@@ -165,29 +172,58 @@ class WorkerOrchestratorIntegrationTest {
                 .files(List.of(
                         FileSpec.builder()
                                 .fileName("HomeController.java")
-                                .filePath("backend/src/main/java/com/shreecafe/controller/HomeController.java")
+                                .filePath(backendPath)
                                 .fileType("BACKEND").layer("CONTROLLER").status("PLANNED")
+                                .featureName("home-backend")
+                                .fileRole("Exposes GET /api/home endpoint")
                                 .description("Home REST controller").build(),
                         FileSpec.builder()
                                 .fileName("App.tsx")
-                                .filePath("frontend/src/App.tsx")
+                                .filePath(frontendPath)
                                 .fileType("FRONTEND").layer("PAGE").status("PLANNED")
+                                .featureName("home-frontend")
+                                .fileRole("Root React component with router")
                                 .description("Root React component").build()
+                ))
+                .features(List.of(
+                        FeatureSpec.builder()
+                                .featureName("home-backend")
+                                .featureType("BACKEND")
+                                .featureInstruction(instruction)
+                                .changeRequired(true)
+                                .filePaths(List.of(backendPath))
+                                .build(),
+                        FeatureSpec.builder()
+                                .featureName("home-frontend")
+                                .featureType("FRONTEND")
+                                .featureInstruction(instruction)
+                                .changeRequired(true)
+                                .filePaths(List.of(frontendPath))
+                                .build()
                 ))
                 .build();
         when(geminiProLlm.generateArchitectureSpec(any(), any())).thenReturn(spec);
-        when(geminiFlashLlm.generateFileContent(any(), any(), any(), any(), any(), any(), any(), any()))
+
+        // featureInstruction already set → allFeaturesHaveInstructions = true → enrichment loop skipped
+
+        when(geminiFlashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
                 .thenReturn("// generated");
 
         // GitHub stubs
         when(gitHubApiService.createRepo(any(), any())).thenReturn(REPO_URL);
         when(gitHubApiService.createPullRequest(any(), any(), any(), any())).thenReturn(PR_URL);
 
+        // Spec compliance: compliant by default so Stage 2 passes without real Pro calls
+        when(geminiProLlm.checkSpecCompliance(any(), any(), any()))
+                .thenReturn(com.business.discovery.worker.service.llm.ComplianceResult.ok());
+
         // Build tools: succeed so validation nodes pass without real builds
         BuildToolService.BuildResult ok = new BuildToolService.BuildResult(0, "");
         when(buildToolService.runMvnCompile(any())).thenReturn(ok);
         when(buildToolService.runNpmInstall(any())).thenReturn(ok);
         when(buildToolService.runNpmBuild(any())).thenReturn(ok);
+        when(buildToolService.runTscCheck(any())).thenReturn(ok);
+        when(buildToolService.runEslintFix(any())).thenReturn(ok);
     }
 
     @AfterEach
@@ -203,13 +239,13 @@ class WorkerOrchestratorIntegrationTest {
     void allNodesExecute_generatedFilesInDb_projectHistoryOnDisk() throws IOException {
         orchestrator.run();
 
-        // DB: 1 BACKEND + 1 FRONTEND GeneratedFile row, all GENERATED status
+        // DB: 1 BACKEND + 1 FRONTEND GeneratedFile row, all SPEC_COMPLIANT after full 3-stage pipeline
         List<GeneratedFile> files = fileRepo.findByTaskId(taskId);
         assertThat(files).hasSize(2);
         assertThat(files)
                 .extracting(GeneratedFile::getFileType)
                 .containsExactlyInAnyOrder(GeneratedFile.FileType.BACKEND, GeneratedFile.FileType.FRONTEND);
-        assertThat(files).allMatch(f -> f.getStatus() == FileStatus.GENERATED);
+        assertThat(files).allMatch(f -> f.getStatus() == FileStatus.SPEC_COMPLIANT);
 
         // Filesystem: docs/PROJECT_HISTORY.md written with attempt section
         Path history = WORKSPACE.resolve("docs/PROJECT_HISTORY.md");

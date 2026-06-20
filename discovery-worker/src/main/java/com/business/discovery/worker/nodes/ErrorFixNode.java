@@ -25,13 +25,15 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
- * Helper component — called by BackendValidationNode and FrontendValidationNode on failure.
- * Not a WorkerNode; not executed by the orchestrator directly.
+ * Single-file fix helper — used by generator nodes (BackendGeneratorNode, FrontendGeneratorNode)
+ * for inline per-file compile fixes during generation.
  *
- * Flow: parse failing file → targeted context → LLM fix → overwrite file → mark FAILED in DB.
- * Returns true if a fix was applied; false if parsing failed or LLM returned nothing.
+ * ValidationNodes (BackendValidationNode, FrontendValidationNode) now use ErrorFixAgent
+ * instead, which runs a full agentic loop owning its own compile-fix cycle.
+ *
+ * Not a Spring bean (@Component removed) — instantiated directly by tests and not needed
+ * in the Spring context since ValidationNodes no longer inject it.
  */
-@Component
 @Slf4j
 public class ErrorFixNode {
 
@@ -81,6 +83,7 @@ public class ErrorFixNode {
             String trimmedError = trimError(errorOutput);
             Map<String, String> context = buildTargetedContext(workspace, relPath);
 
+            log.warn("[ErrorFixNode] Fixing {} — error:\n{}", relPath, trimmedError);
             log.info("[ErrorFixNode] Fix context: {} files ({} chars)",
                     context.size(), context.values().stream().mapToInt(String::length).sum());
 

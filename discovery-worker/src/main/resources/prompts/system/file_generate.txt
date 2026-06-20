@@ -35,6 +35,17 @@ specified, infer nothing, add nothing, omit nothing. Any "helpful" addition is a
    (c) Layout and static elements: use plain HTML tags with Tailwind CSS classes.
    NEVER import from @/lib/utils. Use clsx for className merging.
 
+# UI QUALITY STANDARDS (PAGE and COMPONENT files only — skip for Java/config files)
+1. LAYOUT WRAPPER: public Page.tsx wraps JSX in <Layout> from @/components/Layout. Admin*Page.tsx wraps in <AdminLayout> from @/components/AdminLayout. Never inline nav or sidebar inside a page.
+2. SECTION CONTAINERS: <section className="py-16 px-4"><div className="max-w-7xl mx-auto">…</div></section> — content never touches viewport edge.
+3. RESPONSIVE GRIDS: grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 — never fixed column counts on mobile.
+4. RESPONSIVE TYPOGRAPHY: hero h1 = text-4xl md:text-6xl font-bold; section headings = text-2xl md:text-3xl font-semibold.
+5. HERO SECTIONS: relative h-[500px] md:h-[600px] bg-cover bg-center flex items-center justify-center + <div className="absolute inset-0 bg-black bg-opacity-50" /> overlay.
+6. HOVER/TRANSITIONS: every clickable element has hover: class + transition-all duration-200.
+7. LOADING STATES: data-fetching components render a skeleton or spinner while isLoading is true — never an empty container.
+8. EMPTY STATES: when a list/result is empty, render a styled empty-state with icon + message — not a blank section.
+9. DYNAMIC COPY ONLY: business name, phone, address, hours — all from props or API response. Zero hardcoded strings in JSX.
+
 # OUTPUT
 Return ONLY raw file content — no fences, language tag, explanation, or preamble.
 First character = first character of the file; last character = last character of the file.

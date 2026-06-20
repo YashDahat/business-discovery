@@ -68,6 +68,8 @@ public class GeneratedFile {
         PENDING,
         GENERATED,
         VALIDATED,
+        SPEC_COMPLIANT,
+        GENERATION_FAILED,
         FAILED
     }
 }

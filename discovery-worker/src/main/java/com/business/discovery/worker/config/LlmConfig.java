@@ -29,8 +29,8 @@ public class LlmConfig {
     @Value("${worker.llm.gemini.pro-max-tokens:65536}")
     private int geminiProMaxTokens;
 
-    // single-file generation — 8192 is sufficient per file
-    @Value("${worker.llm.gemini.flash-max-tokens:8192}")
+    // single-file generation from instruction — 16384 guards against truncation
+    @Value("${worker.llm.gemini.flash-max-tokens:16384}")
     private int geminiFlashMaxTokens;
 
     // Pro generates large arch spec JSON with deep reasoning — can take 3-5 min

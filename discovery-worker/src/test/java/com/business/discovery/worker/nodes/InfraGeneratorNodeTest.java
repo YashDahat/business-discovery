@@ -53,7 +53,7 @@ class InfraGeneratorNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(taskId);
         when(ctx.getAttemptNumber()).thenReturn(1);
-        when(llm.generateFileContent(anyString(), anyString(), anyString(), eq(briefCtx), anyList(), any(), anyString(), any()))
+        when(llm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
                 .thenReturn("# generated infra content");
 
         node.execute(ctx);
@@ -136,7 +136,7 @@ class InfraGeneratorNodeTest {
 
         BriefContext briefCtxWithChanges = new BriefContext(
                 "Test Business", "Restaurant", "Pune", "INFORMATIONAL",
-                List.of(), List.of(), Map.of(), List.of(),
+                List.of(), List.of(), List.of(), Map.of(), List.of(),
                 "modern", "blue", "professional", "", "", "",
                 "Add Redis service", null);
 
@@ -147,18 +147,18 @@ class InfraGeneratorNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(2);
-        when(llm.generateFileContent(anyString(), anyString(), anyString(), any(), anyList(), any(), anyString(), any()))
+        when(llm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
                 .thenReturn("# updated Dockerfile");
 
         node.execute(ctx);
 
-        verify(llm).generateFileContent(anyString(), anyString(), anyString(), any(), anyList(), any(), anyString(), any());
+        verify(llm).generateFileContent(anyString(), anyString(), anyString(), anyMap(), any());
         assertThat(Files.readString(tempDir.resolve("Dockerfile"))).isEqualTo("# updated Dockerfile");
     }
 
     private BriefContext mockBriefContext() {
         return new BriefContext("Test Business", "Restaurant", "Pune",
-                "INFORMATIONAL", List.of(), List.of(), Map.of(), List.of(),
+                "INFORMATIONAL", List.of(), List.of(), List.of(), Map.of(), List.of(),
                 "modern", "blue", "professional", "", "", "", null, null);
     }
 }

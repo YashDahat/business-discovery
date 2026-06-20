@@ -29,7 +29,7 @@ import static org.mockito.Mockito.*;
 class BackendValidationNodeTest {
 
     @Mock private BuildToolService buildTool;
-    @Mock private ErrorFixNode errorFix;
+    @Mock private ErrorFixAgent errorFixAgent;
     @Mock private WorkerContext ctx;
 
     @InjectMocks
@@ -39,7 +39,7 @@ class BackendValidationNodeTest {
     Path tempDir;
 
     @Test
-    void mvnCompileSucceeds_noRetry() {
+    void mvnCompileSucceeds_agentNotCalled() {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(buildTool.runMvnCompile(tempDir.resolve("backend")))
                 .thenReturn(new BuildResult(0, ""));
@@ -47,37 +47,32 @@ class BackendValidationNodeTest {
         node.execute(ctx);
 
         verify(buildTool, times(1)).runMvnCompile(any());
-        verifyNoInteractions(errorFix);
+        verifyNoInteractions(errorFixAgent);
     }
 
     @Test
-    void mvnFailsThenSucceedsAfterFix_passes() {
-        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
-        when(buildTool.runMvnCompile(tempDir.resolve("backend")))
-                .thenReturn(new BuildResult(1, "[ERROR] Some.java:[1,1] error: bad code"))
-                .thenReturn(new BuildResult(0, ""));
-        when(errorFix.fix(anyString(), eq(FileType.BACKEND), eq(ctx))).thenReturn(true);
-
-        node.execute(ctx);
-
-        verify(buildTool, times(2)).runMvnCompile(any());
-        verify(errorFix, times(1)).fix(anyString(), eq(FileType.BACKEND), eq(ctx));
-    }
-
-    @Test
-    void mvnFailsThreeTimes_throwsCodeException() {
+    void mvnFails_agentFixes_passes() {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(buildTool.runMvnCompile(tempDir.resolve("backend")))
                 .thenReturn(new BuildResult(1, "[ERROR] compilation failed"));
-        when(errorFix.fix(anyString(), eq(FileType.BACKEND), eq(ctx))).thenReturn(true);
+        when(errorFixAgent.fix(eq(FileType.BACKEND), eq(ctx))).thenReturn(true);
+
+        node.execute(ctx);
+
+        verify(errorFixAgent).fix(FileType.BACKEND, ctx);
+    }
+
+    @Test
+    void mvnFails_agentCannotFix_throwsCodeException() {
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(buildTool.runMvnCompile(tempDir.resolve("backend")))
+                .thenReturn(new BuildResult(1, "[ERROR] compilation failed"));
+        when(errorFixAgent.fix(eq(FileType.BACKEND), eq(ctx))).thenReturn(false);
 
         assertThatThrownBy(() -> node.execute(ctx))
                 .isInstanceOf(WorkerException.class)
                 .satisfies(ex -> assertThat(((WorkerException) ex).getFailureType())
                         .isEqualTo(FailureType.CODE));
-
-        verify(buildTool, times(3)).runMvnCompile(any());
-        verify(errorFix, times(2)).fix(anyString(), eq(FileType.BACKEND), eq(ctx));
     }
 
     @Test
@@ -99,19 +94,22 @@ class BackendValidationNodeTest {
     }
 
     @Test
-    void fixReturnsFalse_stopsRetryingEarly() {
+    void agentFixes_thenMarksFilesAsValidated() throws Exception {
+        FileSpec backendFile = FileSpec.builder()
+                .filePath("backend/src/main/java/Service.java")
+                .fileType("BACKEND")
+                .status("GENERATION_FAILED")
+                .build();
+        ArchitectureJsonUtil.write(tempDir, ArchitectureSpec.builder().files(List.of(backendFile)).build());
+
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(buildTool.runMvnCompile(tempDir.resolve("backend")))
-                .thenReturn(new BuildResult(1, "[ERROR] cannot parse"));
-        when(errorFix.fix(anyString(), eq(FileType.BACKEND), eq(ctx))).thenReturn(false);
+                .thenReturn(new BuildResult(1, "[ERROR] Service.java broken"));
+        when(errorFixAgent.fix(FileType.BACKEND, ctx)).thenReturn(true);
 
-        assertThatThrownBy(() -> node.execute(ctx))
-                .isInstanceOf(WorkerException.class)
-                .satisfies(ex -> assertThat(((WorkerException) ex).getFailureType())
-                        .isEqualTo(FailureType.CODE));
+        node.execute(ctx);
 
-        // Only 1 compile attempt + 1 fix attempt (fix returned false → no further retries)
-        verify(buildTool, times(1)).runMvnCompile(any());
-        verify(errorFix, times(1)).fix(anyString(), any(), any());
+        ArchitectureSpec updated = ArchitectureJsonUtil.read(tempDir);
+        assertThat(updated.getFiles().get(0).getStatus()).isEqualTo("VALIDATED");
     }
 }

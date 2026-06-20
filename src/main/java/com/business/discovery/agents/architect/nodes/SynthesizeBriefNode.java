@@ -167,9 +167,9 @@ public class SynthesizeBriefNode implements NodeAction<ArchitectAgentState> {
             "hosting": "..."
           },
           "seoKeywords": ["keyword1", "keyword2"],
-          "designDirection": "...",
-          "colorScheme": "...",
-          "tone": "...",
+          "designDirection": "2-3 sentences describing the visual style and layout approach for THIS business. Include: (1) visual density — minimal / balanced / information-dense; (2) key UI patterns — e.g. full-bleed hero with mood photography, card grids, sticky CTA bar, parallax sections, image galleries, ticker/marquee, tabbed menus; (3) any industry-specific conventions. Example for a bar: 'Information-dense layout with a full-bleed dark hero featuring mood photography and bold display typography. Drinks and food showcased in a 3-column card grid with category filters. Sticky reservation CTA visible on all pages, events section with countdown timers.'",
+          "colorScheme": "Specific palette for this business: primary background, text, accent/brand, CTA button colors. Use hex codes where possible. Example: 'Dark charcoal #1c1c1e background, off-white #f5f0e8 body text, gold #d4a843 accent, deep red #8b1a1a CTA buttons, slate #6b7280 secondary text.'",
+          "tone": "Communication personality in 1-2 sentences — how the site speaks to visitors. Example: 'Warm and confident, like a knowledgeable host — welcoming without being casual, upscale without being pretentious. CTAs are direct and action-oriented.'",
           "competitorInsights": "...",
           "industryInsights": "...",
           "architecturalNotes": "..."

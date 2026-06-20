@@ -45,9 +45,71 @@ Contact → ContactPage.tsx.
 
 ## Step 3 — Baseline infra (ADDITIVE, never a substitute)
 Add to EVERY project in addition to Steps 1–2, never displacing a derived file:
-  Backend: User, Role, JwtUtil, JwtAuthFilter, SecurityConfig, AuthController,
-  AdminInitializer (+ supporting repos/DTOs)
-  Frontend: AuthContext, LoginPage, AdminDashboardPage, ProtectedRoute
+
+  Backend: User, Role, JwtUtil, JwtAuthFilter, SecurityConfig, SpaController, AuthController,
+  AdminInitializer (+ supporting repos/DTOs), DataSeeder
+
+  Frontend: AuthContext, LoginPage, AdminDashboardPage, ProtectedRoute,
+  Layout, Header, Footer, AdminLayout, api/client.ts
+
+## Baseline constraints (enforced at generation time)
+
+**JwtUtil:** getSigningKey() calls Decoders.BASE64.decode(jwt.secret). The .env.example
+placeholder for JWT_SECRET MUST be a valid Base64 string — no hyphens, spaces, or special
+characters. Correct example: JWT_SECRET=cmVwbGFjZVdpdGhBU2VjdXJlQmFzZTY0S2V5
+Any plain-text value with hyphens (e.g. local-dev-secret) causes DecodingException on startup.
+
+**api/client.ts:** axios instance with a request interceptor reading localStorage.getItem('token').
+The key MUST be 'token' — never 'authToken' or any other variant. AuthContext stores the JWT
+under the same key: localStorage.setItem('token', response.token).
+
+**Layout.tsx:** shared wrapper for every public page — renders <Header />{children}<Footer />.
+Every public Page.tsx (HomePage, MenuPage, etc.) wraps its content in <Layout>. Business name,
+nav links, and CTA labels are derived from the brief — zero hardcoded strings.
+
+**Header.tsx:** responsive sticky navbar. Brand name from businessName. Nav links derived from
+recommendedPages. Colors from colorScheme. Mobile hamburger menu collapses nav below md breakpoint.
+
+**Footer.tsx:** three-column layout — business address + phone, opening hours, Google Maps iframe
+(lat/lng from brief). All content from brief data — never invented placeholder text or wrong city.
+
+**AdminLayout.tsx:** shared wrapper for EVERY admin page. Left sidebar with NavLink entries for
+each admin feature (Dashboard, Orders, Reservations, Menu, Logout) with active-state highlighting.
+{children} for the main content area. The sidebar is defined ONCE here — individual Admin*Page.tsx
+files MUST NOT duplicate or inline the sidebar.
+
+**DataSeeder.java:** @Component CommandLineRunner. On startup, checks repository.count() == 0;
+if empty, inserts 4–6 realistic sample entities matched to the business type and category.
+Uses actual businessName and category — never generic strings like "Sample Item 1".
+
+# SECURITY AND SPA RULES (backend — enforced at generation time)
+
+## SecurityConfig authorization model
+SecurityConfig MUST always use this exact authorization order — no exceptions:
+
+  .authorizeHttpRequests(auth -> auth
+      .requestMatchers("/api/v1/auth/**").permitAll()
+      .requestMatchers("/api/v1/<public-endpoints>/**").permitAll()   // menu, public reservations, etc.
+      .requestMatchers("/api/v1/admin/**").hasAuthority("ADMIN")
+      .requestMatchers("/api/**").authenticated()                     // all other API routes
+      .anyRequest().permitAll()                                       // static files + SPA routes
+  )
+
+The LAST rule MUST be anyRequest().permitAll() — NEVER anyRequest().authenticated().
+Spring Security intercepts ALL requests including /index.html and /assets/*.js. Using
+anyRequest().authenticated() blocks the entire frontend for unauthenticated users.
+Only /api/** routes require authentication; everything else is public.
+
+## SpaController
+Every project MUST include a SpaController in the controller package:
+- Annotated @Controller (not @RestController)
+- Single method annotated @GetMapping(value = {"/", "/{path:[^\\.]*}"})
+- Returns "forward:/index.html"
+- No other methods or fields
+The regex [^\\.] matches path segments with no dot. The `/**` suffix MUST be omitted —
+it would catch /assets/index.js (because "assets" has no dots), defeating Spring's static
+resource handler. Only "/" and "/{path:[^\\.]*}" are needed: these cover all clean React
+Router paths like /menu, /about, /admin/dashboard.
 
 # JAVA TYPE RULES (backend — enforced at generation time)
 Every Java enum and record MUST be its own top-level .java file. Never declare an enum
@@ -121,8 +183,8 @@ same domain on backend and frontend are SEPARATE features.
 - INFRA: ALL infra files (Dockerfile, docker-compose.yml, CI workflows, nginx.conf, .env.example,
   .gitignore). Exactly one INFRA feature per project, named "infrastructure". No enrichment runs for it.
 - SHARED: cross-cutting backend utilities used by multiple domains: User, Role, JwtUtil,
-  JwtAuthFilter, SecurityConfig, AuthController, its DTOs, UserRepository, UserService,
-  AdminInitializer.
+  JwtAuthFilter, SecurityConfig, SpaController, AuthController, its DTOs, UserRepository,
+  UserService, AdminInitializer.
 
 ## Size rule
 4–10 files per feature. If a domain produces more than 10 files, split into sub-features:

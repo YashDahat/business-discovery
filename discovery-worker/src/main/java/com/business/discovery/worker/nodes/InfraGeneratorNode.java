@@ -6,7 +6,9 @@ import com.business.discovery.worker.context.WorkerContext;
 import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.model.GeneratedFile;
 import com.business.discovery.worker.repository.GeneratedFileRepository;
+import com.business.discovery.worker.service.llm.ArchitectureSpec;
 import com.business.discovery.worker.service.llm.FileEntry;
+import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import lombok.extern.slf4j.Slf4j;
@@ -20,6 +22,7 @@ import java.nio.file.Path;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 @Component
 @Order(9)
@@ -50,8 +53,8 @@ public class InfraGeneratorNode implements WorkerNode {
 
         Path workspace = ctx.getWorkspaceDir();
 
-        // Read ARCHITECTURE.json once — all infra files get the same spec context
-        String architectureSpec = readArchitectureSpec(workspace);
+        // Load spec for file_role lookup
+        Map<String, FileSpec> specByPath = loadSpecByPath(workspace);
 
         // Targeted config context: only the files infra actually needs to produce a working docker setup
         Map<String, String> configContext = buildInfraContext(workspace);
@@ -68,10 +71,16 @@ public class InfraGeneratorNode implements WorkerNode {
 
                 String existingContent = readExistingIfPresent(filePath);
 
-                String content = llm.generateFileContent(
-                        entry.path(), entry.description(), "INFRA",
-                        ctx.getBriefCtx(), allPaths,
-                        existingContent, architectureSpec, configContext);
+                // Use file_role from spec if available; fall back to entry description as minimal instruction.
+                FileSpec spec = specByPath.get(entry.path());
+                String fileRole = spec != null && spec.getFileRole() != null && !spec.getFileRole().isBlank()
+                        ? spec.getFileRole()
+                        : "Generate: " + entry.path() + "\n" + entry.description()
+                          + "\nBusiness: " + ctx.getBriefCtx().businessName()
+                          + "\nTech stack: " + ctx.getBriefCtx().techStack();
+
+                // INFRA features aren't enriched — pass empty featureInstruction
+                String content = llm.generateFileContent(entry.path(), "", fileRole, configContext, existingContent);
 
                 Files.createDirectories(filePath.getParent());
                 Files.writeString(filePath, content);
@@ -144,13 +153,16 @@ public class InfraGeneratorNode implements WorkerNode {
         }
     }
 
-    private String readArchitectureSpec(Path workspace) {
-        if (!ArchitectureJsonUtil.exists(workspace)) return "";
+    private Map<String, FileSpec> loadSpecByPath(Path workspace) {
+        if (!ArchitectureJsonUtil.exists(workspace)) return Map.of();
         try {
-            return Files.readString(workspace.resolve(ArchitectureJsonUtil.ARCH_PATH));
+            ArchitectureSpec spec = ArchitectureJsonUtil.read(workspace);
+            return spec.getFiles().stream()
+                    .filter(f -> f.getFilePath() != null)
+                    .collect(Collectors.toMap(FileSpec::getFilePath, f -> f, (a, b) -> a));
         } catch (IOException e) {
-            log.warn("[InfraGeneratorNode] Could not read ARCHITECTURE.json: {}", e.getMessage());
-            return "";
+            log.warn("[InfraGeneratorNode] Could not load spec: {}", e.getMessage());
+            return Map.of();
         }
     }
 

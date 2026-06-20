@@ -123,6 +123,16 @@ public class DockerContainerService {
 
     private String createAndStartContainer(ContainerTask task) throws Exception {
         String containerName = "worker-" + task.getId().toString().substring(0, 8);
+
+        // Remove any stopped container with this name from a previous attempt
+        // (containers are kept for inspection, so on retry the old one must be cleared first)
+        try {
+            dockerClient.removeContainerCmd(containerName).withForce(true).exec();
+            log.info("[SPAWN] Removed previous stopped container: {}", containerName);
+        } catch (Exception ignored) {
+            // Container didn't exist or was already removed — normal on first attempt
+        }
+
         String taskDescJson = objectMapper.writeValueAsString(task.getTaskDescription());
 
         // Build ENV variables for sub-container

@@ -21,47 +21,37 @@ import java.nio.file.Path;
 @RequiredArgsConstructor
 public class FrontendValidationNode implements WorkerNode {
 
-    private static final int MAX_RETRIES = 3;
-
     private final BuildToolService buildTool;
-    private final ErrorFixNode errorFix;
+    private final ErrorFixAgent errorFixAgent;
 
     @Override
     public void execute(WorkerContext ctx) {
         Path frontendDir = ctx.getWorkspaceDir().resolve("frontend");
 
-        // npm install once before any retry loop — only redo if it fails
         BuildResult install = buildTool.runNpmInstall(frontendDir);
-        if (!install.success()) {
-            throw new WorkerException(FailureType.INFRA,
-                    "npm install failed:\n" + install.output());
+        if (!install.success()) throw new WorkerException(FailureType.INFRA,
+                "npm install failed:\n" + install.output());
+
+        BuildResult initial = buildTool.runNpmBuild(frontendDir);
+
+        if (initial.success()) {
+            log.info("[FrontendValidationNode] npm run build passed — no fixes needed");
+            markFilesValidated(ctx);
+            return;
         }
 
-        String lastError = null;
+        log.warn("[FrontendValidationNode] npm run build failed — starting ErrorFixAgent loop");
+        boolean fixed = errorFixAgent.fix(FileType.FRONTEND, ctx);
 
-        for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-            BuildResult result = buildTool.runNpmBuild(frontendDir);
+        if (!fixed) throw new WorkerException(FailureType.CODE,
+                "Frontend build could not be fixed after " + ErrorFixAgent.MAX_TOOL_ROUNDS + " agent tool rounds");
 
-            if (result.success()) {
-                log.info("[FrontendValidationNode] npm run build passed on attempt {}", attempt);
-                markFilesValidated(ctx);
-                return;
-            }
+        // Final authoritative build after agent loop (agent uses tsc --noEmit; this bundles too)
+        BuildResult finalBuild = buildTool.runNpmBuild(frontendDir);
+        if (!finalBuild.success()) throw new WorkerException(FailureType.CODE,
+                "Frontend npm run build still failing after ErrorFixAgent:\n" + finalBuild.output());
 
-            lastError = result.output();
-            log.warn("[FrontendValidationNode] npm run build failed (attempt {})", attempt, lastError);
-
-            if (attempt < MAX_RETRIES) {
-                boolean fixed = errorFix.fix(lastError, FileType.FRONTEND, ctx);
-                if (!fixed) {
-                    log.warn("[FrontendValidationNode] ErrorFixNode could not apply a fix — stopping retries");
-                    break;
-                }
-            }
-        }
-
-        throw new WorkerException(FailureType.CODE,
-                "Frontend build failed after " + MAX_RETRIES + " attempts:\n" + lastError);
+        markFilesValidated(ctx);
     }
 
     private void markFilesValidated(WorkerContext ctx) {

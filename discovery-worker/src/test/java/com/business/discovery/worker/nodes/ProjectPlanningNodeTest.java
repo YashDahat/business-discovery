@@ -14,9 +14,11 @@ import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.util.SlugUtil;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -34,6 +36,8 @@ class ProjectPlanningNodeTest {
     @Mock private LlmGeneratorService llm;
     @Mock private SpringInitializrClient initializrClient;
     @Mock private WorkerContext ctx;
+
+    @TempDir Path tempDir;
 
     @Test
     void execute_setsManifestFromArchSpec() {
@@ -85,6 +89,7 @@ class ProjectPlanningNodeTest {
 
         when(ctx.getBrief()).thenReturn(brief);
         when(ctx.getBusiness()).thenReturn(business);
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getProjectHistory()).thenReturn(null);
         when(llm.generateArchitectureSpec(any(BriefContext.class), eq("rajrestaurant"))).thenReturn(spec);
 

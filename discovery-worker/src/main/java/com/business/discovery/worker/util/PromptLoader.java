@@ -1,6 +1,7 @@
 package com.business.discovery.worker.util;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -13,8 +14,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * Loads prompt text files from the prompts/ directory.
  *
  * Resolution order:
- *   1. PROMPTS_DIR env var (set to /app/prompts in Docker)
+ *   1. PROMPTS_DIR env var (filesystem)
  *   2. ./prompts relative to working directory (local dev)
+ *   3. classpath:/prompts/ (bundled in JAR for Docker)
  *
  * Files are cached after first load — restart the container to pick up edits.
  */
@@ -29,16 +31,26 @@ public final class PromptLoader {
     public static String load(String relativeName) {
         return CACHE.computeIfAbsent(relativeName, name -> {
             Path file = BASE_DIR.resolve(name);
-            if (!Files.exists(file)) {
-                throw new IllegalStateException(
-                        "Prompt file not found: " + file.toAbsolutePath()
-                        + " — set PROMPTS_DIR or ensure prompts/ is at the working directory");
+            if (Files.exists(file)) {
+                try {
+                    return Files.readString(file, StandardCharsets.UTF_8);
+                } catch (IOException e) {
+                    throw new UncheckedIOException("Failed to read prompt: " + file, e);
+                }
             }
-            try {
-                return Files.readString(file, StandardCharsets.UTF_8);
+            // Fallback: load from classpath (bundled in JAR)
+            String classpathPath = "/prompts/" + name;
+            try (InputStream is = PromptLoader.class.getResourceAsStream(classpathPath)) {
+                if (is != null) {
+                    return new String(is.readAllBytes(), StandardCharsets.UTF_8);
+                }
             } catch (IOException e) {
-                throw new UncheckedIOException("Failed to read prompt: " + file, e);
+                throw new UncheckedIOException("Failed to read classpath prompt: " + classpathPath, e);
             }
+            throw new IllegalStateException(
+                    "Prompt file not found: " + file.toAbsolutePath()
+                    + " or classpath:" + classpathPath
+                    + " — set PROMPTS_DIR or ensure prompts/ is at the working directory");
         });
     }
 

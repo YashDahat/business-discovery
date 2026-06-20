@@ -1,0 +1,8 @@
+== CODING INSTRUCTION (what was planned) ==
+{{codingInstruction}}
+
+== GENERATED FILE (what Flash wrote) ==
+{{fileContent}}
+
+List all deviations from the instruction. Return JSON:
+{"compliant": true/false, "issues": ["..."]}

@@ -36,7 +36,7 @@ import java.util.stream.Collectors;
 @Slf4j
 public class ErrorFixAgent {
 
-    static final int MAX_TOOL_ROUNDS = 30;
+    static final int MAX_TOOL_ROUNDS = 10;
 
     private static final String SYSTEM_PROMPT = """
             You are a senior engineer debugging multi-file compilation failures in a generated project.
@@ -47,7 +47,15 @@ public class ErrorFixAgent {
             - write_file             — overwrite a file with the complete fixed content
             - search_symbol          — grep for a class/type/function across the project
             - read_architecture_spec — get the spec (contract) for any file from ARCHITECTURE.json
-            - list_files             — list all files in a directory
+            - list_files             — list all files in a workspace directory
+
+            ENVIRONMENT (read once, do not investigate further):
+            - Docker container: eclipse-temurin:17-jdk-jammy — Java 17 is installed and working.
+            - Maven: invoked via ./mvnw wrapper inside backend/. No need to locate javac or mvn binaries.
+            - All project files are inside the workspace. list_files and read_file are restricted to it.
+            - NEVER explore system paths: /usr, /opt, /etc, /bin, /lib, /jvm — they have no project files.
+            - If a Maven dependency is missing, fix backend/pom.xml — do not search for local JARs.
+            - If a class fails to compile, it is a code issue — not a JDK installation problem.
 
             STRATEGY — always follow this order:
             1. Call run_compiler first to collect ALL current errors.
@@ -73,6 +81,7 @@ public class ErrorFixAgent {
             - Never inline a type that should be imported — add it to the source file instead.
             - Do not invent new abstractions or files not in ARCHITECTURE.json.
             - write_file requires the COMPLETE file content (not a diff). No markdown fences.
+            - Use list_files only within project directories (backend/, frontend/) — never system paths.
             """;
 
     private final LlmGeneratorService proLlm;
@@ -82,7 +91,7 @@ public class ErrorFixAgent {
     private final ObjectMapper specMapper = new ObjectMapper()
             .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
 
-    public ErrorFixAgent(@Qualifier("geminiPro") LlmGeneratorService proLlm,
+    public ErrorFixAgent(@Qualifier("claudeSonnet") LlmGeneratorService proLlm,
                          BuildToolService buildTool,
                          GeneratedFileRepository fileRepo) {
         this.proLlm = proLlm;
@@ -104,6 +113,15 @@ public class ErrorFixAgent {
         String trigger = "Begin: call run_compiler(\"" + (fileType == FileType.BACKEND ? "backend" : "frontend")
                 + "\") to see current errors, then investigate and fix them.";
 
+        BuildToolService.BuildResult preCheck = (fileType == FileType.BACKEND)
+                ? buildTool.runMvnCompile(compileDir)
+                : buildTool.runTscCheck(compileDir);
+        if (!preCheck.success()) {
+            String preview = preCheck.output();
+            if (preview.length() > 3000) preview = preview.substring(0, 3000) + "\n[...truncated]";
+            log.warn("[ErrorFixAgent] {} errors before fix loop:\n{}", fileType, preview);
+        }
+
         log.info("[ErrorFixAgent] Starting fix loop for {} — max {} tool rounds", fileType, MAX_TOOL_ROUNDS);
 
         proLlm.runFixAgentLoop(SYSTEM_PROMPT, trigger, tools,
@@ -118,7 +136,9 @@ public class ErrorFixAgent {
             log.info("[ErrorFixAgent] {} compilation passes after agent loop", fileType);
             return true;
         }
-        log.warn("[ErrorFixAgent] {} compilation still failing after agent loop", fileType);
+        String remainingErrors = finalResult.output();
+        if (remainingErrors.length() > 3000) remainingErrors = remainingErrors.substring(0, 3000) + "\n[...truncated]";
+        log.warn("[ErrorFixAgent] {} compilation still failing after agent loop:\n{}", fileType, remainingErrors);
         return false;
     }
 
@@ -226,7 +246,11 @@ public class ErrorFixAgent {
 
     private String listFiles(String directory, Path workspace) {
         if (directory == null || directory.isBlank()) directory = ".";
-        Path dir = workspace.resolve(directory);
+        Path dir = workspace.resolve(directory).normalize();
+        if (!dir.startsWith(workspace)) {
+            log.warn("[ErrorFixAgent] Tool execution error for list_files: Path traversal attempt blocked: {}", directory);
+            return "ERROR: list_files is restricted to the project workspace. Use relative paths like 'backend/src' or 'frontend/src/components'.";
+        }
         if (!Files.exists(dir)) return "DIRECTORY_NOT_FOUND: " + directory;
         try {
             String result = Files.walk(dir)
@@ -300,9 +324,9 @@ public class ErrorFixAgent {
 
                 ToolSpecification.builder()
                         .name("list_files")
-                        .description("List all files in a directory of the workspace.")
+                        .description("List all source files in a workspace directory. Use relative paths within the project only (e.g. 'backend/src/main/java', 'frontend/src/components'). System directories (/usr, /opt, /etc, /bin) are blocked and will return an error.")
                         .parameters(JsonObjectSchema.builder()
-                                .addStringProperty("directory", "Relative directory path, e.g. frontend/src/types")
+                                .addStringProperty("directory", "Relative directory path within the project workspace, e.g. backend/src/main/java/com/example or frontend/src/types")
                                 .required(List.of("directory"))
                                 .build())
                         .build()
