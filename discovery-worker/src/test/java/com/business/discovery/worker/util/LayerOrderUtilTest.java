@@ -126,12 +126,12 @@ class LayerOrderUtilTest {
 
     @Test
     void frontend_apiServiceByDirectory() {
-        assertThat(LayerOrderUtil.frontendPriority(fe("frontend/src/services/orderService.ts"))).isEqualTo(40);
+        assertThat(LayerOrderUtil.frontendPriority(fe("frontend/src/services/orderService.ts"))).isEqualTo(35);
     }
 
     @Test
     void frontend_apiClientByName() {
-        assertThat(LayerOrderUtil.frontendPriority(fe("frontend/src/api/client.ts"))).isEqualTo(40);
+        assertThat(LayerOrderUtil.frontendPriority(fe("frontend/src/api/client.ts"))).isEqualTo(35);
     }
 
     @Test

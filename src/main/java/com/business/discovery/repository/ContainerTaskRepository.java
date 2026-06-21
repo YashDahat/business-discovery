@@ -34,4 +34,6 @@ public interface ContainerTaskRepository extends JpaRepository<ContainerTask, UU
     long countByStatus(ContainerTaskStatus status);
 
     Optional<ContainerTask> findTopByBriefIdOrderByCreatedAtDesc(UUID briefId);
+
+    List<ContainerTask> findByRunId(UUID runId);
 }

@@ -36,4 +36,10 @@ public interface BusinessEntityRepository extends JpaRepository<BusinessEntity, 
     long countByScraperJobId(String scraperJobId);
 
     List<BusinessEntity> findByRunIdAndBusinessTier(UUID runId, String businessTier);
+
+    List<BusinessEntity> findByTitleContainingIgnoreCase(String search);
+
+    List<BusinessEntity> findByBusinessTier(String tier);
+
+    List<BusinessEntity> findAllByOrderByCreatedAtDesc();
 }

@@ -121,7 +121,7 @@ class ErrorFixAgentTest {
 
         agent.fix(FileType.BACKEND, ctx);
 
-        verify(buildTool).runMvnCompile(tempDir.resolve("backend"));
+        verify(buildTool, times(2)).runMvnCompile(tempDir.resolve("backend"));
         verify(buildTool, never()).runTscCheck(any());
     }
 
@@ -132,7 +132,7 @@ class ErrorFixAgentTest {
 
         agent.fix(FileType.FRONTEND, ctx);
 
-        verify(buildTool).runTscCheck(tempDir.resolve("frontend"));
+        verify(buildTool, times(2)).runTscCheck(tempDir.resolve("frontend"));
         verify(buildTool, never()).runMvnCompile(any());
     }
 

@@ -362,13 +362,15 @@ class FrontendGeneratorNodeTest {
     private BriefContext mockBriefContext() {
         return new BriefContext("Test Business", "Restaurant", "Pune",
                 "INFORMATIONAL", List.of(), List.of(), List.of(), Map.of(), List.of(),
-                "modern", "blue", "professional", "", "", "", null, null);
+                "modern", "blue", "professional", "", "", "", null, null,
+                "", "", "", "", "");
     }
 
     private BriefContext briefContextWithChanges(String changes) {
         return new BriefContext("Test Business", "Restaurant", "Pune",
                 "INFORMATIONAL", List.of(), List.of(), List.of(), Map.of(), List.of(),
-                "modern", "blue", "professional", "", "", "", changes, null);
+                "modern", "blue", "professional", "", "", "", changes, null,
+                "", "", "", "", "");
     }
 
     /** Creates a FileSpec where the instruction becomes both featureInstruction (via writeSpec) and fileRole. */

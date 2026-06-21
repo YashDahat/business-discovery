@@ -6,8 +6,10 @@ import com.business.discovery.dto.architect.ArchitectRunStatusResponse;
 import com.business.discovery.model.AgentEvent;
 import com.business.discovery.model.AgentRun;
 import com.business.discovery.model.ArchitectBrief;
+import com.business.discovery.model.ContainerTask;
+import com.business.discovery.repository.ArchitectBriefRepository;
+import com.business.discovery.repository.ContainerTaskRepository;
 import com.business.discovery.services.agent.AgentEventService;
-
 import com.business.discovery.services.agent.architect.ArchitectAgentBriefService;
 import com.business.discovery.services.agent.architect.ArchitectAgentGraphService;
 import com.business.discovery.services.agent.architect.ArchitectAgentRunService;
@@ -30,6 +32,16 @@ public class ArchitectController {
     private final ArchitectAgentGraphService architectAgentGraphService;
     private final ArchitectAgentRunService architectAgentRunService;
     private final AgentEventService agentEventService;
+    private final ArchitectBriefRepository architectBriefRepository;
+    private final ContainerTaskRepository containerTaskRepository;
+
+    private static final Map<String, Integer> NODE_STAGE = Map.of(
+            "ScrapeBusinessesNode", 0,
+            "FilterAndScoreNode", 1,
+            "ResearchIndustryNode", 2, "ResearchCompetitorsNode", 2,
+            "ResearchSeoNode", 2, "ResearchTechStackNode", 2,
+            "SynthesizeBriefNode", 3, "SaveBriefNode", 3
+    );
 
     // Trigger a new agent run — returns immediately with runId
     @PostMapping("/run")
@@ -95,4 +107,93 @@ public class ArchitectController {
     public ResponseEntity<List<AgentRun>> getAllRuns() {
         return ResponseEntity.ok(architectAgentRunService.getAllRuns());
     }
+
+    // Pipeline drill-down — node statuses + counts for a single run
+    @GetMapping("/run/{runId}/pipeline")
+    public ResponseEntity<PipelineResponse> getPipeline(@PathVariable UUID runId) {
+        ArchitectRunStatusResponse status = architectAgentRunService.getRunStatus(runId);
+
+        List<ArchitectBrief> briefs = architectBriefRepository.findAllByRunId(runId);
+        List<ContainerTask> tasks = containerTaskRepository.findByRunId(runId);
+
+        int sitesLive = (int) tasks.stream()
+                .filter(t -> t.getStatus() == ContainerTask.ContainerTaskStatus.COMPLETED
+                          && t.getGithubPrUrl() != null)
+                .count();
+
+        List<PipelineStage> stages = List.of(
+                new PipelineStage("Scrape",       "gosom · Google Maps",      architectStageStatus(0, status)),
+                new PipelineStage("Score",         "revenue tiering",           architectStageStatus(1, status)),
+                new PipelineStage("Research",      "Tavily web search",         architectStageStatus(2, status)),
+                new PipelineStage("Synthesis",     "Gemini ArchitectBrief",     architectStageStatus(3, status)),
+                new PipelineStage("Codegen",       "Coder containers",          codegenStatus(tasks, status)),
+                new PipelineStage("Validate",      "compile check",             validateStatus(tasks, status)),
+                new PipelineStage("Pull Request",  "GitHub App",                prStatus(tasks, status)),
+                new PipelineStage("Demo Deploy",   "EC2 demo env",              "pending")
+        );
+
+        return ResponseEntity.ok(new PipelineResponse(
+                runId,
+                status.status().name(),
+                status.keyword(),
+                status.location(),
+                status.scrapedCount() != null ? status.scrapedCount() : 0,
+                status.filteredCount() != null ? status.filteredCount() : 0,
+                briefs.size(),
+                sitesLive,
+                stages
+        ));
+    }
+
+    private String architectStageStatus(int stageIdx, ArchitectRunStatusResponse status) {
+        boolean completed = status.status() == AgentRun.AgentRunStatus.COMPLETED;
+        boolean failed    = status.status() == AgentRun.AgentRunStatus.FAILED;
+        int currentIdx = NODE_STAGE.getOrDefault(status.currentStep(), -1);
+
+        if (completed) return "passed";
+        if (failed) {
+            if (stageIdx < currentIdx)  return "passed";
+            if (stageIdx == currentIdx) return "failed";
+            return "pending";
+        }
+        if (stageIdx < currentIdx)  return "passed";
+        if (stageIdx == currentIdx) return "running";
+        return "pending";
+    }
+
+    private String codegenStatus(List<ContainerTask> tasks, ArchitectRunStatusResponse status) {
+        if (status.status() != AgentRun.AgentRunStatus.COMPLETED) return "pending";
+        if (tasks.isEmpty()) return "pending";
+        boolean anyRunning = tasks.stream().anyMatch(t ->
+                t.getStatus() == ContainerTask.ContainerTaskStatus.RUNNING ||
+                t.getStatus() == ContainerTask.ContainerTaskStatus.RETRYING);
+        boolean anyDone = tasks.stream().anyMatch(t ->
+                t.getStatus() == ContainerTask.ContainerTaskStatus.COMPLETED);
+        if (anyRunning) return "running";
+        if (anyDone)    return "passed";
+        return "pending";
+    }
+
+    private String validateStatus(List<ContainerTask> tasks, ArchitectRunStatusResponse status) {
+        return codegenStatus(tasks, status); // validate is part of the codegen container lifecycle
+    }
+
+    private String prStatus(List<ContainerTask> tasks, ArchitectRunStatusResponse status) {
+        if (status.status() != AgentRun.AgentRunStatus.COMPLETED) return "pending";
+        return tasks.stream().anyMatch(t -> t.getGithubPrUrl() != null) ? "passed" : "pending";
+    }
+
+    public record PipelineResponse(
+            UUID runId,
+            String status,
+            String query,
+            String location,
+            int scraped,
+            int tier1,
+            int briefs,
+            int sitesLive,
+            List<PipelineStage> stages
+    ) {}
+
+    public record PipelineStage(String name, String description, String status) {}
 }

@@ -16,4 +16,6 @@ public interface AgentEventRepository extends JpaRepository<AgentEvent, UUID> {
     List<AgentEvent> findByRunIdAndEventType(UUID runId, EventType eventType);
 
     long countByRunId(UUID runId);
+
+    List<AgentEvent> findTop50ByOrderByCreatedAtDesc();
 }

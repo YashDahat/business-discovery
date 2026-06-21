@@ -138,7 +138,8 @@ class InfraGeneratorNodeTest {
                 "Test Business", "Restaurant", "Pune", "INFORMATIONAL",
                 List.of(), List.of(), List.of(), Map.of(), List.of(),
                 "modern", "blue", "professional", "", "", "",
-                "Add Redis service", null);
+                "Add Redis service", null,
+                "", "", "", "", "");
 
         when(ctx.getFileManifest()).thenReturn(List.of(
                 new FileEntry("Dockerfile", FileType.INFRA, "Multi-stage build")
@@ -159,6 +160,7 @@ class InfraGeneratorNodeTest {
     private BriefContext mockBriefContext() {
         return new BriefContext("Test Business", "Restaurant", "Pune",
                 "INFORMATIONAL", List.of(), List.of(), List.of(), Map.of(), List.of(),
-                "modern", "blue", "professional", "", "", "", null, null);
+                "modern", "blue", "professional", "", "", "", null, null,
+                "", "", "", "", "");
     }
 }
