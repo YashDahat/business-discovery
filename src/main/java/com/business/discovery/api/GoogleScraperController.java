@@ -72,14 +72,17 @@ public class GoogleScraperController {
         ));
     }
 
-    // List businesses with optional search/category/tier filters + enriched status fields
+    // List businesses with optional search/category/tier/runId filters + enriched status fields
     @GetMapping("/businesses")
     public ResponseEntity<List<BusinessSummaryResponse>> getAllBusinesses(
             @RequestParam(required = false) String search,
             @RequestParam(required = false) String category,
-            @RequestParam(required = false) String tier) {
+            @RequestParam(required = false) String tier,
+            @RequestParam(required = false) UUID runId) {
 
-        List<BusinessEntity> businesses = businessEntityRepository.findAllByOrderByCreatedAtDesc();
+        List<BusinessEntity> businesses = runId != null
+                ? businessEntityRepository.findByRunId(runId)
+                : businessEntityRepository.findAllByOrderByCreatedAtDesc();
 
         if (search != null && !search.isBlank()) {
             String lower = search.toLowerCase();
@@ -103,6 +106,26 @@ public class GoogleScraperController {
                 .toList();
 
         return ResponseEntity.ok(result);
+    }
+
+    // Get full business detail by ID
+    @GetMapping("/businesses/{id}")
+    public ResponseEntity<BusinessDetailResponse> getBusinessById(@PathVariable UUID id) {
+        return businessEntityRepository.findById(id)
+                .map(b -> {
+                    Optional<ArchitectBrief> brief = architectBriefRepository.findByBusinessId(id);
+                    List<ContainerTask> tasks = containerTaskRepository.findByBusinessId(id);
+                    Optional<ContainerTask> latestTask = tasks.stream()
+                            .max(java.util.Comparator.comparing(ContainerTask::getCreatedAt));
+                    return ResponseEntity.ok(new BusinessDetailResponse(
+                            b,
+                            brief.orElse(null),
+                            latestTask.orElse(null),
+                            deriveOpsStatus(brief, latestTask),
+                            deriveScopeProgress(b, brief, latestTask)
+                    ));
+                })
+                .orElse(ResponseEntity.notFound().build());
     }
 
     // Get businesses by category — convenience endpoint
@@ -165,6 +188,14 @@ public class GoogleScraperController {
         if (latestTask.isPresent() && latestTask.get().getGithubPrUrl() != null) score++; // PR live
         return score + "/6";
     }
+
+    public record BusinessDetailResponse(
+            BusinessEntity business,
+            ArchitectBrief brief,
+            ContainerTask latestTask,
+            String opsStatus,
+            String scopeProgress
+    ) {}
 
     public record BusinessSummaryResponse(
             UUID id,

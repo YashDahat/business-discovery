@@ -87,6 +87,15 @@ public class ContainerTask {
     @Column(name = "github_token_expires_at")
     private LocalDateTime githubTokenExpiresAt;
 
+    @Column(name = "llm_input_tokens")
+    private Long llmInputTokens;
+
+    @Column(name = "llm_output_tokens")
+    private Long llmOutputTokens;
+
+    @Column(name = "generation_cost_usd")
+    private Double generationCostUsd;
+
     // ─── Timestamps ───────────────────────────────────────
     @Column(name = "spawned_at")
     private LocalDateTime spawnedAt;

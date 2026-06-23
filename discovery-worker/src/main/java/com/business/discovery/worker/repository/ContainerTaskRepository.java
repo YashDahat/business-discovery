@@ -28,4 +28,12 @@ public interface ContainerTaskRepository extends JpaRepository<ContainerTask, UU
     @Transactional
     @Query("UPDATE ContainerTask t SET t.status = :status WHERE t.id = :id")
     void updateStatus(@Param("id") UUID id, @Param("status") ContainerTaskStatus status);
+
+    @Modifying
+    @Transactional
+    @Query("UPDATE ContainerTask t SET t.llmInputTokens = :inputTokens, t.llmOutputTokens = :outputTokens, t.generationCostUsd = :costUsd WHERE t.id = :id")
+    void updateGenerationCost(@Param("id") UUID id,
+                              @Param("inputTokens") long inputTokens,
+                              @Param("outputTokens") long outputTokens,
+                              @Param("costUsd") double costUsd);
 }

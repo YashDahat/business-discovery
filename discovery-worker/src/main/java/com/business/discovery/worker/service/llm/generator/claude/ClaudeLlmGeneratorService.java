@@ -2,6 +2,7 @@ package com.business.discovery.worker.service.llm.generator.claude;
 
 import com.business.discovery.worker.constants.FailureType;
 import com.business.discovery.worker.errorhandler.WorkerException;
+import com.business.discovery.worker.service.LlmTokenAccumulator;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,12 +39,14 @@ public class ClaudeLlmGeneratorService extends LlmGeneratorService {
 
     private final String apiKey;
     private final String model;
+    private final LlmTokenAccumulator accumulator;
     private final HttpClient httpClient;
     private final ObjectMapper objectMapper;
 
-    public ClaudeLlmGeneratorService(String apiKey, String model) {
+    public ClaudeLlmGeneratorService(String apiKey, String model, LlmTokenAccumulator accumulator) {
         this.apiKey = apiKey;
         this.model = model;
+        this.accumulator = accumulator;
         this.httpClient = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(30))
                 .build();
@@ -65,6 +68,9 @@ public class ClaudeLlmGeneratorService extends LlmGeneratorService {
         userMsg.put("content", userPrompt);
 
         JsonNode response = send(body);
+        accumulator.record(model,
+                response.path("usage").path("input_tokens").asLong(),
+                response.path("usage").path("output_tokens").asLong());
         return response.path("content").get(0).path("text").asText();
     }
 
@@ -114,6 +120,7 @@ public class ClaudeLlmGeneratorService extends LlmGeneratorService {
             totalOutputTokens     += outputTok;
             totalCacheWriteTokens += cacheWriteTok;
             totalCacheReadTokens  += cacheReadTok;
+            accumulator.record(model, inputTok, outputTok);
 
             log.info("[ErrorFixAgent/Claude] round={} in={} out={} cache_write={} cache_read={} | cumul cost=${:.4f}",
                     round + 1, inputTok, outputTok, cacheWriteTok, cacheReadTok,

@@ -2,6 +2,7 @@ package com.business.discovery.worker.service.llm.generator.gemini;
 
 import com.business.discovery.worker.constants.FailureType;
 import com.business.discovery.worker.errorhandler.WorkerException;
+import com.business.discovery.worker.service.LlmTokenAccumulator;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.util.WorkspaceReader;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -31,10 +32,12 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
     private static final int MAX_TOOL_ROUNDS = 30;
 
     private final ChatModel model;
+    private final String modelKey;
+    private final LlmTokenAccumulator accumulator;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public GeminiLlmGeneratorService(String apiKey, String modelName, int maxOutputTokens,
-                                      Duration timeout) {
+                                      Duration timeout, LlmTokenAccumulator accumulator) {
         this.model = GoogleAiGeminiChatModel.builder()
                 .apiKey(apiKey)
                 .modelName(modelName)
@@ -42,6 +45,8 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
                 .timeout(timeout)
                 .temperature(0.3)
                 .build();
+        this.modelKey = modelName;
+        this.accumulator = accumulator;
     }
 
     // ── Standard single-turn call (used by all generation except enrichment) ─
@@ -52,6 +57,7 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
             ChatResponse response = model.chat(
                     SystemMessage.from(systemPrompt),
                     UserMessage.from(userPrompt));
+            recordUsage(response);
             return response.aiMessage().text();
         } catch (Exception e) {
             throw wrapException(e);
@@ -89,6 +95,7 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
                 throw wrapException(e);
             }
 
+            recordUsage(response);
             AiMessage aiMessage = response.aiMessage();
             messages.add(aiMessage);
 
@@ -131,6 +138,7 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
                 throw wrapException(e);
             }
 
+            recordUsage(response);
             AiMessage aiMessage = response.aiMessage();
             messages.add(aiMessage);
 
@@ -153,6 +161,14 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private void recordUsage(ChatResponse response) {
+        if (response.tokenUsage() != null) {
+            accumulator.record(modelKey,
+                    response.tokenUsage().inputTokenCount(),
+                    response.tokenUsage().outputTokenCount());
+        }
+    }
 
     private String extractParam(String argumentsJson, String key) {
         try {

@@ -1,5 +1,6 @@
 package com.business.discovery.worker.config;
 
+import com.business.discovery.worker.service.LlmTokenAccumulator;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.service.llm.generator.claude.ClaudeLlmGeneratorService;
 import com.business.discovery.worker.service.llm.generator.gemini.GeminiLlmGeneratorService;
@@ -43,21 +44,21 @@ public class LlmConfig {
 
     // Architecture spec planning — needs Gemini Pro's reasoning depth + high output limit
     @Bean("geminiPro")
-    public LlmGeneratorService geminiPro() {
+    public LlmGeneratorService geminiPro(LlmTokenAccumulator accumulator) {
         return new GeminiLlmGeneratorService(geminiApiKey, geminiProModel,
-                geminiProMaxTokens, java.time.Duration.ofSeconds(geminiProTimeoutSeconds));
+                geminiProMaxTokens, java.time.Duration.ofSeconds(geminiProTimeoutSeconds), accumulator);
     }
 
     // Backend / frontend / infra code generation — repetitive, Flash is sufficient and 10-15x cheaper
     @Bean("geminiFlash")
-    public LlmGeneratorService geminiFlash() {
+    public LlmGeneratorService geminiFlash(LlmTokenAccumulator accumulator) {
         return new GeminiLlmGeneratorService(geminiApiKey, geminiFlashModel,
-                geminiFlashMaxTokens, java.time.Duration.ofSeconds(geminiFlashTimeoutSeconds));
+                geminiFlashMaxTokens, java.time.Duration.ofSeconds(geminiFlashTimeoutSeconds), accumulator);
     }
 
     // Validation error fixing — Claude Sonnet excels at spotting and correcting subtle code bugs
     @Bean("claudeSonnet")
-    public LlmGeneratorService claudeSonnet() {
-        return new ClaudeLlmGeneratorService(anthropicApiKey, anthropicModel);
+    public LlmGeneratorService claudeSonnet(LlmTokenAccumulator accumulator) {
+        return new ClaudeLlmGeneratorService(anthropicApiKey, anthropicModel, accumulator);
     }
 }

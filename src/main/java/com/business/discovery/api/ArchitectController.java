@@ -34,6 +34,7 @@ public class ArchitectController {
     private final AgentEventService agentEventService;
     private final ArchitectBriefRepository architectBriefRepository;
     private final ContainerTaskRepository containerTaskRepository;
+    private final com.business.discovery.services.agent.architect.SingleBusinessBriefService singleBusinessBriefService;
 
     private static final Map<String, Integer> NODE_STAGE = Map.of(
             "ScrapeBusinessesNode", 0,
@@ -100,6 +101,39 @@ public class ArchitectController {
     @GetMapping("/run/{runId}/events")
     public ResponseEntity<List<AgentEvent>> getEvents(@PathVariable UUID runId) {
         return ResponseEntity.ok(agentEventService.getRunEvents(runId));
+    }
+
+    // Generate a brief for a specific business already in the DB (no scraping)
+    @PostMapping("/business/{businessId}/brief")
+    public ResponseEntity<Map<String, Object>> generateBriefForBusiness(
+            @PathVariable UUID businessId) {
+
+        if (architectBriefRepository.existsByBusinessId(businessId)) {
+            ArchitectBrief existing = architectBriefRepository.findByBusinessId(businessId).orElseThrow();
+            return ResponseEntity.ok(Map.of(
+                    "status", "ALREADY_EXISTS",
+                    "briefId", existing.getId().toString(),
+                    "message", "Brief already exists for this business"
+            ));
+        }
+
+        log.info("Single-business brief requested for businessId={}", businessId);
+        singleBusinessBriefService.generateAsync(businessId);
+
+        return ResponseEntity.accepted().body(Map.of(
+                "status", "GENERATING",
+                "businessId", businessId.toString(),
+                "message", "Brief generation started — poll GET /api/v2/architect/business/%s/brief for result"
+                        .formatted(businessId)
+        ));
+    }
+
+    // Poll for the brief once generated
+    @GetMapping("/business/{businessId}/brief")
+    public ResponseEntity<ArchitectBrief> getBriefForBusiness(@PathVariable UUID businessId) {
+        return architectBriefRepository.findByBusinessId(businessId)
+                .map(ResponseEntity::ok)
+                .orElse(ResponseEntity.notFound().build());
     }
 
     // List all runs — simple dashboard
