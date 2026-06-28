@@ -1,6 +1,7 @@
 import { apiClient } from '@/api/client'
 import type { BusinessSummary } from '@/types/businesses'
 import type { BusinessDetailResponse } from '@/types/businessDetail'
+import type { ContainerTask } from '@/types/containers'
 
 export const getBusinesses = (params: { search?: string; category?: string; tier?: string; runId?: string }) =>
   apiClient.get<BusinessSummary[]>('/api/v1/scraper/businesses', { params }).then(r => r.data)
@@ -13,3 +14,15 @@ export const runCoderAgent = (briefId: string, runId: string, businessId: string
 
 export const generateBrief = (businessId: string) =>
   apiClient.post(`/api/v2/architect/business/${businessId}/brief`).then(r => r.data)
+
+export const getTasksForBrief = (briefId: string) =>
+  apiClient.get<ContainerTask[]>(`/api/v3/coder/brief/${briefId}/tasks`).then(r => r.data)
+
+export const submitChanges = (briefId: string, requestedChanges: string) =>
+  apiClient.post(`/api/v3/coder/brief/${briefId}/changes`, { requestedChanges }).then(r => r.data)
+
+export type BriefGenerationStatus = 'GENERATING' | 'COMPLETED' | 'FAILED' | 'NOT_STARTED'
+export interface BriefStatusResponse { status: BriefGenerationStatus; businessId: string; error?: string }
+
+export const getBriefStatus = (businessId: string) =>
+  apiClient.get<BriefStatusResponse>(`/api/v2/architect/business/${businessId}/brief/status`).then(r => r.data)

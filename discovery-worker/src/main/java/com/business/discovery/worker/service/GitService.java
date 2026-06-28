@@ -134,6 +134,39 @@ public class GitService {
         }
     }
 
+    /**
+     * Stages docs/ARCHITECTURE.json, commits, and pushes to the given branch.
+     * Non-fatal: logs a warning on any error without propagating the exception,
+     * so a network blip never aborts an in-progress enrichment.
+     */
+    public void commitEnrichmentCheckpoint(Path repoDir, String featureName, String branch) {
+        try {
+            run(repoDir, List.of("git", "add", "docs/ARCHITECTURE.json"),
+                    "git add ARCHITECTURE.json failed");
+
+            // exit 0 = nothing staged for this file; exit 1 = staged change present
+            ProcessBuilder pb = new ProcessBuilder(
+                    "git", "diff", "--cached", "--quiet", "docs/ARCHITECTURE.json");
+            pb.redirectErrorStream(true);
+            pb.directory(repoDir.toFile());
+            Process proc = pb.start();
+            proc.waitFor();
+            if (proc.exitValue() == 0) {
+                log.debug("[GitService] ARCHITECTURE.json unchanged after enriching '{}' — no checkpoint commit", featureName);
+                return;
+            }
+
+            run(repoDir, List.of("git", "commit", "-m",
+                    "chore: enrichment checkpoint — " + featureName),
+                    "git commit failed for enrichment checkpoint");
+            run(repoDir, List.of("git", "push", "origin", branch),
+                    "git push failed for enrichment checkpoint");
+            log.info("[GitService] Enrichment checkpoint pushed for feature: {}", featureName);
+        } catch (Exception e) {
+            log.warn("[GitService] Enrichment checkpoint skipped for '{}' — {}", featureName, e.getMessage());
+        }
+    }
+
     // ── Internal ──────────────────────────────────────────────────────────
 
     private void run(Path workDir, List<String> cmd, String errorMsg) {

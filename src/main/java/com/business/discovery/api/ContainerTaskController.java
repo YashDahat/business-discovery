@@ -22,6 +22,7 @@ import java.io.Serializable;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 @Slf4j
@@ -265,38 +266,36 @@ public class ContainerTaskController {
 
     // GET /api/v3/containers/tasks/{taskId}/logs
     // Get container logs for a specific task
-//    @GetMapping("/tasks/{taskId}/logs")
-//    public ResponseEntity<Map<String, Object>> getTaskLogs(@PathVariable UUID taskId) {
-//        return containerTaskRepository.findById(taskId)
-//                .map(task -> {
-//                    // Return stored logs if container already exited
-//                    if (task.getContainerLogs() != null) {
-//                        return ResponseEntity.ok(Map.of(
-//                                "taskId", taskId.toString(),
-//                                "status", task.getStatus().name(),
-//                                "source", "stored",
-//                                "logs", task.getContainerLogs()
-//                        ));
-//                    }
-//                    // Fetch live logs if container still running
-//                    if (task.getDockerContainerId() != null) {
-//                        String liveLogs = dockerContainerService
-//                                .getContainerLogs(task.getDockerContainerId());
-//                        return ResponseEntity.ok(Map.<String, Object>of(
-//                                "taskId", taskId.toString(),
-//                                "status", task.getStatus().name(),
-//                                "source", "live",
-//                                "logs", liveLogs
-//                        ));
-//                    }
-//                    return ResponseEntity.ok(Map.<String, Object>of(
-//                            "taskId", taskId.toString(),
-//                            "status", task.getStatus().name(),
-//                            "logs", "No logs available"
-//                    ));
-//                })
-//                .orElse(ResponseEntity.notFound().build());
-//    }
+    @GetMapping("/tasks/{taskId}/logs")
+    public ResponseEntity<Map<String, Object>> getTaskLogs(@PathVariable UUID taskId) {
+        Optional<ContainerTask> opt = containerTaskRepository.findById(taskId);
+        if (opt.isEmpty()) {
+            return ResponseEntity.notFound().build();
+        }
+        ContainerTask task = opt.get();
+        if (task.getContainerLogs() != null) {
+            return ResponseEntity.ok(Map.<String, Object>of(
+                    "taskId", taskId.toString(),
+                    "status", task.getStatus().name(),
+                    "source", "stored",
+                    "logs", task.getContainerLogs()
+            ));
+        }
+        if (task.getDockerContainerId() != null) {
+            String liveLogs = dockerContainerService.getContainerLogs(task.getDockerContainerId());
+            return ResponseEntity.ok(Map.<String, Object>of(
+                    "taskId", taskId.toString(),
+                    "status", task.getStatus().name(),
+                    "source", "live",
+                    "logs", liveLogs
+            ));
+        }
+        return ResponseEntity.ok(Map.<String, Object>of(
+                "taskId", taskId.toString(),
+                "status", task.getStatus().name(),
+                "logs", "No logs available"
+        ));
+    }
 
     // GET /api/v3/containers/tasks/{taskId}/files
     // List all generated files for a task

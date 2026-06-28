@@ -7,6 +7,9 @@ Must-have features:
 Nice-to-have features: {{niceToHaveFeatures}}
 Architectural notes: {{architecturalNotes}}
 SEO keywords: {{seoKeywords}}
+== RESEARCH CONTEXT ==
+Competitor insights: {{competitorInsights}}
+Industry insights: {{industryInsights}}
 == DESIGN CONTEXT ==
 Visual direction: {{designDirection}}
 Color palette: {{colorScheme}}
@@ -210,6 +213,10 @@ SELF-VALIDATION (required before returning the JSON):
 Scan every file entry's imports_from list. Every path listed there must exist as a
 file_path entry in the files array. If any path is missing, add its file entry before
 returning. This is mandatory — missing entries cause generation to fail downstream.
+
+Also check types files: every FRONTEND feature that has a service.ts must have a
+companion frontend/src/types/<domain>.ts in the files array. If any is missing, add it
+now. The service.ts, hook.ts, and Page.tsx for that feature must all list it in imports_from.
 
 Also verify feature grouping before returning:
 - Every file in "files" has feature_name and file_role set (non-null, non-empty)?

@@ -18,6 +18,7 @@ import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
 import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
 import dev.langchain4j.model.chat.response.ChatResponse;
+import dev.langchain4j.model.googleai.GeminiThinkingConfig;
 import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
 import lombok.extern.slf4j.Slf4j;
 
@@ -37,14 +38,18 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public GeminiLlmGeneratorService(String apiKey, String modelName, int maxOutputTokens,
-                                      Duration timeout, LlmTokenAccumulator accumulator) {
-        this.model = GoogleAiGeminiChatModel.builder()
+                                      Duration timeout, int thinkingBudget, LlmTokenAccumulator accumulator) {
+        var builder = GoogleAiGeminiChatModel.builder()
                 .apiKey(apiKey)
                 .modelName(modelName)
                 .maxOutputTokens(maxOutputTokens)
                 .timeout(timeout)
-                .temperature(0.3)
-                .build();
+                .temperature(0.3);
+        if (thinkingBudget != 0) {
+            builder.thinkingConfig(
+                    GeminiThinkingConfig.builder().thinkingBudget(thinkingBudget).build());
+        }
+        this.model = builder.build();
         this.modelKey = modelName;
         this.accumulator = accumulator;
     }

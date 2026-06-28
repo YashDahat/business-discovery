@@ -14,6 +14,8 @@ import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.JavaImportSanitizer;
+import com.business.discovery.worker.util.JavaPackageSanitizer;
 import com.business.discovery.worker.util.LayerOrderUtil;
 import com.business.discovery.worker.util.WorkspaceReader;
 import lombok.extern.slf4j.Slf4j;
@@ -51,19 +53,22 @@ public class BackendGeneratorNode implements WorkerNode {
     private static final Pattern JAVA_IMPORT_PATTERN =
             Pattern.compile("^import\\s+([\\w.]+);", Pattern.MULTILINE);
 
+    // Layers that are purely mechanical (no business logic) — skip Pro spec compliance,
+    // mark SPEC_COMPLIANT immediately after compile passes.
+    // Threshold: backendPriority ≤ 40 = ENUM, ENTITY, DTO-ITEM, DTO, REPOSITORY
+    private static final int MECHANICAL_LAYER_THRESHOLD = 40;
+
     private final LlmGeneratorService flashLlm;
-    private final LlmGeneratorService proLlm;
     private final LlmGeneratorService fixLlm;
     private final BuildToolService buildToolService;
     private final GeneratedFileRepository fileRepo;
 
     public BackendGeneratorNode(@Qualifier("geminiFlash") LlmGeneratorService flashLlm,
-                                @Qualifier("geminiPro") LlmGeneratorService proLlm,
+                                @Qualifier("geminiPro") LlmGeneratorService ignoredProLlm,
                                 @Qualifier("geminiFlash") LlmGeneratorService fixLlm,
                                 BuildToolService buildToolService,
                                 GeneratedFileRepository fileRepo) {
         this.flashLlm = flashLlm;
-        this.proLlm = proLlm;
         this.fixLlm = fixLlm;
         this.buildToolService = buildToolService;
         this.fileRepo = fileRepo;
@@ -169,6 +174,8 @@ public class BackendGeneratorNode implements WorkerNode {
         content = stripNestedEnums(content, standaloneClassImports, entry.path());
         Files.createDirectories(filePath.getParent());
         Files.writeString(filePath, content);
+        JavaPackageSanitizer.sanitize(filePath);
+        JavaImportSanitizer.sanitize(filePath);
 
         ArchitectureJsonUtil.updateFileStatus(workspace, entry.path(), "GENERATED");
         upsertRecord(ctx, entry.path(), GeneratedFile.FileType.BACKEND, GeneratedFile.FileStatus.GENERATED);
@@ -188,6 +195,10 @@ public class BackendGeneratorNode implements WorkerNode {
                 upsertRecord(ctx, entry.path(), GeneratedFile.FileType.BACKEND, GeneratedFile.FileStatus.VALIDATED);
                 log.info("[BackendGeneratorNode] Compiled OK: {}", entry.path());
                 return "VALIDATED";
+            }
+
+            if (attempt == 0) {
+                injectMissingDependencies(backendDir.resolve("pom.xml"), result.output());
             }
 
             if (attempt < MAX_COMPILE_FIX_ATTEMPTS) {
@@ -226,13 +237,22 @@ public class BackendGeneratorNode implements WorkerNode {
                                    String featureInstruction, String fileRole,
                                    Map<String, FileSpec> specByPath,
                                    Map<String, String> standaloneClassImports) throws IOException {
+        // Mechanical layers (ENUM, ENTITY, DTO, REPOSITORY) have no business logic —
+        // if they compile they are correct. Skip the LLM compliance check entirely.
+        if (LayerOrderUtil.backendPriority(entry) <= MECHANICAL_LAYER_THRESHOLD) {
+            ArchitectureJsonUtil.updateFileStatus(workspace, entry.path(), "SPEC_COMPLIANT");
+            upsertRecord(ctx, entry.path(), GeneratedFile.FileType.BACKEND, GeneratedFile.FileStatus.SPEC_COMPLIANT);
+            log.info("[BackendGeneratorNode] Mechanical layer — auto-compliant: {}", entry.path());
+            return;
+        }
+
         // Combine fileRole + featureInstruction so the compliance check has full per-file context
         String combinedSpec = "FILE ROLE: " + (fileRole != null ? fileRole : "")
                 + "\n\nFEATURE INSTRUCTION:\n" + featureInstruction;
 
         for (int round = 0; round < MAX_SPEC_FIX_ROUNDS; round++) {
             String fileContent = Files.readString(filePath);
-            ComplianceResult compliance = proLlm.checkSpecCompliance(entry.path(), fileContent, combinedSpec);
+            ComplianceResult compliance = flashLlm.checkSpecCompliance(entry.path(), fileContent, combinedSpec);
 
             if (compliance.compliant()) {
                 ArchitectureJsonUtil.updateFileStatus(workspace, entry.path(), "SPEC_COMPLIANT");
@@ -348,6 +368,18 @@ public class BackendGeneratorNode implements WorkerNode {
     private static final Pattern MAVEN_ERROR_PATH =
             Pattern.compile("\\[ERROR\\] (/.+\\.java):\\[\\d+,\\d+\\]");
 
+    // Javac "package X does not exist" — maps to Maven coordinates for injection
+    private static final Pattern MISSING_PACKAGE_PATTERN =
+            Pattern.compile("package ([\\w.]+) does not exist");
+
+    private static final Map<String, String[]> PACKAGE_TO_MAVEN_COORDS = Map.of(
+            "org.modelmapper", new String[]{"org.modelmapper", "modelmapper",  "3.2.0"},
+            "com.razorpay",    new String[]{"com.razorpay",    "razorpay-java", "1.4.3"},
+            "org.json",        new String[]{"org.json",         "json",         "20240303"},
+            "com.stripe",      new String[]{"com.stripe",       "stripe-java",  "24.3.0"},
+            "com.twilio",      new String[]{"com.twilio.sdk",   "twilio",       "9.14.0"}
+    );
+
     private List<String> parseFailingFiles(String output, Path workspace) {
         LinkedHashSet<String> paths = new LinkedHashSet<>();
         Matcher m = MAVEN_ERROR_PATH.matcher(output);
@@ -359,6 +391,38 @@ public class BackendGeneratorNode implements WorkerNode {
             } catch (Exception ignored) {}
         }
         return new ArrayList<>(paths);
+    }
+
+    private void injectMissingDependencies(Path pomPath, String compileOutput) {
+        try {
+            String pom = Files.readString(pomPath);
+            StringBuilder toAdd = new StringBuilder();
+            Matcher m = MISSING_PACKAGE_PATTERN.matcher(compileOutput);
+            while (m.find()) {
+                String missingPkg = m.group(1);
+                for (Map.Entry<String, String[]> e : PACKAGE_TO_MAVEN_COORDS.entrySet()) {
+                    if (missingPkg.startsWith(e.getKey())) {
+                        String[] coords = e.getValue();
+                        String artifactTag = "<artifactId>" + coords[1] + "</artifactId>";
+                        if (!pom.contains(artifactTag) && !toAdd.toString().contains(artifactTag)) {
+                            toAdd.append("\t\t<dependency>\n")
+                                    .append("\t\t\t<groupId>").append(coords[0]).append("</groupId>\n")
+                                    .append("\t\t\t<artifactId>").append(coords[1]).append("</artifactId>\n")
+                                    .append("\t\t\t<version>").append(coords[2]).append("</version>\n")
+                                    .append("\t\t</dependency>\n");
+                            log.info("[BackendGeneratorNode] Injecting missing dep: {}:{}", coords[0], coords[1]);
+                        }
+                        break;
+                    }
+                }
+            }
+            if (toAdd.isEmpty()) return;
+            int idx = pom.lastIndexOf("</dependencies>");
+            if (idx == -1) return;
+            Files.writeString(pomPath, pom.substring(0, idx) + toAdd + pom.substring(idx));
+        } catch (IOException e) {
+            log.warn("[BackendGeneratorNode] Failed to inject missing deps: {}", e.getMessage());
+        }
     }
 
     /**

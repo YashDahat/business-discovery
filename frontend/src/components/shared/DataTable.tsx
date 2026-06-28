@@ -35,7 +35,8 @@ export function DataTable<T extends object>({
     defaultColDef: {
       resizable: true,
       sortable: true,
-      filter: false,
+      filter: true,
+      floatingFilter: true,
       flex: 1,
       minWidth: 80,
     },

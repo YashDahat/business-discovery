@@ -7,13 +7,16 @@ import com.business.discovery.model.ContainerTask;
 import com.business.discovery.repository.ArchitectBriefRepository;
 import com.business.discovery.repository.BusinessEntityRepository;
 import com.business.discovery.repository.ContainerTaskRepository;
+import com.business.discovery.services.container.DockerContainerService;
 import com.business.discovery.services.scraper.GoogleMapsScraperService;
+import com.business.discovery.services.scraper.ScraperContainerService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -24,9 +27,71 @@ import java.util.UUID;
 public class GoogleScraperController {
 
     private final GoogleMapsScraperService scraperService;
+    private final ScraperContainerService scraperContainerService;
+    private final DockerContainerService dockerContainerService;
     private final BusinessEntityRepository businessEntityRepository;
     private final ArchitectBriefRepository architectBriefRepository;
     private final ContainerTaskRepository containerTaskRepository;
+
+    // ─── Scraper container lifecycle ──────────────────────────────────────────
+
+    @GetMapping("/container/status")
+    public ResponseEntity<Map<String, String>> getContainerStatus() {
+        var status = scraperContainerService.getStatus();
+        return ResponseEntity.ok(Map.of(
+                "state", status.state().name(),
+                "containerId", status.containerId() != null ? status.containerId() : ""
+        ));
+    }
+
+    @PostMapping("/container/start")
+    public ResponseEntity<Map<String, String>> startContainer() {
+        log.info("Scraper container start requested");
+        try {
+            scraperContainerService.start();
+            return ResponseEntity.ok(Map.of(
+                    "state", "RUNNING",
+                    "message", "Scraper container started"
+            ));
+        } catch (Exception e) {
+            log.error("Failed to start scraper container: {}", e.getMessage());
+            return ResponseEntity.internalServerError().body(Map.of(
+                    "state", "ERROR",
+                    "message", e.getMessage()
+            ));
+        }
+    }
+
+    @PostMapping("/container/stop")
+    public ResponseEntity<Map<String, String>> stopContainer() {
+        log.info("Scraper container stop requested");
+        try {
+            scraperContainerService.stop();
+            return ResponseEntity.ok(Map.of(
+                    "state", "STOPPED",
+                    "message", "Scraper container stopped and removed"
+            ));
+        } catch (Exception e) {
+            log.error("Failed to stop scraper container: {}", e.getMessage());
+            return ResponseEntity.internalServerError().body(Map.of(
+                    "state", "ERROR",
+                    "message", e.getMessage()
+            ));
+        }
+    }
+
+    @GetMapping("/container/logs")
+    public ResponseEntity<Map<String, String>> getContainerLogs() {
+        var status = scraperContainerService.getStatus();
+        if (status.state() == ScraperContainerService.ContainerState.NOT_FOUND) {
+            return ResponseEntity.ok(Map.of("logs", "", "state", "NOT_FOUND"));
+        }
+        String logs = dockerContainerService.getContainerLogs(status.containerId());
+        return ResponseEntity.ok(Map.of(
+                "logs", logs != null ? logs : "",
+                "state", status.state().name()
+        ));
+    }
 
     // Submit job + wait + persist — full pipeline
     @PostMapping("/scrape")
@@ -239,7 +304,7 @@ public class GoogleScraperController {
             fastMode = fastMode != null ? fastMode : false;
             radius   = radius   != null ? radius   : 10000;
             email    = email    != null ? email    : false;
-            maxTime  = maxTime  != null ? maxTime  : 0;
+            maxTime  = maxTime  != null ? maxTime  : 60;
         }
     }
 

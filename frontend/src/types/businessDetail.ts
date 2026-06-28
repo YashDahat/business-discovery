@@ -32,7 +32,12 @@ export interface ContainerTaskSummary {
   id: string
   status: string
   attemptCount: number
+  maxAttempts: number
+  failureType: 'CODE' | 'INFRA' | 'CONFIG_AUTH' | null
+  errorMessage: string | null
+  dockerContainerId: string | null
   githubPrUrl: string | null
+  githubRepoUrl: string | null
   spawnedAt: string | null
   completedAt: string | null
   llmInputTokens: number | null

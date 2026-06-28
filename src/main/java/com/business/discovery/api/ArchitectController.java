@@ -117,13 +117,16 @@ public class ArchitectController {
             ));
         }
 
+        // Clear any previous failure so user can retry
+        singleBusinessBriefService.clearError(businessId);
+
         log.info("Single-business brief requested for businessId={}", businessId);
         singleBusinessBriefService.generateAsync(businessId);
 
         return ResponseEntity.accepted().body(Map.of(
                 "status", "GENERATING",
                 "businessId", businessId.toString(),
-                "message", "Brief generation started — poll GET /api/v2/architect/business/%s/brief for result"
+                "message", "Brief generation started — poll GET /api/v2/architect/business/%s/brief/status"
                         .formatted(businessId)
         ));
     }
@@ -134,6 +137,17 @@ public class ArchitectController {
         return architectBriefRepository.findByBusinessId(businessId)
                 .map(ResponseEntity::ok)
                 .orElse(ResponseEntity.notFound().build());
+    }
+
+    // Poll generation status — returns GENERATING, COMPLETED, FAILED, or NOT_STARTED
+    @GetMapping("/business/{businessId}/brief/status")
+    public ResponseEntity<Map<String, Object>> getBriefGenerationStatus(@PathVariable UUID businessId) {
+        var state = singleBusinessBriefService.getState(businessId);
+        var body = new java.util.HashMap<String, Object>();
+        body.put("status", state.status().name());
+        body.put("businessId", businessId.toString());
+        if (state.error() != null) body.put("error", state.error());
+        return ResponseEntity.ok(body);
     }
 
     // List all runs — simple dashboard

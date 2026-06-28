@@ -9,7 +9,7 @@ COPY src ./src
 RUN mvn clean package -DskipTests -q
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
-FROM eclipse-temurin:17-jre-jammy
+FROM eclipse-temurin:17-jdk-jammy
 WORKDIR /app
 
 # Node.js 20 LTS + npm

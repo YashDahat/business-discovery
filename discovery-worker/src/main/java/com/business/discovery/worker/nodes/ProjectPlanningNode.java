@@ -13,6 +13,7 @@ import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.ProjectDependencies;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
+import com.business.discovery.worker.service.GitService;
 import com.business.discovery.worker.service.SpringInitializrClient;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import com.business.discovery.worker.util.SlugUtil;
@@ -54,13 +55,19 @@ public class ProjectPlanningNode implements WorkerNode {
     private static final List<String> DEFAULT_NPM_PACKAGES =
             List.of("@tanstack/react-query", "react-hook-form", "zod", "axios", "react-router-dom");
 
-    private final LlmGeneratorService llm;
+    private final LlmGeneratorService llm;        // Pro — used for architecture spec generation only
+    private final LlmGeneratorService enrichLlm;  // Flash — used for per-feature enrichment
     private final SpringInitializrClient initializrClient;
+    private final GitService gitService;
 
     public ProjectPlanningNode(@Qualifier("geminiPro") LlmGeneratorService llm,
-                               SpringInitializrClient initializrClient) {
+                               @Qualifier("geminiFlash") LlmGeneratorService enrichLlm,
+                               SpringInitializrClient initializrClient,
+                               GitService gitService) {
         this.llm = llm;
+        this.enrichLlm = enrichLlm;
         this.initializrClient = initializrClient;
+        this.gitService = gitService;
     }
 
     @Override
@@ -107,13 +114,18 @@ public class ProjectPlanningNode implements WorkerNode {
         // ── Spec generation ───────────────────────────────────────────────────
         if (!skipGeneration) {
             spec = llm.generateArchitectureSpec(briefCtx, slug);
-            log.info("[ProjectPlanningNode] Generated spec with {} files for '{}'",
-                    spec.getFiles().size(), business.getTitle());
+            int fileCount = spec.getFiles() == null ? 0 : spec.getFiles().size();
+//            log.info("[ProjectPlanningNode] Generated spec with {} files for '{}'",
+//                    fileCount, business.getTitle());
+            if (fileCount == 0) {
+                throw new WorkerException(FailureType.CODE,
+                        "LLM returned architecture spec with 0 files — increase GEMINI_PRO_THINKING_BUDGET or check model response in logs");
+            }
         }
 
         // ── Enrich: one Pro call per feature — bounded output, resumable per-feature ──
         if (!skipEnrichment) {
-            enrichFeatures(spec, briefCtx, workspace);
+            enrichFeatures(spec, briefCtx, workspace, ctx.getGithubBranch());
             try {
                 writeEnrichmentDoc(workspace, spec, ctx.getAttemptNumber());
             } catch (IOException e) {
@@ -137,6 +149,26 @@ public class ProjectPlanningNode implements WorkerNode {
                 scaffoldVite(workspace, deps.getNpmPackages());
                 writeDockerArtifacts(workspace, slug);
                 log.info("[ProjectPlanningNode] CLI scaffold complete for '{}'", business.getTitle());
+            } else {
+                // Scaffold was already done on a prior attempt. Remove any Application.java
+                // that landed in a wrong sub-package (happens when packageName param was missing).
+                // Expected location: backend/src/main/java/com/<slug>/<ArtifactId>Application.java
+                Path expectedPackageDir = workspace.resolve("backend/src/main/java/com/" + slug);
+                Path javaRoot = workspace.resolve("backend/src/main/java");
+                if (Files.exists(javaRoot)) {
+                    try (var walk = Files.walk(javaRoot)) {
+                        walk.filter(p -> p.getFileName().toString().endsWith("Application.java"))
+                            .filter(p -> !p.getParent().equals(expectedPackageDir))
+                            .forEach(p -> {
+                                try {
+                                    Files.delete(p);
+                                    log.info("[ProjectPlanningNode] Removed stale Application.java at wrong package: {}", p);
+                                } catch (IOException e) {
+                                    log.warn("[ProjectPlanningNode] Could not remove stale Application.java: {}", p);
+                                }
+                            });
+                    }
+                }
             }
 
             ArchitectureJsonUtil.write(workspace, spec);
@@ -168,6 +200,7 @@ public class ProjectPlanningNode implements WorkerNode {
                 + "&groupId=com." + slug
                 + "&artifactId=" + slug + "-backend"
                 + "&name=" + slug + "backend"
+                + "&packageName=com." + slug
                 + "&dependencies=" + deps;
 
         log.info("[ProjectPlanningNode] Downloading Spring Initializr: {}", url);
@@ -254,18 +287,18 @@ public class ProjectPlanningNode implements WorkerNode {
                 \t\t<dependency>
                 \t\t\t<groupId>io.jsonwebtoken</groupId>
                 \t\t\t<artifactId>jjwt-api</artifactId>
-                \t\t\t<version>0.12.6</version>
+                \t\t\t<version>0.11.5</version>
                 \t\t</dependency>
                 \t\t<dependency>
                 \t\t\t<groupId>io.jsonwebtoken</groupId>
                 \t\t\t<artifactId>jjwt-impl</artifactId>
-                \t\t\t<version>0.12.6</version>
+                \t\t\t<version>0.11.5</version>
                 \t\t\t<scope>runtime</scope>
                 \t\t</dependency>
                 \t\t<dependency>
                 \t\t\t<groupId>io.jsonwebtoken</groupId>
                 \t\t\t<artifactId>jjwt-jackson</artifactId>
-                \t\t\t<version>0.12.6</version>
+                \t\t\t<version>0.11.5</version>
                 \t\t\t<scope>runtime</scope>
                 \t\t</dependency>
                 """;
@@ -476,7 +509,7 @@ public class ProjectPlanningNode implements WorkerNode {
                         && !f.getFeatureInstruction().isBlank());
     }
 
-    private void enrichFeatures(ArchitectureSpec spec, BriefContext briefCtx, Path workspace) {
+    private void enrichFeatures(ArchitectureSpec spec, BriefContext briefCtx, Path workspace, String branch) {
         List<FeatureSpec> features = spec.getFeatures();
         if (features == null || features.isEmpty()) {
             log.warn("[ProjectPlanningNode] No features in spec — enrichment skipped. " +
@@ -516,7 +549,7 @@ public class ProjectPlanningNode implements WorkerNode {
                     feature.getFeatureName(), featureFiles.size());
 
             // WorkerException (CODE/INFRA) propagates immediately — no catch-and-swallow
-            FeatureSpec enriched = llm.enrichFeature(feature, featureFiles, peerSummaries, briefCtx, workspaceReader);
+            FeatureSpec enriched = enrichLlm.enrichFeature(feature, featureFiles, peerSummaries, briefCtx, workspaceReader);
             features.set(i, enriched);
 
             // Checkpoint after every feature — enables resume on container retry
@@ -527,6 +560,10 @@ public class ProjectPlanningNode implements WorkerNode {
                 throw new WorkerException(FailureType.INFRA,
                         "Checkpoint write failed after enriching " + feature.getFeatureName()
                         + ": " + e.getMessage(), e);
+            }
+            // Push checkpoint to git so a fresh container can resume from this point
+            if (branch != null && !branch.isBlank()) {
+                gitService.commitEnrichmentCheckpoint(workspace, feature.getFeatureName(), branch);
             }
         }
         log.info("[ProjectPlanningNode] Feature enrichment complete — {} features processed", features.size());

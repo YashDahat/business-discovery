@@ -9,6 +9,7 @@ import com.business.discovery.worker.service.llm.BriefContext;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.ProjectDependencies;
+import com.business.discovery.worker.service.GitService;
 import com.business.discovery.worker.service.SpringInitializrClient;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.util.SlugUtil;
@@ -34,7 +35,9 @@ import static org.mockito.Mockito.when;
 class ProjectPlanningNodeTest {
 
     @Mock private LlmGeneratorService llm;
+    @Mock private LlmGeneratorService enrichLlm;
     @Mock private SpringInitializrClient initializrClient;
+    @Mock private GitService gitService;
     @Mock private WorkerContext ctx;
 
     @TempDir Path tempDir;
@@ -46,7 +49,7 @@ class ProjectPlanningNodeTest {
         org.mockito.Mockito.lenient().when(initializrClient.getDefaultBootVersion())
                 .thenReturn("3.4.5");
 
-        ProjectPlanningNode node = new ProjectPlanningNode(llm, initializrClient);
+        ProjectPlanningNode node = new ProjectPlanningNode(llm, enrichLlm, initializrClient, gitService);
 
         ArchitectBrief brief = ArchitectBrief.builder()
                 .id(UUID.randomUUID())

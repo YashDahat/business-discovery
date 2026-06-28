@@ -42,18 +42,27 @@ public class LlmConfig {
     @Value("${worker.llm.gemini.flash-timeout-seconds:90}")
     private int geminiFlashTimeoutSeconds;
 
+    // Thinking budget: GA thinking models need explicit budget; 0 = disabled (non-thinking models like Flash)
+    @Value("${worker.llm.gemini.pro-thinking-budget:16384}")
+    private int geminiProThinkingBudget;
+
+    @Value("${worker.llm.gemini.flash-thinking-budget:0}")
+    private int geminiFlashThinkingBudget;
+
     // Architecture spec planning — needs Gemini Pro's reasoning depth + high output limit
     @Bean("geminiPro")
     public LlmGeneratorService geminiPro(LlmTokenAccumulator accumulator) {
         return new GeminiLlmGeneratorService(geminiApiKey, geminiProModel,
-                geminiProMaxTokens, java.time.Duration.ofSeconds(geminiProTimeoutSeconds), accumulator);
+                geminiProMaxTokens, java.time.Duration.ofSeconds(geminiProTimeoutSeconds),
+                geminiProThinkingBudget, accumulator);
     }
 
     // Backend / frontend / infra code generation — repetitive, Flash is sufficient and 10-15x cheaper
     @Bean("geminiFlash")
     public LlmGeneratorService geminiFlash(LlmTokenAccumulator accumulator) {
         return new GeminiLlmGeneratorService(geminiApiKey, geminiFlashModel,
-                geminiFlashMaxTokens, java.time.Duration.ofSeconds(geminiFlashTimeoutSeconds), accumulator);
+                geminiFlashMaxTokens, java.time.Duration.ofSeconds(geminiFlashTimeoutSeconds),
+                geminiFlashThinkingBudget, accumulator);
     }
 
     // Validation error fixing — Claude Sonnet excels at spotting and correcting subtle code bugs

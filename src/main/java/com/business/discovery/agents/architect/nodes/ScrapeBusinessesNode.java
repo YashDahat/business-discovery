@@ -50,7 +50,7 @@ public class ScrapeBusinessesNode implements NodeAction<ArchitectAgentState> {
                     .fastMode((Boolean) config.getOrDefault("fastMode", false))
                     .radius((Integer) config.getOrDefault("radius", 10000))
                     .email((Boolean) config.getOrDefault("email",   false))
-                    .maxTime((Integer) config.getOrDefault("maxTime", 0))
+                    .maxTime((Integer) config.getOrDefault("maxTime", 60))
                     .lat((String)   config.get("lat"))
                     .lon((String)   config.get("lon"))
                     .proxies((List<String>) config.get("proxies"))

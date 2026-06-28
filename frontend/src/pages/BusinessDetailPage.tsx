@@ -1,20 +1,23 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import {
   ArrowLeft, Phone, Globe, MapPin, Clock, Star, ExternalLink,
   Utensils, ShoppingBag, Calendar, Mail, Image,
   FileText, Layers, Palette, Search, ChevronDown, ChevronUp,
-  Code2, CheckCircle2, Circle,
+  Code2, CheckCircle2, Circle, Square, RefreshCw, RotateCcw,
+  Terminal, Send, FolderOpen,
 } from 'lucide-react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useBusinessDetail } from '@/hooks/useBusinessDetail'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
-import { runCoderAgent, generateBrief } from '@/services/businessService'
+import { runCoderAgent, generateBrief, submitChanges, getBriefStatus } from '@/services/businessService'
+import { stopTask, retryTask, respawnForBrief, getTaskLogs, getTaskFiles } from '@/services/containerService'
 import type { OpsStatus } from '@/types/businesses'
-import type { ArchitectBrief, WebsiteType } from '@/types/businessDetail'
+import type { ArchitectBrief, ContainerTaskSummary, WebsiteType } from '@/types/businessDetail'
+import type { GeneratedFile } from '@/types/containers'
 
 const TIER_STYLE: Record<string, string> = {
   TIER_1:      'bg-emerald-950 text-emerald-400 border-emerald-800',
@@ -229,22 +232,59 @@ function ArchitectBriefPanel({ brief }: { brief: ArchitectBrief }) {
 
 const ACTIVE_STATUSES = new Set(['PENDING', 'RUNNING', 'RETRYING'])
 
-function AiPipelineCard({ business, brief, latestTask, opsStatus, onBriefTriggered }: {
+const FILE_TYPE_COLOR: Record<string, string> = {
+  BACKEND:  'text-blue-400',
+  FRONTEND: 'text-purple-400',
+  INFRA:    'text-amber-400',
+  CONFIG:   'text-[#888]',
+}
+
+const FILE_STATUS_COLOR: Record<string, string> = {
+  VALIDATED:        'text-emerald-400',
+  SPEC_COMPLIANT:   'text-emerald-400',
+  GENERATED:        'text-[#888]',
+  PENDING:          'text-[#555]',
+  GENERATION_FAILED:'text-red-400',
+  FAILED:           'text-red-400',
+}
+
+function AiPipelineCard({ business, brief, latestTask, opsStatus, onBriefTriggered, logsOpen, onLogsToggle }: {
   business: import('@/types/businessDetail').BusinessEntity
   brief: ArchitectBrief | null
-  latestTask: import('@/types/businessDetail').ContainerTaskSummary | null
+  latestTask: ContainerTaskSummary | null
   opsStatus: string
   onBriefTriggered: () => void
+  logsOpen: boolean
+  onLogsToggle: () => void
 }) {
   const queryClient = useQueryClient()
   const [runError, setRunError] = useState<string | null>(null)
   const [briefError, setBriefError] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
   const [isAwaitingBrief, setIsAwaitingBrief] = useState(false)
+  const [changesText, setChangesText] = useState('')
+  const [changesOpen, setChangesOpen] = useState(false)
+  const [filesOpen, setFilesOpen] = useState(false)
 
-  // Stop the loading state once the brief actually arrives
-  if (isAwaitingBrief && brief) {
-    setIsAwaitingBrief(false)
-  }
+  // Poll the backend status endpoint while we're waiting for the brief
+  const { data: briefStatus } = useQuery({
+    queryKey: ['brief-status', business.id],
+    queryFn: () => getBriefStatus(business.id),
+    enabled: isAwaitingBrief && !brief,
+    refetchInterval: isAwaitingBrief && !brief ? 4_000 : false,
+  })
+
+  // React to status changes from the status endpoint
+  useEffect(() => {
+    if (!isAwaitingBrief || !briefStatus) return
+    if (briefStatus.status === 'FAILED') {
+      setIsAwaitingBrief(false)
+      setBriefError(briefStatus.error ?? 'Brief generation failed — try again')
+    } else if (briefStatus.status === 'COMPLETED' || brief) {
+      setIsAwaitingBrief(false)
+      queryClient.invalidateQueries({ queryKey: ['business', business.id] })
+    }
+  }, [briefStatus, isAwaitingBrief, brief])
 
   const { mutate: triggerBrief, isPending: isBriefPending } = useMutation({
     mutationFn: () => generateBrief(business.id),
@@ -252,33 +292,78 @@ function AiPipelineCard({ business, brief, latestTask, opsStatus, onBriefTrigger
       setBriefError(null)
       setIsAwaitingBrief(true)
       onBriefTriggered()
-      queryClient.invalidateQueries({ queryKey: ['business', business.id] })
     },
     onError: (err: unknown) => {
-      setBriefError(err instanceof Error ? err.message : 'Failed to generate brief')
+      setBriefError(err instanceof Error ? err.message : 'Failed to start brief generation')
     },
   })
 
   const briefLoading = isBriefPending || isAwaitingBrief
 
-  const { mutate: triggerCoder, isPending } = useMutation({
+  const { mutate: triggerCoder, isPending: isCoderPending } = useMutation({
     mutationFn: () => runCoderAgent(brief!.id, brief!.runId, business.id),
     onSuccess: () => {
       setRunError(null)
       queryClient.invalidateQueries({ queryKey: ['business', business.id] })
     },
     onError: (err: unknown) => {
-      const msg = err instanceof Error ? err.message : 'Failed to trigger coder agent'
-      setRunError(msg)
+      setRunError(err instanceof Error ? err.message : 'Failed to trigger coder agent')
     },
+  })
+
+  const { mutate: doStop, isPending: isStopping } = useMutation({
+    mutationFn: () => stopTask(latestTask!.id),
+    onSuccess: () => {
+      setActionError(null)
+      queryClient.invalidateQueries({ queryKey: ['business', business.id] })
+    },
+    onError: (err: unknown) => setActionError(err instanceof Error ? err.message : 'Stop failed'),
+  })
+
+  const { mutate: doRetry, isPending: isRetrying } = useMutation({
+    mutationFn: () => retryTask(latestTask!.id),
+    onSuccess: () => {
+      setActionError(null)
+      queryClient.invalidateQueries({ queryKey: ['business', business.id] })
+    },
+    onError: (err: unknown) => setActionError(err instanceof Error ? err.message : 'Retry failed'),
+  })
+
+  const { mutate: doRespawn, isPending: isRespawning } = useMutation({
+    mutationFn: () => respawnForBrief(brief!.id),
+    onSuccess: () => {
+      setActionError(null)
+      queryClient.invalidateQueries({ queryKey: ['business', business.id] })
+    },
+    onError: (err: unknown) => setActionError(err instanceof Error ? err.message : 'Respawn failed'),
+  })
+
+  const { mutate: doSubmitChanges, isPending: isSubmittingChanges } = useMutation({
+    mutationFn: () => submitChanges(brief!.id, changesText),
+    onSuccess: () => {
+      setChangesText('')
+      setChangesOpen(false)
+      setActionError(null)
+      queryClient.invalidateQueries({ queryKey: ['business', business.id] })
+    },
+    onError: (err: unknown) => setActionError(err instanceof Error ? err.message : 'Submit failed'),
+  })
+
+  const { data: files, isFetching: filesLoading } = useQuery({
+    queryKey: ['task-files', latestTask?.id],
+    queryFn: () => getTaskFiles(latestTask!.id),
+    enabled: filesOpen && !!latestTask?.id,
+    staleTime: 30_000,
   })
 
   const taskStatus = latestTask?.status ?? null
   const isActive = taskStatus !== null && ACTIVE_STATUSES.has(taskStatus)
-  const canRun = !!brief && !isActive && !isPending
+  const canRun = !!brief && !isActive && !isCoderPending
+  const canRetry = taskStatus === 'FAILED' && (latestTask?.attemptCount ?? 0) < (latestTask?.maxAttempts ?? 3)
+  const canRespawn = !!brief && (taskStatus === 'FAILED' || taskStatus === 'COMPLETED')
 
   const stages = [
-    { label: 'Scraped',        done: true },
+    { label: 'Scraped',         done: true },
     { label: 'Scored / Tiered', done: !!business.businessTier },
     { label: 'Architect Brief', done: !!brief },
     { label: 'Code Generated',  done: !!latestTask },
@@ -310,9 +395,9 @@ function AiPipelineCard({ business, brief, latestTask, opsStatus, onBriefTrigger
         })}
       </div>
 
-      {/* Task status chip */}
+      {/* Task status chip + actions */}
       {taskStatus && (
-        <div className="mt-4 flex items-center gap-2">
+        <div className="mt-4 flex flex-wrap items-center gap-2">
           <span className="text-xs text-[#555]">Latest task:</span>
           <span className={cn(
             'text-xs font-medium px-2 py-0.5 rounded-full',
@@ -324,8 +409,66 @@ function AiPipelineCard({ business, brief, latestTask, opsStatus, onBriefTrigger
           )}>
             {taskStatus}
           </span>
-          {latestTask?.attemptCount != null && latestTask.attemptCount > 1 && (
-            <span className="text-xs text-[#555]">attempt {latestTask.attemptCount}</span>
+          {latestTask?.attemptCount != null && latestTask.attemptCount > 0 && (
+            <span className="text-xs text-[#555]">attempt {latestTask.attemptCount}/{latestTask.maxAttempts ?? 3}</span>
+          )}
+
+          <div className="ml-auto flex items-center gap-1.5">
+            {/* View Logs */}
+            <button
+              onClick={onLogsToggle}
+              className="flex items-center gap-1 text-xs text-[#555] hover:text-white transition-colors px-1.5 py-0.5 rounded border border-[#2a2a2a] hover:border-[#444]"
+            >
+              <Terminal className="h-3 w-3" />
+              {logsOpen ? 'Hide logs' : 'Logs'}
+            </button>
+            {/* View Files */}
+            <button
+              onClick={() => setFilesOpen(v => !v)}
+              className="flex items-center gap-1 text-xs text-[#555] hover:text-white transition-colors px-1.5 py-0.5 rounded border border-[#2a2a2a] hover:border-[#444]"
+            >
+              <FolderOpen className="h-3 w-3" />
+              Files
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Failure details */}
+      {taskStatus === 'FAILED' && latestTask?.errorMessage && (
+        <div className="mt-2 rounded border border-red-900 bg-red-950/30 p-2.5">
+          {latestTask.failureType && (
+            <span className="text-xs font-semibold text-red-400 uppercase tracking-wide">{latestTask.failureType} · </span>
+          )}
+          <span className="text-xs text-red-300">{latestTask.errorMessage}</span>
+        </div>
+      )}
+
+      {/* Files panel */}
+      {filesOpen && (
+        <div className="mt-2 rounded border border-[#2a2a2a] bg-[#0a0a0a]">
+          <div className="flex items-center justify-between px-3 py-1.5 border-b border-[#1e1e1e]">
+            <span className="text-xs text-[#555]">{files?.length ?? '…'} files</span>
+            <button onClick={() => setFilesOpen(false)} className="text-xs text-[#444] hover:text-white">✕</button>
+          </div>
+          {filesLoading ? (
+            <div className="p-3 text-xs text-[#555]">Loading…</div>
+          ) : files && files.length > 0 ? (
+            <div className="max-h-52 overflow-y-auto divide-y divide-[#1a1a1a]">
+              {files.map((f: GeneratedFile) => (
+                <div key={f.id} className="flex items-center gap-2 px-3 py-1.5">
+                  <span className={cn('text-xs font-mono w-16 shrink-0', FILE_TYPE_COLOR[f.fileType] ?? 'text-[#888]')}>
+                    {f.fileType}
+                  </span>
+                  <span className="text-xs text-[#aaa] font-mono truncate flex-1">{f.filePath}</span>
+                  <span className={cn('text-xs shrink-0', FILE_STATUS_COLOR[f.status] ?? 'text-[#555]')}>
+                    {f.status}
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="p-3 text-xs text-[#555]">No files generated yet</div>
           )}
         </div>
       )}
@@ -379,9 +522,10 @@ function AiPipelineCard({ business, brief, latestTask, opsStatus, onBriefTrigger
         </div>
       )}
 
-      {/* Run Coder Agent button */}
+      {/* Coder agent actions */}
       {brief && (
         <div className="mt-4 pt-4 border-t border-[#1e1e1e] flex flex-col gap-2">
+          {/* Primary run button */}
           <Button
             onClick={() => { setRunError(null); triggerCoder() }}
             disabled={!canRun}
@@ -392,18 +536,83 @@ function AiPipelineCard({ business, brief, latestTask, opsStatus, onBriefTrigger
                 : 'bg-[#1a1a1a] text-[#555] cursor-not-allowed'
             )}
           >
-            {isPending ? 'Starting…' :
-             isActive  ? `${taskStatus}…` :
-             latestTask ? 'Re-run Coder Agent' : 'Run Coder Agent'}
+            {isCoderPending ? 'Starting…' :
+             isActive       ? `${taskStatus}…` :
+             latestTask     ? 'Re-run Coder Agent' : 'Run Coder Agent'}
           </Button>
-          {runError && (
-            <p className="text-xs text-red-400">{runError}</p>
+
+          {/* Stop / Retry / Respawn row */}
+          {(taskStatus === 'RUNNING' || canRetry || canRespawn) && (
+            <div className="flex gap-2">
+              {taskStatus === 'RUNNING' && (
+                <Button
+                  onClick={() => doStop()}
+                  disabled={isStopping}
+                  className="flex-1 h-8 text-xs bg-red-950 text-red-400 hover:bg-red-900 border border-red-900"
+                >
+                  <Square className="h-3 w-3 mr-1" />
+                  {isStopping ? 'Stopping…' : 'Stop'}
+                </Button>
+              )}
+              {canRetry && (
+                <Button
+                  onClick={() => doRetry()}
+                  disabled={isRetrying}
+                  className="flex-1 h-8 text-xs bg-[#1a1a1a] text-amber-400 hover:bg-[#222] border border-[#2a2a2a]"
+                >
+                  <RefreshCw className="h-3 w-3 mr-1" />
+                  {isRetrying ? 'Retrying…' : 'Retry'}
+                </Button>
+              )}
+              {canRespawn && (
+                <Button
+                  onClick={() => doRespawn()}
+                  disabled={isRespawning}
+                  className="flex-1 h-8 text-xs bg-[#1a1a1a] text-[#888] hover:bg-[#222] border border-[#2a2a2a]"
+                >
+                  <RotateCcw className="h-3 w-3 mr-1" />
+                  {isRespawning ? 'Queuing…' : 'Respawn'}
+                </Button>
+              )}
+            </div>
           )}
+
+          {runError && <p className="text-xs text-red-400">{runError}</p>}
+          {actionError && <p className="text-xs text-red-400">{actionError}</p>}
           {isActive && (
             <p className="text-xs text-[#555] text-center">
               Agent is running — page will refresh automatically
             </p>
           )}
+
+          {/* Submit Changes section */}
+          <div className="mt-1">
+            <button
+              onClick={() => setChangesOpen(v => !v)}
+              className="flex items-center gap-1.5 text-xs text-[#555] hover:text-white transition-colors"
+            >
+              <Send className="h-3 w-3" />
+              {changesOpen ? 'Cancel changes' : 'Request changes'}
+            </button>
+            {changesOpen && (
+              <div className="mt-2 flex flex-col gap-2">
+                <textarea
+                  value={changesText}
+                  onChange={e => setChangesText(e.target.value)}
+                  placeholder="Describe what to change (e.g. add WhatsApp button, use blue colour scheme)…"
+                  rows={3}
+                  className="w-full rounded border border-[#2a2a2a] bg-[#0a0a0a] p-2 text-xs text-white placeholder-[#444] resize-none focus:outline-none focus:border-[#444]"
+                />
+                <Button
+                  onClick={() => doSubmitChanges()}
+                  disabled={!changesText.trim() || isSubmittingChanges}
+                  className="h-8 text-xs bg-[#1a1a1a] text-white hover:bg-[#222] border border-[#2a2a2a] disabled:opacity-40"
+                >
+                  {isSubmittingChanges ? 'Submitting…' : 'Submit & Re-queue'}
+                </Button>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -416,6 +625,17 @@ function AiPipelineCard({ business, brief, latestTask, opsStatus, onBriefTrigger
         >
           <ExternalLink className="h-4 w-4" />
           View GitHub PR
+        </a>
+      )}
+      {latestTask?.githubRepoUrl && (
+        <a
+          href={latestTask.githubRepoUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="mt-1 flex items-center gap-2 text-sm text-[#555] hover:text-white hover:underline"
+        >
+          <ExternalLink className="h-3.5 w-3.5" />
+          View GitHub Repo
         </a>
       )}
     </Section>
@@ -455,7 +675,22 @@ export default function BusinessDetailPage() {
   const { businessId } = useParams<{ businessId: string }>()
   const navigate = useNavigate()
   const [pollForBrief, setPollForBrief] = useState(false)
+  const [logsOpen, setLogsOpen] = useState(false)
   const { data, isLoading, isError } = useBusinessDetail(businessId ?? '', pollForBrief)
+
+  const latestTaskId = data?.latestTask?.id
+  const latestTaskStatus = data?.latestTask?.status
+  const latestContainerId = data?.latestTask?.dockerContainerId
+
+  const isActiveContainer = latestTaskStatus === 'RUNNING' || latestTaskStatus === 'RETRYING'
+
+  const { data: logsData, isFetching: logsLoading } = useQuery({
+    queryKey: ['task-logs', latestTaskId, latestContainerId],
+    queryFn: () => getTaskLogs(latestTaskId!),
+    enabled: logsOpen && !!latestTaskId,
+    refetchInterval: logsOpen && isActiveContainer ? 5_000 : false,
+    staleTime: 0,
+  })
 
   if (isLoading) return <LoadingSpinner />
   if (isError || !data) return <ErrorState />
@@ -592,8 +827,46 @@ export default function BusinessDetailPage() {
           latestTask={latestTask}
           opsStatus={opsStatus}
           onBriefTriggered={() => setPollForBrief(true)}
+          logsOpen={logsOpen}
+          onLogsToggle={() => setLogsOpen(v => !v)}
         />
       </div>
+
+      {/* Full-width logs panel */}
+      {logsOpen && latestTask && (
+        <div className="rounded-lg border border-[#1e1e1e] bg-[#0a0a0a] overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-[#1e1e1e]">
+            <div className="flex items-center gap-2">
+              {(latestTask.status === 'RUNNING' || latestTask.status === 'RETRYING') && (
+                <span className={`h-2 w-2 rounded-full shrink-0 animate-pulse ${latestTask.status === 'RETRYING' ? 'bg-orange-400' : 'bg-amber-400'}`} />
+              )}
+              <span className="text-xs font-mono text-[#555]">
+                {logsData?.source === 'live' ? 'live · ' : logsData?.source === 'stored' ? 'stored · ' : ''}
+                {latestTask.dockerContainerId
+                  ? latestTask.dockerContainerId.slice(0, 12)
+                  : `task ${latestTask.id.slice(0, 8)}`}
+              </span>
+              {(latestTask.status === 'RUNNING' || latestTask.status === 'RETRYING') && (
+                <span className="text-xs text-[#444]">auto-refreshes every 5s</span>
+              )}
+            </div>
+            <button
+              onClick={() => setLogsOpen(false)}
+              className="text-xs text-[#444] hover:text-white transition-colors px-1.5"
+            >
+              ✕ close
+            </button>
+          </div>
+          {logsLoading && !logsData ? (
+            <div className="p-4 text-xs text-[#555] font-mono">Fetching logs…</div>
+          ) : (
+            <pre className="p-4 text-xs font-mono text-[#ccc] whitespace-pre-wrap break-all leading-relaxed overflow-y-auto"
+              style={{ maxHeight: '60vh', minHeight: '200px' }}>
+              {logsData?.logs || 'No logs available yet'}
+            </pre>
+          )}
+        </div>
+      )}
 
       {/* Architect Brief */}
       {brief ? (

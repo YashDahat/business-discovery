@@ -50,8 +50,15 @@ public abstract class LlmGeneratorService {
         String user   = buildArchSpecUserPrompt(brief, slug, isUpdate);
 
         String json = stripMarkdown(callLlm(system, user));
+//        log.info("[LlmGeneratorService] Arch spec raw response length={} first500={}",
+//                json == null ? 0 : json.length(),
+//                json == null ? "null" : json.substring(0, Math.min(json.length(), 500)));
         try {
-            return SPEC_MAPPER.readValue(json, ArchitectureSpec.class);
+            ArchitectureSpec spec = SPEC_MAPPER.readValue(json, ArchitectureSpec.class);
+//            int fileCount = spec.getFiles() == null ? 0 : spec.getFiles().size();
+//            int featureCount = spec.getFeatures() == null ? 0 : spec.getFeatures().size();
+//            log.info("[LlmGeneratorService] Arch spec parsed: files={} features={}", fileCount, featureCount);
+            return spec;
         } catch (Exception e) {
             throw new WorkerException(FailureType.CODE,
                     "ARCHITECTURE.json parsing failed: " + e.getMessage(), e);
@@ -321,11 +328,13 @@ public abstract class LlmGeneratorService {
                 .with("niceToHaveFeatures", b.niceToHaveFeatures().toString())
                 .with("recommendedPages",   recommendedPagesList)
                 .with("architecturalNotes", b.architecturalNotes())
-                .with("seoKeywords",        b.seoKeywords().toString())
-                .with("designDirection",    b.designDirection())
-                .with("colorScheme",        b.colorScheme())
-                .with("tone",               b.tone())
-                .with("changesSection",     changesSection)
+                .with("seoKeywords",          b.seoKeywords().toString())
+                .with("competitorInsights",  b.competitorInsights() != null ? b.competitorInsights() : "")
+                .with("industryInsights",    b.industryInsights()   != null ? b.industryInsights()   : "")
+                .with("designDirection",     b.designDirection())
+                .with("colorScheme",         b.colorScheme())
+                .with("tone",                b.tone())
+                .with("changesSection",      changesSection)
                 .render();
     }
 

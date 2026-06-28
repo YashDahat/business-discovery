@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { Activity, Cpu, Play, TrendingUp, Building2, BarChart2, Shield } from 'lucide-react'
+import { Activity, Cpu, Play, TrendingUp, Building2, BarChart2, Shield, MapPin } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useContainerPool } from '@/hooks/useContainerPool'
 
@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { to: '/businesses', icon: Building2, label: 'Business Intel'  },
   { to: '/kpi',        icon: BarChart2, label: 'KPI Framework'   },
   { to: '/access',     icon: Shield,    label: 'Access & Roles'  },
+  { to: '/scraper',    icon: MapPin,    label: 'Scraper'         },
 ]
 
 export function Sidebar() {

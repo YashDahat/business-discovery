@@ -16,7 +16,7 @@ public record ArchitectRunRequest(
         Boolean fastMode,               // default: false
         Integer radius,                 // default: 10000 — search radius in meters
         Boolean email,                  // default: false — extract emails from websites
-        Integer maxTime,                // default: 0 — no time limit
+        Integer maxTime,                // default: 60 — max scrape time in minutes
         List<String> proxies            // default: null — no proxies
 ) {
     // Compact constructor — apply defaults for null values
@@ -27,6 +27,6 @@ public record ArchitectRunRequest(
         fastMode = fastMode != null ? fastMode : false;
         radius   = radius   != null ? radius   : 10000;
         email    = email    != null ? email    : false;
-        maxTime  = maxTime  != null ? maxTime  : 0;
+        maxTime  = maxTime  != null ? maxTime  : 60;
     }
 }

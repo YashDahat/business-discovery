@@ -56,6 +56,18 @@ public class DockerContainerService {
     @Value("${worker.llm.gemini.flash-model:gemini-2.5-flash}")
     private String geminiFlashModel;
 
+    @Value("${worker.llm.gemini.pro-timeout-seconds:600}")
+    private int geminiProTimeoutSeconds;
+
+    @Value("${worker.llm.gemini.flash-timeout-seconds:90}")
+    private int geminiFlashTimeoutSeconds;
+
+    @Value("${worker.llm.gemini.pro-thinking-budget:16384}")
+    private int geminiProThinkingBudget;
+
+    @Value("${worker.llm.gemini.flash-thinking-budget:0}")
+    private int geminiFlashThinkingBudget;
+
     @Value("${tavily.api-key:}")
     private String tavilyApiKey;
 
@@ -201,6 +213,10 @@ public class DockerContainerService {
         env.add("GEMINI_API_KEY=" + geminiApiKey);
         env.add("GEMINI_PRO_MODEL=" + geminiProModel);
         env.add("GEMINI_FLASH_MODEL=" + geminiFlashModel);
+        env.add("GEMINI_PRO_TIMEOUT_SECONDS=" + geminiProTimeoutSeconds);
+        env.add("GEMINI_FLASH_TIMEOUT_SECONDS=" + geminiFlashTimeoutSeconds);
+        env.add("GEMINI_PRO_THINKING_BUDGET=" + geminiProThinkingBudget);
+        env.add("GEMINI_FLASH_THINKING_BUDGET=" + geminiFlashThinkingBudget);
         env.add("ANTHROPIC_API_KEY=" + anthropicApiKey);
         env.add("TAVILY_API_KEY=" + tavilyApiKey);
 

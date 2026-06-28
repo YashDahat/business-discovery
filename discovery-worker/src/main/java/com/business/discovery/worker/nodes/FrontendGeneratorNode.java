@@ -15,6 +15,7 @@ import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import com.business.discovery.worker.util.LayerOrderUtil;
+import com.business.discovery.worker.util.TypeScriptImportChecker;
 import com.business.discovery.worker.util.WorkspaceReader;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -97,19 +98,21 @@ public class FrontendGeneratorNode implements WorkerNode {
             ];
             """;
 
+    // Layers that are purely mechanical — skip Pro spec compliance.
+    // Threshold: frontendPriority ≤ 30 = TYPE, CONSTANT, UTIL
+    private static final int MECHANICAL_LAYER_THRESHOLD = 30;
+
     private final LlmGeneratorService flashLlm;
-    private final LlmGeneratorService proLlm;
     private final LlmGeneratorService fixLlm;
     private final BuildToolService buildToolService;
     private final GeneratedFileRepository fileRepo;
 
     public FrontendGeneratorNode(@Qualifier("geminiFlash") LlmGeneratorService flashLlm,
-                                 @Qualifier("geminiPro") LlmGeneratorService proLlm,
+                                 @Qualifier("geminiPro") LlmGeneratorService ignoredProLlm,
                                  @Qualifier("geminiFlash") LlmGeneratorService fixLlm,
                                  BuildToolService buildToolService,
                                  GeneratedFileRepository fileRepo) {
         this.flashLlm = flashLlm;
-        this.proLlm = proLlm;
         this.fixLlm = fixLlm;
         this.buildToolService = buildToolService;
         this.fileRepo = fileRepo;
@@ -135,6 +138,12 @@ public class FrontendGeneratorNode implements WorkerNode {
             log.info("[FrontendGeneratorNode] No frontend files — skipping workspace setup");
             return;
         }
+
+        // Full set of manifest paths — used by TypeScriptImportChecker to distinguish
+        // "not generated yet" (pending) from "will never exist" (bad import).
+        Set<String> manifestPaths = frontendFiles.stream()
+                .map(FileEntry::path)
+                .collect(Collectors.toSet());
 
         boolean requestedChangesMode = ctx.getBriefCtx().requestedChanges() != null
                 && !ctx.getBriefCtx().requestedChanges().isBlank();
@@ -181,7 +190,7 @@ public class FrontendGeneratorNode implements WorkerNode {
                 if (needsGeneration) {
                     log.info("[FrontendGeneratorNode] Stage 3 — generating [{}]: {}", layerName(entry), entry.path());
                     status = runGenerateStage(ctx, workspace, entry, filePath, spec,
-                            featureInstruction, fileRole, requestedChangesMode, feature);
+                            featureInstruction, fileRole, requestedChangesMode, feature, manifestPaths);
                 }
 
                 // Stage 1: GENERATED → VALIDATED
@@ -212,7 +221,7 @@ public class FrontendGeneratorNode implements WorkerNode {
     private String runGenerateStage(WorkerContext ctx, Path workspace, FileEntry entry,
                                     Path filePath, FileSpec spec, String featureInstruction,
                                     String fileRole, boolean requestedChangesMode,
-                                    FeatureSpec feature) throws IOException {
+                                    FeatureSpec feature, Set<String> manifestPaths) throws IOException {
         Map<String, String> depFiles = loadDependencyFiles(workspace, spec);
         String existingContent = (requestedChangesMode && feature != null && feature.isChangeRequired())
                 ? readIfExists(filePath) : null;
@@ -221,6 +230,7 @@ public class FrontendGeneratorNode implements WorkerNode {
                 fileRole != null ? fileRole : "", depFiles, existingContent);
         Files.createDirectories(filePath.getParent());
         Files.writeString(filePath, content);
+        TypeScriptImportChecker.check(filePath, workspace, manifestPaths);
 
         ArchitectureJsonUtil.updateFileStatus(workspace, entry.path(), "GENERATED");
         upsertRecord(ctx, entry.path(), GeneratedFile.FileType.FRONTEND, GeneratedFile.FileStatus.GENERATED);
@@ -313,13 +323,22 @@ public class FrontendGeneratorNode implements WorkerNode {
                                    FileEntry entry, Path filePath, FileSpec spec,
                                    String featureInstruction, String fileRole,
                                    Map<String, FileSpec> specByPath) throws IOException {
+        // Mechanical layers (TYPE, CONSTANT, UTIL) have no business logic —
+        // if they compile they are correct. Skip the LLM compliance check entirely.
+        if (LayerOrderUtil.frontendPriority(entry) <= MECHANICAL_LAYER_THRESHOLD) {
+            ArchitectureJsonUtil.updateFileStatus(workspace, entry.path(), "SPEC_COMPLIANT");
+            upsertRecord(ctx, entry.path(), GeneratedFile.FileType.FRONTEND, GeneratedFile.FileStatus.SPEC_COMPLIANT);
+            log.info("[FrontendGeneratorNode] Mechanical layer — auto-compliant: {}", entry.path());
+            return;
+        }
+
         // Combine fileRole + featureInstruction so the compliance check has full per-file context
         String combinedSpec = "FILE ROLE: " + (fileRole != null ? fileRole : "")
                 + "\n\nFEATURE INSTRUCTION:\n" + featureInstruction;
 
         for (int round = 0; round < MAX_SPEC_FIX_ROUNDS; round++) {
             String fileContent = Files.readString(filePath);
-            ComplianceResult compliance = proLlm.checkSpecCompliance(entry.path(), fileContent, combinedSpec);
+            ComplianceResult compliance = flashLlm.checkSpecCompliance(entry.path(), fileContent, combinedSpec);
 
             if (compliance.compliant()) {
                 ArchitectureJsonUtil.updateFileStatus(workspace, entry.path(), "SPEC_COMPLIANT");

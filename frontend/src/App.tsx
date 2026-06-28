@@ -10,6 +10,7 @@ import BusinessIntelPage from '@/pages/BusinessIntelPage'
 import BusinessDetailPage from '@/pages/BusinessDetailPage'
 import KpiFrameworkPage from '@/pages/KpiFrameworkPage'
 import AccessRolesPage from '@/pages/AccessRolesPage'
+import ScraperPage from '@/pages/ScraperPage'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -36,6 +37,7 @@ export default function App() {
             <Route path="businesses/:businessId" element={<BusinessDetailPage />} />
             <Route path="kpi" element={<KpiFrameworkPage />} />
             <Route path="access" element={<AccessRolesPage />} />
+            <Route path="scraper" element={<ScraperPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>
