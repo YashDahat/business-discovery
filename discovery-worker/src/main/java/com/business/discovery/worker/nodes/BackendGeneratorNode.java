@@ -14,9 +14,15 @@ import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.CompileErrorClassifier;
+import com.business.discovery.worker.util.EnvVarScanner;
+import com.business.discovery.worker.util.JavaClassRegistry;
+import com.business.discovery.worker.util.JavaFileTemplater;
+import com.business.discovery.worker.util.JavaImportResolver;
 import com.business.discovery.worker.util.JavaImportSanitizer;
 import com.business.discovery.worker.util.JavaPackageSanitizer;
 import com.business.discovery.worker.util.LayerOrderUtil;
+import com.business.discovery.worker.service.GitService;
 import com.business.discovery.worker.util.WorkspaceReader;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -26,12 +32,14 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -58,20 +66,25 @@ public class BackendGeneratorNode implements WorkerNode {
     // Threshold: backendPriority ≤ 40 = ENUM, ENTITY, DTO-ITEM, DTO, REPOSITORY
     private static final int MECHANICAL_LAYER_THRESHOLD = 40;
 
+    private static final int CHECKPOINT_EVERY_N_FILES = 3;
+
     private final LlmGeneratorService flashLlm;
     private final LlmGeneratorService fixLlm;
     private final BuildToolService buildToolService;
     private final GeneratedFileRepository fileRepo;
+    private final GitService gitService;
 
     public BackendGeneratorNode(@Qualifier("geminiFlash") LlmGeneratorService flashLlm,
                                 @Qualifier("geminiPro") LlmGeneratorService ignoredProLlm,
                                 @Qualifier("geminiFlash") LlmGeneratorService fixLlm,
                                 BuildToolService buildToolService,
-                                GeneratedFileRepository fileRepo) {
+                                GeneratedFileRepository fileRepo,
+                                GitService gitService) {
         this.flashLlm = flashLlm;
         this.fixLlm = fixLlm;
         this.buildToolService = buildToolService;
         this.fileRepo = fileRepo;
+        this.gitService = gitService;
     }
 
     @Override
@@ -87,6 +100,13 @@ public class BackendGeneratorNode implements WorkerNode {
         // entity/DTO files instead of generating standalone files
         Map<String, String> standaloneClassImports = buildStandaloneClassImports(architectureSpec);
 
+        // Build class registry for deterministic import resolution (no LLM)
+        JavaClassRegistry classRegistry = JavaClassRegistry.buildFromSpec(architectureSpec);
+
+        // Proactively inject known third-party deps based on spec keywords — prevents reactive
+        // injection cycles where missing deps cause compile failures and waste fix-LLM attempts
+        preInjectDependencies(backendDir.resolve("pom.xml"), architectureSpec);
+
         List<FileEntry> backendFiles = ctx.getFileManifest().stream()
                 .filter(e -> e.type() == FileType.BACKEND)
                 .sorted(Comparator.comparingInt(LayerOrderUtil::backendPriority))
@@ -96,6 +116,12 @@ public class BackendGeneratorNode implements WorkerNode {
                 && !ctx.getBriefCtx().requestedChanges().isBlank();
 
         log.info("[BackendGeneratorNode] Processing {} backend files in layer order", backendFiles.size());
+
+        // Tracks files that accumulated GENERATION_FAILED during this run.
+        // Passed to runCompileStage so broken files can be hidden before mvn compile,
+        // preventing one failing file from cascading to poison all downstream files.
+        Set<Path> generationFailedFiles = new LinkedHashSet<>();
+        int filesProcessed = 0;
 
         try {
             for (FileEntry entry : backendFiles) {
@@ -119,27 +145,41 @@ public class BackendGeneratorNode implements WorkerNode {
 
                 String status = spec != null ? spec.getStatus() : "PLANNED";
 
-                // Stage 3: PLANNED → GENERATED (also forced in requestedChangesMode for changeRequired features)
+                // Stage 3: PLANNED → GENERATED
+                // GENERATION_FAILED is also regenerated on retry runs — give a fresh LLM attempt
                 boolean needsGeneration = "PLANNED".equalsIgnoreCase(status)
+                        || "GENERATION_FAILED".equalsIgnoreCase(status)
                         || (requestedChangesMode && feature != null && feature.isChangeRequired());
                 if (needsGeneration) {
                     log.info("[BackendGeneratorNode] Stage 3 — generating [{}]: {}", layerName(entry), entry.path());
                     status = runGenerateStage(ctx, workspace, entry, filePath, spec,
                             featureInstruction, fileRole, requestedChangesMode, feature,
-                            standaloneClassImports);
+                            standaloneClassImports, classRegistry);
                 }
 
                 // Stage 1: GENERATED → VALIDATED
                 if ("GENERATED".equalsIgnoreCase(status)) {
                     log.info("[BackendGeneratorNode] Stage 1 — compiling [{}]: {}", layerName(entry), entry.path());
-                    status = runCompileStage(ctx, workspace, backendDir, entry, filePath, spec, specByPath);
+                    status = runCompileStage(ctx, workspace, backendDir, entry, filePath, spec, specByPath, generationFailedFiles);
+                }
+
+                // Track files that accumulated failures this run — used to prevent cascade poisoning
+                if ("GENERATION_FAILED".equalsIgnoreCase(status)) {
+                    generationFailedFiles.add(workspace.resolve(entry.path()));
                 }
 
                 // Stage 2: VALIDATED → SPEC_COMPLIANT
                 if ("VALIDATED".equalsIgnoreCase(status)) {
                     log.info("[BackendGeneratorNode] Stage 2 — spec check [{}]: {}", layerName(entry), entry.path());
                     runSpecCheckStage(ctx, workspace, backendDir, entry, filePath, spec,
-                            featureInstruction, fileRole, specByPath, standaloneClassImports);
+                            featureInstruction, fileRole, specByPath, standaloneClassImports, generationFailedFiles);
+                }
+
+                // Push a WIP checkpoint every 3 files so work survives a container kill.
+                if (++filesProcessed % CHECKPOINT_EVERY_N_FILES == 0) {
+                    gitService.commitAndPushCheckpoint(workspace,
+                            "chore: backend wip — " + filesProcessed + " files (attempt " + ctx.getAttemptNumber() + ")",
+                            ctx.getGithubBranch());
                 }
             }
         } catch (WorkerException e) {
@@ -155,6 +195,14 @@ public class BackendGeneratorNode implements WorkerNode {
             log.warn("[BackendGeneratorNode] Recovery pass failed: {}", e.getMessage());
         }
 
+        // Scan all generated @Value annotations and add any missing keys to application.properties.
+        // Prevents Spring Boot startup failures from missing property bindings.
+        Path backendSrc = backendDir.resolve("src/main/java");
+        Path propsFile  = backendDir.resolve("src/main/resources/application.properties");
+        Set<String> valueKeys = EnvVarScanner.scanJavaFiles(backendSrc);
+        EnvVarScanner.augmentApplicationProperties(propsFile, valueKeys);
+        EnvVarScanner.augmentDotEnvExample(workspace, valueKeys);
+
         log.info("[BackendGeneratorNode] Done — {} backend files processed", backendFiles.size());
     }
 
@@ -163,31 +211,83 @@ public class BackendGeneratorNode implements WorkerNode {
     private String runGenerateStage(WorkerContext ctx, Path workspace, FileEntry entry,
                                     Path filePath, FileSpec spec, String featureInstruction,
                                     String fileRole, boolean requestedChangesMode,
-                                    FeatureSpec feature, Map<String, String> standaloneClassImports) throws IOException {
-        Map<String, String> depFiles = loadDependencyFiles(workspace, spec,
-                featureInstruction, fileRole, standaloneClassImports);
-        String existingContent = (requestedChangesMode && feature != null && feature.isChangeRequired())
-                ? readIfExists(filePath) : null;
-
-        String content = flashLlm.generateFileContent(entry.path(), featureInstruction,
-                fileRole != null ? fileRole : "", depFiles, existingContent);
-        content = stripNestedEnums(content, standaloneClassImports, entry.path());
+                                    FeatureSpec feature, Map<String, String> standaloneClassImports,
+                                    JavaClassRegistry classRegistry) throws IOException {
         Files.createDirectories(filePath.getParent());
+
+        int layerPriority = LayerOrderUtil.backendPriority(entry);
+        JavaFileTemplater.TemplateType templateType = JavaFileTemplater.classify(spec, layerPriority);
+
+        String content;
+        if (templateType != JavaFileTemplater.TemplateType.NONE) {
+            // Mechanical layer — generate from template, no LLM call
+            content = JavaFileTemplater.generate(spec, classRegistry.getBasePackage(), templateType);
+            if (content == null) {
+                // Template returned null for some reason — fall back to LLM
+                log.warn("[BackendGeneratorNode] Template returned null for {} — falling back to LLM", entry.path());
+                content = generateWithLlm(workspace, entry, spec, featureInstruction, fileRole,
+                        requestedChangesMode, feature, standaloneClassImports, existingContent(filePath, requestedChangesMode, feature));
+            }
+        } else {
+            content = generateWithLlm(workspace, entry, spec, featureInstruction, fileRole,
+                    requestedChangesMode, feature, standaloneClassImports, existingContent(filePath, requestedChangesMode, feature));
+        }
+
+        content = stripNestedEnums(content, standaloneClassImports, entry.path());
+        // Fix Spring Boot 4 / Jackson 3.x package rename before any other sanitizers run
+        content = fixSpringBoot4Imports(content);
+
+        // Truncation guard: if Flash hit its output token limit the file has unbalanced braces.
+        // A patch cannot fix a structurally incomplete file — skip all fix-LLM calls immediately.
+        if (isBraceTruncated(content)) {
+            log.warn("[BackendGeneratorNode] Truncated output detected for {} — marking GENERATION_FAILED (saves fix-LLM calls)", entry.path());
+            Files.writeString(filePath, content);
+            ArchitectureJsonUtil.updateFileStatus(workspace, entry.path(), "GENERATION_FAILED");
+            upsertRecord(ctx, entry.path(), GeneratedFile.FileType.BACKEND, GeneratedFile.FileStatus.GENERATION_FAILED);
+            return "GENERATION_FAILED";
+        }
+
         Files.writeString(filePath, content);
         JavaPackageSanitizer.sanitize(filePath);
         JavaImportSanitizer.sanitize(filePath);
+        // Deterministic import resolution — fixes wrong package prefixes and adds missing project imports
+        JavaImportResolver.resolve(filePath, classRegistry);
 
         ArchitectureJsonUtil.updateFileStatus(workspace, entry.path(), "GENERATED");
         upsertRecord(ctx, entry.path(), GeneratedFile.FileType.BACKEND, GeneratedFile.FileStatus.GENERATED);
         return "GENERATED";
     }
 
+    private String generateWithLlm(Path workspace, FileEntry entry, FileSpec spec,
+                                    String featureInstruction, String fileRole,
+                                    boolean requestedChangesMode, FeatureSpec feature,
+                                    Map<String, String> standaloneClassImports, String existingContent) {
+        Map<String, String> depFiles = loadDependencyFiles(workspace, spec,
+                featureInstruction, fileRole, standaloneClassImports);
+        return flashLlm.generateFileContent(entry.path(), featureInstruction,
+                fileRole != null ? fileRole : "", depFiles, existingContent);
+    }
+
+    private String existingContent(Path filePath, boolean requestedChangesMode, FeatureSpec feature) {
+        return (requestedChangesMode && feature != null && feature.isChangeRequired())
+                ? readIfExists(filePath) : null;
+    }
+
     // ── Stage 1: GENERATED → VALIDATED ───────────────────────────────────────
 
     private String runCompileStage(WorkerContext ctx, Path workspace, Path backendDir,
                                    FileEntry entry, Path filePath,
-                                   FileSpec spec, Map<String, FileSpec> specByPath) throws IOException {
+                                   FileSpec spec, Map<String, FileSpec> specByPath,
+                                   Set<Path> generationFailedFiles) throws IOException {
         WorkspaceReader reader = new WorkspaceReader(workspace);
+        // Build a minimal registry for error classification — uses spec already loaded in execute()
+        JavaClassRegistry classRegistry = JavaClassRegistry.buildFromSpec(loadSpec(workspace));
+
+        // Temporarily hide GENERATION_FAILED files from previous iterations so they cannot
+        // cascade their compile errors into the file currently being validated.
+        Map<Path, Path> hiddenFiles = hideGenerationFailedFiles(generationFailedFiles, filePath);
+        try {
+        boolean prevHadWrongImportPath = false;
         for (int attempt = 0; attempt <= MAX_COMPILE_FIX_ATTEMPTS; attempt++) {
             BuildToolService.BuildResult result = buildToolService.runMvnCompile(backendDir);
             if (result.success()) {
@@ -197,16 +297,57 @@ public class BackendGeneratorNode implements WorkerNode {
                 return "VALIDATED";
             }
 
-            if (attempt == 0) {
-                injectMissingDependencies(backendDir.resolve("pom.xml"), result.output());
+            // Javac-level truncation: "reached end of file while parsing" means the file is
+            // structurally incomplete — a patch cannot fix it, only regeneration can.
+            // Break immediately to skip all fix-LLM calls and go straight to GENERATION_FAILED.
+            if (isJavaTruncation(result.output())) {
+                log.warn("[BackendGeneratorNode] Java truncation error for {} — skipping all fix attempts", entry.path());
+                break;
             }
 
-            if (attempt < MAX_COMPILE_FIX_ATTEMPTS) {
+            // Classify errors to decide fix strategy
+            Set<CompileErrorClassifier.ErrorCategory> categories =
+                    CompileErrorClassifier.classify(result.output(), classRegistry);
+            log.info("[BackendGeneratorNode] Compile error categories (attempt {}): {}", attempt + 1, categories);
+
+            // WRONG_IMPORT_PATH persisting after a deterministic fix means the LLM introduced
+            // hallucinated sub-packages (e.g. com.biz.service.impl) that JavaImportResolver cannot
+            // fix — it only knows correct FQNs from the spec. Escalate to LLM after one failed
+            // deterministic attempt so the LLM can correct the package path itself.
+            boolean hasWrongImportPath = categories.contains(CompileErrorClassifier.ErrorCategory.WRONG_IMPORT_PATH);
+            if (hasWrongImportPath && prevHadWrongImportPath) {
+                log.warn("[BackendGeneratorNode] WRONG_IMPORT_PATH persists after deterministic fix — escalating to LLM");
+                categories.add(CompileErrorClassifier.ErrorCategory.LOGIC_ERROR);
+            }
+            prevHadWrongImportPath = hasWrongImportPath;
+
+            // Deterministic fixes first — these don't consume LLM tokens
+            if (CompileErrorClassifier.needsDeterministicFix(categories)) {
+                injectMissingDependencies(backendDir.resolve("pom.xml"), result.output());
+                // Re-run import resolver on all failing files; also apply SB4 Jackson migration
+                List<String> failingPaths = parseFailingFiles(result.output(), workspace);
+                for (String fp : failingPaths) {
+                    Path p = workspace.resolve(fp);
+                    if (Files.exists(p) && fp.endsWith(".java")) {
+                        String jContent = Files.readString(p);
+                        String jFixed = fixSpringBoot4Imports(jContent);
+                        if (!jFixed.equals(jContent)) {
+                            Files.writeString(p, jFixed);
+                            log.info("[BackendGeneratorNode] Fixed Spring Boot 4 Jackson imports in {}", fp);
+                        }
+                        JavaImportResolver.resolve(p, classRegistry);
+                    }
+                }
+                // If ONLY deterministic errors — don't count this as an LLM fix attempt
+                if (!CompileErrorClassifier.needsLlmFix(categories)) continue;
+            }
+
+            if (attempt < MAX_COMPILE_FIX_ATTEMPTS && CompileErrorClassifier.needsLlmFix(categories)) {
                 // Parse which files are actually failing — may not be the file we just wrote
                 List<String> toFix = parseFailingFiles(result.output(), workspace);
                 if (toFix.isEmpty()) toFix = List.of(entry.path());
 
-                log.warn("[BackendGeneratorNode] Compile failed (attempt {}/{}) — fixing {} file(s): {}",
+                log.warn("[BackendGeneratorNode] Compile failed (attempt {}/{}) — LLM fix for {} file(s): {}",
                         attempt + 1, MAX_COMPILE_FIX_ATTEMPTS, toFix.size(), toFix);
 
                 for (String failingPath : toFix) {
@@ -218,8 +359,12 @@ public class BackendGeneratorNode implements WorkerNode {
                     Map<String, String> fixCtx = buildFixContext(reader, failingSpec, triggerFilePath);
                     String content = reader.readFile(failingPath);
                     String fixed = fixLlm.fixFileContent(failingPath, content, result.output(), fixCtx);
+                    // Apply SB4 Jackson migration after LLM fix — LLM may re-introduce old imports
+                    fixed = fixSpringBoot4Imports(fixed);
                     Files.writeString(workspace.resolve(failingPath), fixed);
                 }
+            } else if (attempt >= MAX_COMPILE_FIX_ATTEMPTS) {
+                break;
             }
         }
 
@@ -228,6 +373,9 @@ public class BackendGeneratorNode implements WorkerNode {
         ArchitectureJsonUtil.updateFileStatus(workspace, entry.path(), "GENERATION_FAILED");
         upsertRecord(ctx, entry.path(), GeneratedFile.FileType.BACKEND, GeneratedFile.FileStatus.GENERATION_FAILED);
         return "GENERATION_FAILED";
+        } finally {
+            restoreHiddenFiles(hiddenFiles);
+        }
     }
 
     // ── Stage 2: VALIDATED → SPEC_COMPLIANT ──────────────────────────────────
@@ -236,7 +384,8 @@ public class BackendGeneratorNode implements WorkerNode {
                                    FileEntry entry, Path filePath, FileSpec spec,
                                    String featureInstruction, String fileRole,
                                    Map<String, FileSpec> specByPath,
-                                   Map<String, String> standaloneClassImports) throws IOException {
+                                   Map<String, String> standaloneClassImports,
+                                   Set<Path> generationFailedFiles) throws IOException {
         // Mechanical layers (ENUM, ENTITY, DTO, REPOSITORY) have no business logic —
         // if they compile they are correct. Skip the LLM compliance check entirely.
         if (LayerOrderUtil.backendPriority(entry) <= MECHANICAL_LAYER_THRESHOLD) {
@@ -281,9 +430,65 @@ public class BackendGeneratorNode implements WorkerNode {
             ArchitectureJsonUtil.updateFileStatus(workspace, entry.path(), "GENERATED");
 
             // Re-run Stage 1 on the corrected file
-            String newStatus = runCompileStage(ctx, workspace, backendDir, entry, filePath, spec, specByPath);
+            String newStatus = runCompileStage(ctx, workspace, backendDir, entry, filePath, spec, specByPath, generationFailedFiles);
             if (!"VALIDATED".equalsIgnoreCase(newStatus)) return; // GENERATION_FAILED — stop
         }
+    }
+
+    // ── Cascade contamination prevention ─────────────────────────────────────
+
+    /**
+     * Moves GENERATION_FAILED files to a system temp directory so mvn compile cannot see them.
+     * Using /tmp (not .bak in-place) keeps the workspace clean — git can never pick up
+     * stray .java.bak files regardless of container crashes or unexpected exits.
+     * If the container dies mid-compile the temp files stay in /tmp and are cleaned on reboot.
+     *
+     * Returns a map of original path → temp location for restoration in the finally block.
+     */
+    private Map<Path, Path> hideGenerationFailedFiles(Set<Path> failedFiles, Path excludeFile) {
+        if (failedFiles.isEmpty()) return Map.of();
+        Path tempDir;
+        try {
+            tempDir = Files.createTempDirectory("worker-hide-");
+        } catch (IOException e) {
+            log.warn("[BackendGeneratorNode] Could not create temp dir for hiding files: {}", e.getMessage());
+            return Map.of();
+        }
+        Map<Path, Path> hidden = new LinkedHashMap<>();
+        for (Path f : failedFiles) {
+            if (f.equals(excludeFile) || !Files.exists(f)) continue;
+            Path temp = tempDir.resolve(f.getFileName());
+            try {
+                Files.move(f, temp, StandardCopyOption.REPLACE_EXISTING);
+                hidden.put(f, temp);
+            } catch (IOException e) {
+                log.warn("[BackendGeneratorNode] Could not hide {}: {}", f.getFileName(), e.getMessage());
+            }
+        }
+        if (!hidden.isEmpty()) {
+            log.info("[BackendGeneratorNode] Hid {} GENERATION_FAILED file(s) to prevent cascade poisoning", hidden.size());
+        }
+        return hidden;
+    }
+
+    /** Restores files previously moved out of the workspace by hideGenerationFailedFiles. */
+    private void restoreHiddenFiles(Map<Path, Path> hiddenFiles) {
+        for (Map.Entry<Path, Path> e : hiddenFiles.entrySet()) {
+            Path original = e.getKey();
+            Path temp = e.getValue();
+            if (Files.exists(temp)) {
+                try {
+                    Files.move(temp, original, StandardCopyOption.REPLACE_EXISTING);
+                } catch (IOException ex) {
+                    log.warn("[BackendGeneratorNode] Could not restore {}: {}", original.getFileName(), ex.getMessage());
+                }
+            }
+        }
+        // Best-effort cleanup of temp dir(s)
+        hiddenFiles.values().stream()
+                .map(Path::getParent)
+                .distinct()
+                .forEach(dir -> { try { Files.deleteIfExists(dir); } catch (IOException ignored) {} });
     }
 
     // ── shouldSkip ────────────────────────────────────────────────────────────
@@ -292,8 +497,9 @@ public class BackendGeneratorNode implements WorkerNode {
         if (spec == null) return false;
         if (requestedChangesMode) return feature == null || !feature.isChangeRequired();
         String status = spec.getStatus();
+        // GENERATION_FAILED must NOT be skipped — re-generate on retry runs
         return "SPEC_COMPLIANT".equalsIgnoreCase(status)
-                || "GENERATION_FAILED".equalsIgnoreCase(status);
+                || "VALIDATED".equalsIgnoreCase(status);
     }
 
     // ── Spec loading ──────────────────────────────────────────────────────────
@@ -368,17 +574,49 @@ public class BackendGeneratorNode implements WorkerNode {
     private static final Pattern MAVEN_ERROR_PATH =
             Pattern.compile("\\[ERROR\\] (/.+\\.java):\\[\\d+,\\d+\\]");
 
-    // Javac "package X does not exist" — maps to Maven coordinates for injection
+    // Javac "package X does not exist" — maps to Maven coordinates for injection.
+    // Value is a list of {groupId, artifactId, version, scope?} arrays
+    // (some packages like jjwt need multiple artifacts).
     private static final Pattern MISSING_PACKAGE_PATTERN =
             Pattern.compile("package ([\\w.]+) does not exist");
 
-    private static final Map<String, String[]> PACKAGE_TO_MAVEN_COORDS = Map.of(
-            "org.modelmapper", new String[]{"org.modelmapper", "modelmapper",  "3.2.0"},
-            "com.razorpay",    new String[]{"com.razorpay",    "razorpay-java", "1.4.3"},
-            "org.json",        new String[]{"org.json",         "json",         "20240303"},
-            "com.stripe",      new String[]{"com.stripe",       "stripe-java",  "24.3.0"},
-            "com.twilio",      new String[]{"com.twilio.sdk",   "twilio",       "9.14.0"}
+    // Natural-language keywords found in spec descriptions that hint at which packages are needed
+    private static final Map<String, String> KEYWORD_TO_PACKAGE = Map.of(
+            "razorpay",    "com.razorpay",
+            "stripe",      "com.stripe",
+            "twilio",      "com.twilio",
+            "modelmapper", "org.modelmapper",
+            "sendgrid",    "com.sendgrid",
+            "cloudinary",  "com.cloudinary",
+            "opencsv",     "com.opencsv",
+            "gson",        "com.google.gson"
     );
+
+    // Each entry: package prefix → 2-D array of Maven artifact rows: {groupId, artifactId, version, scope?}
+    // Using String[][] avoids List.of(String[]) varargs ambiguity at the Java compiler level.
+    private static final Map<String, String[][]> PACKAGE_TO_MAVEN_COORDS;
+    static {
+        Map<String, String[][]> m = new java.util.LinkedHashMap<>();
+        m.put("org.modelmapper",          new String[][]{{"org.modelmapper",    "modelmapper",        "3.2.0",    null}});
+        m.put("com.razorpay",             new String[][]{{"com.razorpay",       "razorpay-java",      "1.4.3",    null}});
+        m.put("org.json",                 new String[][]{{"org.json",            "json",               "20240303", null}});
+        m.put("com.stripe",               new String[][]{{"com.stripe",          "stripe-java",        "24.3.0",   null}});
+        m.put("com.twilio",               new String[][]{{"com.twilio.sdk",      "twilio",             "9.14.0",   null}});
+        m.put("com.sendgrid",             new String[][]{{"com.sendgrid",        "sendgrid-java",      "4.10.2",   null}});
+        m.put("com.cloudinary",           new String[][]{{"com.cloudinary",      "cloudinary-http45",  "1.39.0",   null}});
+        m.put("org.apache.commons.lang3", new String[][]{{"org.apache.commons",  "commons-lang3",      "3.14.0",   null}});
+        m.put("org.apache.commons.io",    new String[][]{{"commons-io",          "commons-io",         "2.15.1",   null}});
+        m.put("com.google.gson",          new String[][]{{"com.google.code.gson","gson",               "2.10.1",   null}});
+        m.put("com.opencsv",              new String[][]{{"com.opencsv",          "opencsv",           "5.9",      null}});
+        // jjwt is already injected by ProjectPlanningNode.injectJwtDependencies() at scaffold time;
+        // this entry is a safety net for retry runs where pom.xml was reset from git.
+        m.put("io.jsonwebtoken",          new String[][]{
+                {"io.jsonwebtoken", "jjwt-api",     "0.11.5", null},
+                {"io.jsonwebtoken", "jjwt-impl",    "0.11.5", "runtime"},
+                {"io.jsonwebtoken", "jjwt-jackson", "0.11.5", "runtime"}
+        });
+        PACKAGE_TO_MAVEN_COORDS = java.util.Collections.unmodifiableMap(m);
+    }
 
     private List<String> parseFailingFiles(String output, Path workspace) {
         LinkedHashSet<String> paths = new LinkedHashSet<>();
@@ -393,27 +631,60 @@ public class BackendGeneratorNode implements WorkerNode {
         return new ArrayList<>(paths);
     }
 
-    private void injectMissingDependencies(Path pomPath, String compileOutput) {
+    private void preInjectDependencies(Path pomPath, ArchitectureSpec spec) {
+        if (!Files.exists(pomPath)) return;
+        if (spec.getFiles() == null) return;
+        // Collect all spec text that might hint at which packages are needed
+        StringBuilder text = new StringBuilder();
+        for (FileSpec f : spec.getFiles()) {
+            if (f.getDescription() != null) text.append(f.getDescription().toLowerCase()).append(' ');
+            if (f.getFileRole() != null) text.append(f.getFileRole().toLowerCase()).append(' ');
+        }
+        if (spec.getFeatures() != null) {
+            for (var feat : spec.getFeatures()) {
+                if (feat.getFeatureInstruction() != null) text.append(feat.getFeatureInstruction().toLowerCase()).append(' ');
+            }
+        }
+        String specText = text.toString();
+
+        // Find which package prefixes are hinted at by the spec
+        Set<String> neededPackagePrefixes = new LinkedHashSet<>();
+        for (Map.Entry<String, String> kwEntry : KEYWORD_TO_PACKAGE.entrySet()) {
+            if (specText.contains(kwEntry.getKey())) {
+                neededPackagePrefixes.add(kwEntry.getValue());
+            }
+        }
+
+        if (neededPackagePrefixes.isEmpty()) return;
+        log.info("[BackendGeneratorNode] Pre-injecting deps for detected keywords: {}", neededPackagePrefixes);
+        injectPackageDeps(pomPath, neededPackagePrefixes);
+
+        // Also inject spec-declared mavenDependencies if present
+        if (spec.getProjectDependencies() != null
+                && spec.getProjectDependencies().getMavenDependencies() != null) {
+            injectSpecDeclaredDeps(pomPath, spec.getProjectDependencies().getMavenDependencies());
+        }
+    }
+
+    private void injectPackageDeps(Path pomPath, Set<String> packagePrefixes) {
         try {
             String pom = Files.readString(pomPath);
             StringBuilder toAdd = new StringBuilder();
-            Matcher m = MISSING_PACKAGE_PATTERN.matcher(compileOutput);
-            while (m.find()) {
-                String missingPkg = m.group(1);
-                for (Map.Entry<String, String[]> e : PACKAGE_TO_MAVEN_COORDS.entrySet()) {
-                    if (missingPkg.startsWith(e.getKey())) {
-                        String[] coords = e.getValue();
-                        String artifactTag = "<artifactId>" + coords[1] + "</artifactId>";
-                        if (!pom.contains(artifactTag) && !toAdd.toString().contains(artifactTag)) {
-                            toAdd.append("\t\t<dependency>\n")
-                                    .append("\t\t\t<groupId>").append(coords[0]).append("</groupId>\n")
-                                    .append("\t\t\t<artifactId>").append(coords[1]).append("</artifactId>\n")
-                                    .append("\t\t\t<version>").append(coords[2]).append("</version>\n")
-                                    .append("\t\t</dependency>\n");
-                            log.info("[BackendGeneratorNode] Injecting missing dep: {}:{}", coords[0], coords[1]);
-                        }
-                        break;
+            for (String pkg : packagePrefixes) {
+                String[][] artifacts = PACKAGE_TO_MAVEN_COORDS.get(pkg);
+                if (artifacts == null) continue;
+                for (String[] coords : artifacts) {
+                    String artifactTag = "<artifactId>" + coords[1] + "</artifactId>";
+                    if (pom.contains(artifactTag) || toAdd.toString().contains(artifactTag)) continue;
+                    toAdd.append("\t\t<dependency>\n")
+                            .append("\t\t\t<groupId>").append(coords[0]).append("</groupId>\n")
+                            .append("\t\t\t<artifactId>").append(coords[1]).append("</artifactId>\n")
+                            .append("\t\t\t<version>").append(coords[2]).append("</version>\n");
+                    if (coords.length > 3 && coords[3] != null) {
+                        toAdd.append("\t\t\t<scope>").append(coords[3]).append("</scope>\n");
                     }
+                    toAdd.append("\t\t</dependency>\n");
+                    log.info("[BackendGeneratorNode] Pre-injected dep: {}:{}", coords[0], coords[1]);
                 }
             }
             if (toAdd.isEmpty()) return;
@@ -421,7 +692,57 @@ public class BackendGeneratorNode implements WorkerNode {
             if (idx == -1) return;
             Files.writeString(pomPath, pom.substring(0, idx) + toAdd + pom.substring(idx));
         } catch (IOException e) {
-            log.warn("[BackendGeneratorNode] Failed to inject missing deps: {}", e.getMessage());
+            log.warn("[BackendGeneratorNode] Failed to pre-inject deps: {}", e.getMessage());
+        }
+    }
+
+    private void injectSpecDeclaredDeps(Path pomPath,
+            List<com.business.discovery.worker.service.llm.MavenCoordinate> mavenDeps) {
+        try {
+            String pom = Files.readString(pomPath);
+            StringBuilder toAdd = new StringBuilder();
+            for (var dep : mavenDeps) {
+                if (dep.getGroupId() == null || dep.getArtifactId() == null) continue;
+                String artifactTag = "<artifactId>" + dep.getArtifactId() + "</artifactId>";
+                if (pom.contains(artifactTag) || toAdd.toString().contains(artifactTag)) continue;
+                toAdd.append("\t\t<dependency>\n")
+                        .append("\t\t\t<groupId>").append(dep.getGroupId()).append("</groupId>\n")
+                        .append("\t\t\t<artifactId>").append(dep.getArtifactId()).append("</artifactId>\n");
+                if (dep.getVersion() != null) {
+                    toAdd.append("\t\t\t<version>").append(dep.getVersion()).append("</version>\n");
+                }
+                if (dep.getScope() != null && !dep.getScope().isBlank()) {
+                    toAdd.append("\t\t\t<scope>").append(dep.getScope()).append("</scope>\n");
+                }
+                toAdd.append("\t\t</dependency>\n");
+                log.info("[BackendGeneratorNode] Injected spec-declared dep: {}:{}", dep.getGroupId(), dep.getArtifactId());
+            }
+            if (toAdd.isEmpty()) return;
+            int idx = pom.lastIndexOf("</dependencies>");
+            if (idx == -1) return;
+            Files.writeString(pomPath, pom.substring(0, idx) + toAdd + pom.substring(idx));
+        } catch (IOException e) {
+            log.warn("[BackendGeneratorNode] Failed to inject spec-declared deps: {}", e.getMessage());
+        }
+    }
+
+    private void injectMissingDependencies(Path pomPath, String compileOutput) {
+        try {
+            String pom = Files.readString(pomPath);
+            Set<String> neededPkgs = new LinkedHashSet<>();
+            Matcher m = MISSING_PACKAGE_PATTERN.matcher(compileOutput);
+            while (m.find()) {
+                String missingPkg = m.group(1);
+                for (String pkgPrefix : PACKAGE_TO_MAVEN_COORDS.keySet()) {
+                    if (missingPkg.startsWith(pkgPrefix)) {
+                        neededPkgs.add(pkgPrefix);
+                        break;
+                    }
+                }
+            }
+            if (!neededPkgs.isEmpty()) injectPackageDeps(pomPath, neededPkgs);
+        } catch (IOException e) {
+            log.warn("[BackendGeneratorNode] Failed to read pom for missing dep check: {}", e.getMessage());
         }
     }
 
@@ -480,8 +801,40 @@ public class BackendGeneratorNode implements WorkerNode {
         }
     }
 
+    /**
+     * Spring Boot 4 ships Jackson 3.x which changed the group ID from com.fasterxml.jackson
+     * to tools.jackson, and renamed JsonProcessingException to JacksonException. LLMs trained
+     * on SB2/3 code consistently generate the old imports. Apply this as a deterministic
+     * post-generation step before any compilation attempt.
+     */
+    private static String fixSpringBoot4Imports(String content) {
+        return content
+                .replace("import com.fasterxml.jackson.databind.", "import tools.jackson.databind.")
+                .replace("import com.fasterxml.jackson.core.", "import tools.jackson.core.")
+                .replace("import com.fasterxml.jackson.annotation.", "import tools.jackson.annotation.")
+                .replace("JsonProcessingException", "JacksonException");
+    }
+
     private String layerName(FileEntry entry) {
         return LayerOrderUtil.backendLayerName(entry);
+    }
+
+    // Open-brace count > close-brace count means the LLM stopped mid-output (token limit hit).
+    // Does not handle braces inside string literals, but false-positive risk is negligible:
+    // a well-formed Java file always has balanced braces at EOF.
+    private static boolean isBraceTruncated(String content) {
+        if (content == null || content.isBlank()) return true;
+        int depth = 0;
+        for (char c : content.toCharArray()) {
+            if (c == '{') depth++;
+            else if (c == '}') depth--;
+        }
+        return depth > 0;
+    }
+
+    // Javac's specific error for a syntactically incomplete file (truncated mid-output).
+    private static boolean isJavaTruncation(String output) {
+        return output.contains("reached end of file while parsing");
     }
 
     // ── Nested type safety net (enums + records) ─────────────────────────────

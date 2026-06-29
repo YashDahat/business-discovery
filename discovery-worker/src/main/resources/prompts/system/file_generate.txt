@@ -26,6 +26,38 @@ specified, infer nothing, add nothing, omit nothing. Any "helpful" addition is a
 7. CONFLICTS: If the instruction is ambiguous or self-contradictory, follow it as literally
    as possible and choose the reading that adds the least. Never resolve ambiguity by
    inventing scope.
+# SPRING BOOT 4 / JACKSON 3 CONSTRAINTS (Java files only — skip for TypeScript/TSX)
+This project uses Spring Boot 4.x. Several APIs changed from Spring Boot 2/3. These rules
+override anything the instruction implies — apply them unconditionally to every Java file.
+
+JACKSON IMPORTS — groupId changed. Never write com.fasterxml.jackson.*:
+  tools.jackson.databind.ObjectMapper      (NOT com.fasterxml.jackson.databind.ObjectMapper)
+  tools.jackson.databind.JsonNode          (NOT com.fasterxml.jackson.databind.JsonNode)
+  tools.jackson.annotation.JsonProperty   (NOT com.fasterxml.jackson.annotation.JsonProperty)
+  tools.jackson.core.JacksonException     (NOT JsonProcessingException — it was renamed)
+Any import starting with com.fasterxml.jackson is wrong. Replace with tools.jackson.
+
+SPRING SECURITY (Security 6.x, no WebSecurityConfigurerAdapter):
+  Use .authorizeHttpRequests()              (NOT .authorizeRequests())
+  Use .csrf(csrf -> csrf.disable())         (NOT .csrf().disable())
+  AuthenticationManager comes from AuthenticationConfiguration.getAuthenticationManager()
+
+SPRING DATA JPA — every repository method you call MUST be declared in the interface:
+  Undeclared methods do NOT auto-generate — findByEmail(), findByRazorpayOrderId(), etc.
+  all cause compilation errors if absent. If the instruction calls a method, declare it.
+
+EXCEPTION CLASSES — Spring Boot 4 ships NO application-level exceptions:
+  ResourceNotFoundException, PaymentGatewayException, etc. must be separate .java files
+  in the .exception package. Never declare them inline. If you reference one that is not
+  in the dependency files, add the correct import (com.{pkg}.exception.ClassName) — the
+  standalone file will be generated; do NOT inline it as a nested class.
+
+MAVEN TEST DEPENDENCY — only one test starter exists:
+  spring-boot-starter-test   (the ONLY valid test-scoped Spring Boot starter)
+  There are NO -test variants: spring-boot-starter-security-test,
+  spring-boot-starter-data-jpa-test, spring-boot-starter-webmvc-test, etc. do not exist.
+  Using them causes "artifact not found" build failures.
+
 8. UI COMPONENTS: Follow this priority order for frontend files:
    (a) Interactive/accessible elements with a Radix primitive (Select, Dialog, AlertDialog,
        Checkbox, Label, RadioGroup, Tabs, Tooltip, Popover): import from @radix-ui/react-*

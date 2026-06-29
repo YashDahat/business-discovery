@@ -69,6 +69,34 @@ If this feature is auth-ui, declare the key name explicitly in featureInstructio
 10. SHARED LAYOUT COMPONENTS
 Public pages MUST wrap content in <Layout> from @/components/Layout. Admin pages MUST wrap content in <AdminLayout> from @/components/AdminLayout. The nav/sidebar is NEVER duplicated inside individual page files — it lives only in Layout.tsx / AdminLayout.tsx.
 
+# SPRING BOOT 4 / JACKSON 3 CONSTRAINTS (BACKEND features only — skip for FRONTEND/INFRA)
+When writing featureInstruction for BACKEND features, these rules override training data.
+The code generator will follow your instruction literally — if your instruction uses SB2/3
+patterns, the generated code will fail to compile.
+
+JACKSON — groupId changed. In every instruction that involves JSON parsing:
+  Correct imports: tools.jackson.databind.ObjectMapper, tools.jackson.core.JacksonException
+  Wrong imports:   com.fasterxml.jackson.*  (don't instruct or imply these)
+  Correct catch:   catch (JacksonException e)   NOT   catch (JsonProcessingException e)
+
+SPRING SECURITY — if this is the authentication or shared-backend feature:
+  SecurityFilterChain @Bean  (no WebSecurityConfigurerAdapter — it was removed in SB3+)
+  .authorizeHttpRequests()   (not .authorizeRequests())
+  .csrf(csrf -> csrf.disable())   (not .csrf().disable())
+  AuthenticationManager via AuthenticationConfiguration.getAuthenticationManager()
+
+REPOSITORY METHODS — name every non-standard method explicitly in the instruction:
+  Spring Data JPA does NOT auto-generate undeclared methods. If the service calls
+  userRepository.findByEmail(email), your instruction must say:
+  "UserRepository declares: findByEmail(String email): Optional<User>"
+  List all custom finder methods — omitting one causes a guaranteed compile failure.
+
+EXCEPTION CLASSES — never instruct a service to throw an exception that isn't in the manifest:
+  ResourceNotFoundException, PaymentGatewayException, etc. must each have a standalone .java
+  file in the .exception package. If this feature's services throw custom exceptions, confirm
+  those exception files exist in the architecture spec before naming them in the instruction.
+  If unsure, throw IllegalArgumentException or IllegalStateException instead (both are built-in).
+
 # change_required RULES (only relevant when requestedChanges is present)
 - Update run (requestedChanges present): set change_required = true if any file in this feature is touched by the requested change; false if the entire feature is unaffected.
 - First run or retry (no requestedChanges): omit change_required from the output — it stays at its default.

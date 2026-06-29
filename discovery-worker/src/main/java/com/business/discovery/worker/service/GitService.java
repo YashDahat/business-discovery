@@ -135,6 +135,25 @@ public class GitService {
     }
 
     /**
+     * Stages all changes, commits, and pushes. Non-fatal: a network blip or empty-commit
+     * never aborts generation. Called every N files to preserve work-in-progress to GitHub.
+     */
+    public void commitAndPushCheckpoint(Path repoDir, String message, String branch) {
+        try {
+            if (!hasChanges(repoDir)) {
+                log.debug("[GitService] Checkpoint skipped — no changes in workspace");
+                return;
+            }
+            addAll(repoDir);
+            commit(repoDir, message);
+            push(repoDir, branch);
+            log.info("[GitService] Checkpoint pushed: {}", message);
+        } catch (Exception e) {
+            log.warn("[GitService] Checkpoint push failed (non-fatal): {}", e.getMessage());
+        }
+    }
+
+    /**
      * Stages docs/ARCHITECTURE.json, commits, and pushes to the given branch.
      * Non-fatal: logs a warning on any error without propagating the exception,
      * so a network blip never aborts an in-progress enrichment.

@@ -69,9 +69,19 @@ public class InfraGeneratorNode implements WorkerNode {
                     continue;
                 }
 
-                String existingContent = readExistingIfPresent(filePath);
+                Files.createDirectories(filePath.getParent());
 
-                // Use file_role from spec if available; fall back to entry description as minimal instruction.
+                // Try template-based generation first — zero LLM for known structural patterns
+                String templateContent = tryGenerateFromTemplate(entry.path(), ctx);
+                if (templateContent != null) {
+                    Files.writeString(filePath, templateContent);
+                    upsertRecord(ctx, entry.path(), GeneratedFile.FileType.INFRA);
+                    log.info("[InfraGeneratorNode] Generated {} from template", entry.path());
+                    continue;
+                }
+
+                // Fall back to LLM for non-standard infra files
+                String existingContent = readExistingIfPresent(filePath);
                 FileSpec spec = specByPath.get(entry.path());
                 String fileRole = spec != null && spec.getFileRole() != null && !spec.getFileRole().isBlank()
                         ? spec.getFileRole()
@@ -82,12 +92,9 @@ public class InfraGeneratorNode implements WorkerNode {
                 // INFRA features aren't enriched — pass empty featureInstruction
                 String content = llm.generateFileContent(entry.path(), "", fileRole, configContext, existingContent);
 
-                Files.createDirectories(filePath.getParent());
                 Files.writeString(filePath, content);
-
                 upsertRecord(ctx, entry.path(), GeneratedFile.FileType.INFRA);
-
-                log.info("[InfraGeneratorNode] Generated {}", entry.path());
+                log.info("[InfraGeneratorNode] Generated {} via LLM", entry.path());
             }
 
             writeCiWorkflowIfAbsent(workspace);
@@ -165,6 +172,68 @@ public class InfraGeneratorNode implements WorkerNode {
             return Map.of();
         }
     }
+
+    // ── Template-based infra generation ──────────────────────────────────
+
+    private String tryGenerateFromTemplate(String filePath, WorkerContext ctx) {
+        String name = filePath.contains("/") ? filePath.substring(filePath.lastIndexOf('/') + 1) : filePath;
+        String lower = name.toLowerCase();
+
+        // backend/Dockerfile or Dockerfile (standalone backend image)
+        if (lower.equals("dockerfile") && filePath.startsWith("backend/")) {
+            return BACKEND_DOCKERFILE;
+        }
+        // nginx.conf for frontend SPA serving
+        if (lower.endsWith("nginx.conf")) {
+            return NGINX_CONF;
+        }
+        // docker-compose files — already written as top-level by ProjectPlanningNode.writeDockerArtifacts()
+        // but the spec may also declare a service-level one; generate template
+        if (lower.startsWith("docker-compose") && lower.endsWith(".yml")) {
+            return null; // let LLM handle compose variants; top-level is already template-based
+        }
+        return null; // not a recognized template pattern
+    }
+
+    private static final String BACKEND_DOCKERFILE = """
+            FROM eclipse-temurin:17-jdk-jammy AS builder
+            WORKDIR /app
+            COPY .mvn/ .mvn
+            COPY mvnw pom.xml ./
+            RUN ./mvnw dependency:resolve -q
+            COPY src ./src
+            RUN ./mvnw package -DskipTests -q
+
+            FROM eclipse-temurin:17-jre
+            WORKDIR /app
+            RUN groupadd -r appuser && useradd -r -g appuser appuser
+            COPY --from=builder /app/target/*.jar app.jar
+            USER appuser
+            EXPOSE 8080
+            HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8080/actuator/health || exit 1
+            ENTRYPOINT ["java", "-jar", "app.jar"]
+            """;
+
+    private static final String NGINX_CONF = """
+            server {
+              listen 80;
+              root /usr/share/nginx/html;
+              index index.html;
+
+              location /api/ {
+                proxy_pass http://backend:8080;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+              }
+
+              location / {
+                try_files $uri $uri/ /index.html;
+              }
+
+              gzip on;
+              gzip_types text/plain text/css application/json application/javascript text/xml;
+            }
+            """;
 
     // ── Other helpers ─────────────────────────────────────────────────────
 

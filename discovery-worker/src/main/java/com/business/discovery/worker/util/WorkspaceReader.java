@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -20,6 +21,13 @@ public class WorkspaceReader {
 
     private static final List<String> EXCLUDED_DIRS = List.of(
             "node_modules", "target", ".git", "dist", ".mvn"
+    );
+
+    private static final Set<String> BINARY_EXTENSIONS = Set.of(
+            ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".bmp", ".tiff",
+            ".svg",  // SVG can be text but is not useful as LLM context
+            ".woff", ".woff2", ".ttf", ".eot", ".otf",
+            ".pdf", ".zip", ".jar", ".class", ".bin"
     );
 
     private final Path workspace;
@@ -42,9 +50,22 @@ public class WorkspaceReader {
             return "FILE_NOT_FOUND: " + relativePath;
         }
 
+        String lower = relativePath.toLowerCase();
+        for (String ext : BINARY_EXTENSIONS) {
+            if (lower.endsWith(ext)) {
+                log.debug("[WorkspaceReader] Skipping binary file: {}", relativePath);
+                return "BINARY_FILE: " + relativePath;
+            }
+        }
+
         try {
             return Files.readString(resolved);
         } catch (IOException e) {
+            // MalformedInputException from binary content — treat as binary rather than crashing
+            if (e instanceof java.nio.charset.MalformedInputException) {
+                log.warn("[WorkspaceReader] Binary content in {}, skipping", relativePath);
+                return "BINARY_FILE: " + relativePath;
+            }
             throw new WorkerException(FailureType.INFRA,
                     "Failed to read workspace file " + relativePath + ": " + e.getMessage(), e);
         }

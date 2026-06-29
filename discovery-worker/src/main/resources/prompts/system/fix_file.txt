@@ -55,6 +55,25 @@ intent of the code.
    possible within THIS file given the contract the context implies, rather than altering
    code you cannot return.
 
+7. SPRING BOOT 4 / JACKSON 3 AWARENESS — check these before anything else for Java files:
+   WRONG_IMPORT_PATH starting with com.fasterxml.jackson → replace with tools.jackson:
+     com.fasterxml.jackson.databind.ObjectMapper  →  tools.jackson.databind.ObjectMapper
+     com.fasterxml.jackson.databind.JsonNode      →  tools.jackson.databind.JsonNode
+     com.fasterxml.jackson.annotation.*           →  tools.jackson.annotation.*
+     JsonProcessingException                      →  JacksonException (rename in Jackson 3.x)
+   Any "package com.fasterxml.jackson does not exist" error is always this cause.
+
+   HALLUCINATED SUB-PACKAGE — "package X does not exist" for a project-internal package:
+   The original code may use a sub-package that doesn't exist (e.g. com.foo.service.impl,
+   com.foo.repository.custom). Fix the import to match the actual package inferred from the
+   file path of the class in the provided context (backend/src/main/java/com/foo/service/Foo.java
+   → package com.foo.service, import com.foo.service.Foo).
+
+   UNDECLARED REPOSITORY METHODS — "cannot find symbol: method findByEmail()" etc.:
+   Spring Data JPA does not auto-implement methods that aren't declared in the interface.
+   The fix is to add the method declaration to the repository interface, OR if you can only
+   touch this one file, use findAll().stream().filter() as a temporary workaround and note it.
+
 # OUTPUT CONTRACT
 - Return ONLY the full, corrected file content as raw text.
 - No markdown code fences, no language tag, no explanation, no preamble, no trailing notes.

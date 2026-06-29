@@ -145,7 +145,8 @@ public class ProjectPlanningNode implements WorkerNode {
             // Scaffold only on first run — on retry the cloned repo already has these
             if (!Files.exists(workspace.resolve("backend/pom.xml"))) {
                 ProjectDependencies deps = resolveDependencies(spec);
-                scaffoldSpringBoot(workspace, slug, business.getTitle(), deps.getSpringBootStarters());
+                scaffoldSpringBoot(workspace, slug, business.getTitle(), deps.getSpringBootStarters(),
+                        deps.getMavenDependencies());
                 scaffoldVite(workspace, deps.getNpmPackages());
                 writeDockerArtifacts(workspace, slug);
                 log.info("[ProjectPlanningNode] CLI scaffold complete for '{}'", business.getTitle());
@@ -183,7 +184,8 @@ public class ProjectPlanningNode implements WorkerNode {
     // ── Spring Boot scaffold via Spring Initializr ────────────────────────
 
     private void scaffoldSpringBoot(Path workspace, String slug, String businessName,
-                                    List<String> starters) throws IOException {
+                                    List<String> starters,
+                                    List<com.business.discovery.worker.service.llm.MavenCoordinate> specDeclaredDeps) throws IOException {
         // Validate dependency IDs against Initializr's real list — drops LLM hallucinations
         List<String> validStarters = initializrClient.filterValidDependencies(starters);
         String deps = String.join(",", validStarters);
@@ -227,6 +229,11 @@ public class ProjectPlanningNode implements WorkerNode {
         // Inject JWT library deps — not available via Spring Initializr, added directly to pom.xml
         injectJwtDependencies(workspace.resolve("backend/pom.xml"));
 
+        // Inject any extra Maven deps declared by the planning LLM in the spec
+        if (specDeclaredDeps != null && !specDeclaredDeps.isEmpty()) {
+            injectSpecDeclaredDeps(workspace.resolve("backend/pom.xml"), specDeclaredDeps);
+        }
+
         // Override the generated application.properties — no hardcoded defaults for secrets
         Files.writeString(workspace.resolve("backend/src/main/resources/application.properties"), """
                 spring.application.name=%s
@@ -259,6 +266,10 @@ public class ProjectPlanningNode implements WorkerNode {
         // Install base deps declared in the generated package.json
         run(frontend, "npm", "install");
 
+        // Overwrite generated config files with canonical templates immediately after scaffold.
+        // This ensures the committed versions are always correct — no patching on later runs.
+        writeCanonicalFrontendConfigs(frontend);
+
         // Install project-specific packages decided by the planning LLM
         if (!extraPackages.isEmpty()) {
             List<String> installCmd = new ArrayList<>(List.of("npm", "install"));
@@ -268,6 +279,87 @@ public class ProjectPlanningNode implements WorkerNode {
 
         log.info("[ProjectPlanningNode] Vite scaffold complete, installed: {}", extraPackages);
     }
+
+    private void writeCanonicalFrontendConfigs(Path frontendDir) throws IOException {
+        Path viteConfig = frontendDir.resolve("vite.config.ts");
+        if (Files.exists(viteConfig)) {
+            Files.writeString(viteConfig, CANONICAL_VITE_CONFIG);
+            log.info("[ProjectPlanningNode] Wrote canonical vite.config.ts");
+        }
+        Path tsconfigApp = frontendDir.resolve("tsconfig.app.json");
+        if (Files.exists(tsconfigApp)) {
+            Files.writeString(tsconfigApp, CANONICAL_TSCONFIG_APP);
+            log.info("[ProjectPlanningNode] Wrote canonical tsconfig.app.json");
+        }
+        Path tsconfigRoot = frontendDir.resolve("tsconfig.json");
+        if (Files.exists(tsconfigRoot)) {
+            Files.writeString(tsconfigRoot, CANONICAL_TSCONFIG_ROOT);
+            log.info("[ProjectPlanningNode] Wrote canonical tsconfig.json");
+        }
+    }
+
+    private static final String CANONICAL_VITE_CONFIG = """
+            import path from 'node:path'
+            import { defineConfig } from 'vite'
+            import react from '@vitejs/plugin-react'
+
+            export default defineConfig({
+              plugins: [react()],
+              resolve: {
+                alias: { '@': path.resolve(__dirname, './src') },
+              },
+              server: {
+                proxy: {
+                  '/api': {
+                    target: 'http://localhost:8080',
+                    changeOrigin: true,
+                  },
+                },
+              },
+              build: {
+                outDir: 'dist',
+              },
+            })
+            """;
+
+    private static final String CANONICAL_TSCONFIG_APP = """
+            {
+              "compilerOptions": {
+                "target": "ES2020",
+                "useDefineForClassFields": true,
+                "lib": ["ES2020", "DOM", "DOM.Iterable"],
+                "module": "ESNext",
+                "skipLibCheck": true,
+                "moduleResolution": "bundler",
+                "allowImportingTsExtensions": true,
+                "isolatedModules": true,
+                "moduleDetection": "force",
+                "noEmit": true,
+                "jsx": "react-jsx",
+                "strict": true,
+                "noUnusedLocals": false,
+                "noUnusedParameters": false,
+                "noFallthroughCasesInSwitch": true,
+                "baseUrl": ".",
+                "paths": { "@/*": ["./src/*"] }
+              },
+              "include": ["src"]
+            }
+            """;
+
+    private static final String CANONICAL_TSCONFIG_ROOT = """
+            {
+              "files": [],
+              "references": [
+                { "path": "./tsconfig.app.json" },
+                { "path": "./tsconfig.node.json" }
+              ],
+              "compilerOptions": {
+                "baseUrl": ".",
+                "paths": { "@/*": ["./src/*"] }
+              }
+            }
+            """;
 
     // ── JWT pom injection ─────────────────────────────────────────────────
 
@@ -307,6 +399,28 @@ public class ProjectPlanningNode implements WorkerNode {
         String patched = pom.replace("</dependencies>", jwtDeps + "\t</dependencies>");
         Files.writeString(pomPath, patched);
         log.info("[ProjectPlanningNode] JWT dependencies injected into pom.xml");
+    }
+
+    private void injectSpecDeclaredDeps(Path pomPath,
+            List<com.business.discovery.worker.service.llm.MavenCoordinate> deps) throws IOException {
+        if (!Files.exists(pomPath)) return;
+        String pom = Files.readString(pomPath);
+        StringBuilder toAdd = new StringBuilder();
+        for (var dep : deps) {
+            if (dep.getGroupId() == null || dep.getArtifactId() == null) continue;
+            String tag = "<artifactId>" + dep.getArtifactId() + "</artifactId>";
+            if (pom.contains(tag) || toAdd.toString().contains(tag)) continue;
+            toAdd.append("\t\t<dependency>\n")
+                    .append("\t\t\t<groupId>").append(dep.getGroupId()).append("</groupId>\n")
+                    .append("\t\t\t<artifactId>").append(dep.getArtifactId()).append("</artifactId>\n");
+            if (dep.getVersion() != null) toAdd.append("\t\t\t<version>").append(dep.getVersion()).append("</version>\n");
+            if (dep.getScope() != null && !dep.getScope().isBlank()) toAdd.append("\t\t\t<scope>").append(dep.getScope()).append("</scope>\n");
+            toAdd.append("\t\t</dependency>\n");
+            log.info("[ProjectPlanningNode] Injected spec-declared dep: {}:{}", dep.getGroupId(), dep.getArtifactId());
+        }
+        if (toAdd.isEmpty()) return;
+        String patched = pom.replace("</dependencies>", toAdd + "\t</dependencies>");
+        Files.writeString(pomPath, patched);
     }
 
     // ── Docker artifacts (Dockerfile, docker-compose, .env.example) ──────
@@ -740,9 +854,9 @@ public class ProjectPlanningNode implements WorkerNode {
                     ? deps.getSpringBootStarters() : DEFAULT_SPRING_STARTERS;
             List<String> npm = (deps.getNpmPackages() != null && !deps.getNpmPackages().isEmpty())
                     ? deps.getNpmPackages() : DEFAULT_NPM_PACKAGES;
-            return new ProjectDependencies(starters, npm);
+            return new ProjectDependencies(starters, npm, deps.getMavenDependencies());
         }
-        return new ProjectDependencies(DEFAULT_SPRING_STARTERS, DEFAULT_NPM_PACKAGES);
+        return new ProjectDependencies(DEFAULT_SPRING_STARTERS, DEFAULT_NPM_PACKAGES, null);
     }
 
     // ── BriefContext builder ──────────────────────────────────────────────

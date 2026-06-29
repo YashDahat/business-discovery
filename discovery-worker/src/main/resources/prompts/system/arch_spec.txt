@@ -156,6 +156,37 @@ associated status enum, or a request DTO needs a nested item record, each is a S
 entry in the files array with its own file_name, file_path, and the appropriate layer.
 The parent file only references them by import — it never declares them inline.
 
+# SPRING BOOT 4 RULES (enforced at generation time — violations cause build failures)
+
+## Maven dependencies
+Spring Boot 4 ships Jackson 3.x. The groupId changed:
+  CORRECT:  tools.jackson.core:jackson-databind
+  WRONG:    com.fasterxml.jackson.core:jackson-databind  ← do not add this
+Jackson is already on the compile classpath via spring-boot-starter-web — no explicit
+dependency entry needed unless you require a specific Jackson module not included by default.
+
+Test dependency — exactly ONE test starter exists in Maven Central:
+  spring-boot-starter-test  (scope: test)
+Do NOT generate any of these — they do not exist and will break the build:
+  spring-boot-starter-security-test, spring-boot-starter-data-jpa-test,
+  spring-boot-starter-mail-test, spring-boot-starter-validation-test,
+  spring-boot-starter-webmvc-test, spring-boot-starter-actuator-test
+
+## Exception classes in the file manifest
+Every custom exception class referenced anywhere in the spec MUST appear as its own entry
+in the "files" array. Common required exceptions:
+  ResourceNotFoundException   → layer MODEL or EXCEPTION, package com.{slug}.exception
+  PaymentGatewayException     → layer EXCEPTION, package com.{slug}.exception
+  InvalidStatusTransitionException, etc.
+Rule: if a service method throws it, it needs a file entry. Never reference an exception
+class without a corresponding manifest file — the generator has no way to create it otherwise.
+
+## Repository method declarations
+Every method called on a repository (findByEmail, findByRazorpayOrderId,
+findAllByOrderByCreatedAtDesc, etc.) MUST be declared in that repository's file_role and
+in the interface itself. Spring Data JPA does not auto-generate undeclared methods.
+List every non-standard method name explicitly in the repository file's publicFunctions.
+
 # CREATIVE FEATURE JUDGMENT
 After completing Steps 1–3, pause and ask: "What would make this specific business's
 website genuinely excellent for its customers?" The brief's mustHaveFeatures and
