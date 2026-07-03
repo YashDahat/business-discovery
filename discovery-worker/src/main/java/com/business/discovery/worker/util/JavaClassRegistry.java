@@ -4,6 +4,10 @@ import com.business.discovery.worker.service.llm.ArchitectureSpec;
 import com.business.discovery.worker.service.llm.FileSpec;
 import lombok.extern.slf4j.Slf4j;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -74,6 +78,38 @@ public final class JavaClassRegistry {
 
     public String getBasePackage() {
         return basePackage;
+    }
+
+    /**
+     * Walks the actual backend src/main/java directory and registers every .java file found.
+     * Existing entries are NOT overwritten — spec-derived entries take precedence.
+     * Call this after each generation layer so the registry reflects files now on disk,
+     * including exception classes, utilities, and files from previous attempts that may
+     * not have been declared in ARCHITECTURE.json.
+     */
+    public void mergeFromFilesystem(Path backendSrcDir) {
+        if (!Files.exists(backendSrcDir)) return;
+        int added = 0;
+        try {
+            for (Path p : (Iterable<Path>) Files.walk(backendSrcDir)
+                    .filter(f -> f.toString().endsWith(".java"))::iterator) {
+                String fileName = p.getFileName().toString();
+                String simpleName = fileName.replace(".java", "");
+                if (simpleNameToFqn.containsKey(simpleName)) continue; // spec entry wins
+                Path relative = backendSrcDir.relativize(p.getParent());
+                String pkg = relative.toString().replace(File.separatorChar, '.');
+                if (pkg.isBlank()) continue;
+                String fqn = pkg + "." + simpleName;
+                simpleNameToFqn.put(simpleName, fqn);
+                simpleNameToImport.put(simpleName, "import " + fqn + ";");
+                added++;
+            }
+        } catch (IOException e) {
+            log.warn("[JavaClassRegistry] Filesystem merge failed at {}: {}", backendSrcDir, e.getMessage());
+        }
+        if (added > 0)
+            log.info("[JavaClassRegistry] Merged {} filesystem class(es) from {} (total={})",
+                    added, backendSrcDir, simpleNameToFqn.size());
     }
 
     private static String extractPackage(String filePath) {

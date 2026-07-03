@@ -7,6 +7,8 @@ import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.service.BuildToolService;
 import com.business.discovery.worker.service.BuildToolService.BuildResult;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.NpmPackageFixer;
+import com.business.discovery.worker.util.TsxExportGuard;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.annotation.Order;
@@ -38,6 +40,24 @@ public class FrontendValidationNode implements WorkerNode {
             log.info("[FrontendValidationNode] npm run build passed — no fixes needed");
             markFilesValidated(ctx);
             return;
+        }
+
+        // Pre-ErrorFixAgent mechanical fixes — same pattern as BackendValidationNode:
+        //   1. TsxExportGuard: wraps raw JSX files that have no export default (truncated LLM output)
+        //   2. NpmPackageFixer: installs missing npm packages / rewrites renamed package imports
+        // Both are deterministic and fast. Doing them first saves ErrorFixAgent rounds.
+        Path frontendSrc = frontendDir.resolve("src");
+        boolean exportsFixed = TsxExportGuard.fix(frontendSrc);
+        boolean packagesFixed = NpmPackageFixer.fix(frontendDir, initial.output(), buildTool);
+
+        if (exportsFixed || packagesFixed) {
+            BuildResult postFix = buildTool.runNpmBuild(frontendDir);
+            if (postFix.success()) {
+                log.info("[FrontendValidationNode] npm build passed after mechanical fixes — skipping ErrorFixAgent");
+                markFilesValidated(ctx);
+                return;
+            }
+            log.info("[FrontendValidationNode] Mechanical fixes incomplete — handing off to ErrorFixAgent");
         }
 
         log.warn("[FrontendValidationNode] npm run build failed — starting ErrorFixAgent loop");

@@ -52,11 +52,20 @@ public final class EnvVarScanner {
             String existing = Files.readString(propsFile);
             StringBuilder additions = new StringBuilder();
             for (String key : requiredKeys) {
-                // Skip if the key is already bound (exact key= match)
                 if (existing.contains(key + "=") || existing.contains(key + " =")) continue;
-                String envVar = toEnvVar(key);
-                additions.append(key).append("=${").append(envVar).append("}\n");
-                log.info("[EnvVarScanner] Added missing @Value key: {} → ${{}}", key, envVar);
+
+                // Check if a near-match exists with dots vs hyphens swapped (e.g. jwt.expiration-ms vs jwt.expiration.ms).
+                // If so, copy the concrete value as an alias instead of creating an env-var reference
+                // that would fail at startup if the env var is never set.
+                String fuzzyValue = findFuzzyValue(key, existing);
+                if (fuzzyValue != null) {
+                    additions.append(key).append("=").append(fuzzyValue).append("\n");
+                    log.info("[EnvVarScanner] Added format alias: {}={} (matched existing key with different separator)", key, fuzzyValue);
+                } else {
+                    String envVar = toEnvVar(key);
+                    additions.append(key).append("=${").append(envVar).append("}\n");
+                    log.info("[EnvVarScanner] Added missing @Value key: {} → ${{}}", key, envVar);
+                }
             }
             if (!additions.isEmpty()) {
                 Files.writeString(propsFile, existing + "\n# Auto-added missing @Value bindings\n" + additions);
@@ -64,6 +73,26 @@ public final class EnvVarScanner {
         } catch (IOException e) {
             log.warn("[EnvVarScanner] Could not augment application.properties: {}", e.getMessage());
         }
+    }
+
+    /**
+     * Finds the value of an existing property whose key differs only in dot/hyphen separators.
+     * e.g. looking up "jwt.expiration.ms" finds "jwt.expiration-ms=86400000" and returns "86400000".
+     * Returns null if no such near-match exists.
+     */
+    private static String findFuzzyValue(String key, String propertiesContent) {
+        String normalizedKey = key.replace('-', '.');
+        for (String line : propertiesContent.split("\n")) {
+            String trimmed = line.trim();
+            if (trimmed.startsWith("#") || !trimmed.contains("=")) continue;
+            int eqIdx = trimmed.indexOf('=');
+            String existingKey = trimmed.substring(0, eqIdx).trim();
+            if (existingKey.equals(key)) continue; // exact match — caller already handled this
+            if (existingKey.replace('-', '.').equals(normalizedKey)) {
+                return trimmed.substring(eqIdx + 1).trim();
+            }
+        }
+        return null;
     }
 
     public static void augmentDotEnvExample(Path workspace, Set<String> requiredKeys) {

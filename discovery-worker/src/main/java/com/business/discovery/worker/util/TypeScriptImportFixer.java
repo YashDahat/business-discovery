@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -39,8 +40,28 @@ public final class TypeScriptImportFixer {
         }
     }
 
+    // Known wrong-path → correct-path rewrites for @/ alias imports.
+    // These happen when shadcn deprecated a location (toast moved out of components/ui)
+    // or the LLM assumes a path that doesn't match the generated project structure.
+    private static final Map<String, String> KNOWN_PATH_REWRITES = Map.of(
+            "@/components/ui/use-toast", "@/hooks/use-toast"
+    );
+
     static String fixContent(String content, Path filePath, Path workspace,
                              TypeScriptExportRegistry registry, String fileName) {
+        // Apply known path rewrites before the registry-based resolution
+        for (Map.Entry<String, String> rewrite : KNOWN_PATH_REWRITES.entrySet()) {
+            String wrong = rewrite.getKey();
+            String correct = rewrite.getValue();
+            Path correctPath = workspace.resolve("frontend/src")
+                    .resolve(correct.substring(2)); // strip @/
+            if (fileExists(correctPath)) {
+                content = content
+                        .replace("from '" + wrong + "'", "from '" + correct + "'")
+                        .replace("from \"" + wrong + "\"", "from \"" + correct + "\"");
+            }
+        }
+
         Matcher m = IMPORT_FROM.matcher(content);
         List<String[]> replacements = new ArrayList<>();
 

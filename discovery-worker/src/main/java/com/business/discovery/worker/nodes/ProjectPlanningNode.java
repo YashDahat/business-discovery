@@ -234,7 +234,10 @@ public class ProjectPlanningNode implements WorkerNode {
             injectSpecDeclaredDeps(workspace.resolve("backend/pom.xml"), specDeclaredDeps);
         }
 
-        // Override the generated application.properties — no hardcoded defaults for secrets
+        // Override the generated application.properties.
+        // jwt.secret uses ${JWT_SECRET:<default>} so the app starts in demo without any env vars set.
+        // The default is a 512-bit Base64 key — long enough for JJWT HS256/HS512. Production must
+        // override JWT_SECRET with a real secret.
         Files.writeString(workspace.resolve("backend/src/main/resources/application.properties"), """
                 spring.application.name=%s
                 server.port=8080
@@ -244,10 +247,35 @@ public class ProjectPlanningNode implements WorkerNode {
                 spring.jpa.hibernate.ddl-auto=update
                 spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect
                 management.endpoints.web.exposure.include=health,info
-                jwt.secret=${JWT_SECRET}
-                jwt.expiration-ms=86400000
-                admin.email=${ADMIN_EMAIL}
-                admin.password=${ADMIN_PASSWORD}
+                jwt.secret=${JWT_SECRET:ZGVtby1vbmx5LXNlY3JldC1rZXktZm9yLWxvY2FsLXRlc3RpbmctY2hhbmdlLWluLXByb2R1Y3Rpb24tZW52aXJvbm1lbnQ=}
+                jwt.expiration-ms=${JWT_EXPIRATION_MS:86400000}
+                admin.email=${ADMIN_EMAIL:admin@example.com}
+                admin.password=${ADMIN_PASSWORD:admin123}
+                """.formatted(slug));
+
+        // Write canonical SpaController — forwards all non-file, non-API routes to index.html
+        // so React Router handles client-side navigation on direct URL access or refresh.
+        // Covers 1, 2 and 3-segment paths: /menu, /admin/dashboard, /order-confirmation/123
+        Path controllerDir = workspace.resolve("backend/src/main/java/com/" + slug + "/controller");
+        Files.createDirectories(controllerDir);
+        Files.writeString(controllerDir.resolve("SpaController.java"), """
+                package com.%s.controller;
+
+                import org.springframework.stereotype.Controller;
+                import org.springframework.web.bind.annotation.GetMapping;
+
+                @Controller
+                public class SpaController {
+
+                    @GetMapping(value = {
+                        "/{path:[^\\\\.]*}",
+                        "/{path1:[^\\\\.]*}/{path2:[^\\\\.]*}",
+                        "/{path1:[^\\\\.]*}/{path2:[^\\\\.]*}/{path3:[^\\\\.]*}"
+                    })
+                    public String fallback() {
+                        return "forward:/index.html";
+                    }
+                }
                 """.formatted(slug));
 
         log.info("[ProjectPlanningNode] Spring Boot scaffold extracted with starters: {}", starters);
@@ -270,14 +298,27 @@ public class ProjectPlanningNode implements WorkerNode {
         // This ensures the committed versions are always correct — no patching on later runs.
         writeCanonicalFrontendConfigs(frontend);
 
-        // Install project-specific packages decided by the planning LLM
-        if (!extraPackages.isEmpty()) {
+        // Install project-specific packages decided by the planning LLM.
+        // Filter out GitHub-style "owner/repo.js" references — not valid npm package names.
+        // Scoped packages like @tanstack/react-query start with '@' and are always valid.
+        List<String> validPackages = extraPackages.stream()
+                .filter(pkg -> !pkg.contains("/") || pkg.startsWith("@"))
+                .toList();
+
+        if (!validPackages.isEmpty()) {
             List<String> installCmd = new ArrayList<>(List.of("npm", "install"));
-            installCmd.addAll(extraPackages);
+            installCmd.addAll(validPackages);
             run(frontend, installCmd.toArray(new String[0]));
         }
 
-        log.info("[ProjectPlanningNode] Vite scaffold complete, installed: {}", extraPackages);
+        if (validPackages.size() != extraPackages.size()) {
+            List<String> rejected = extraPackages.stream()
+                    .filter(pkg -> pkg.contains("/") && !pkg.startsWith("@"))
+                    .toList();
+            log.warn("[ProjectPlanningNode] Skipped invalid npm packages (use CDN instead): {}", rejected);
+        }
+
+        log.info("[ProjectPlanningNode] Vite scaffold complete, installed: {}", validPackages);
     }
 
     private void writeCanonicalFrontendConfigs(Path frontendDir) throws IOException {
@@ -440,13 +481,13 @@ public class ProjectPlanningNode implements WorkerNode {
                 COPY --from=frontend-build /app/frontend/dist ./src/main/resources/static
                 RUN mvn package -q -DskipTests
 
-                FROM eclipse-temurin:17-jre-alpine
-                RUN addgroup -S app && adduser -S app -G app
+                FROM eclipse-temurin:17-jre-jammy
+                RUN groupadd -r app && useradd -r -g app app
                 WORKDIR /app
                 COPY --from=backend-build /app/target/*.jar app.jar
                 USER app
                 EXPOSE 8080
-                HEALTHCHECK --interval=30s --timeout=5s CMD wget -qO- http://localhost:8080/actuator/health || exit 1
+                HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8080/actuator/health || exit 1
                 ENTRYPOINT ["java", "-jar", "app.jar"]
                 """);
 
@@ -489,6 +530,7 @@ public class ProjectPlanningNode implements WorkerNode {
                 POSTGRES_PASSWORD=changeme
                 VITE_API_URL=http://localhost:8080
                 JWT_SECRET=change-this-to-a-secure-random-256-bit-secret
+                JWT_EXPIRATION_MS=86400000
                 ADMIN_EMAIL=owner@yourbusiness.com
                 ADMIN_PASSWORD=changeme123
                 """.formatted(slug, slug));

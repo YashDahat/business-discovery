@@ -31,7 +31,7 @@ public class ContainerMonitorService {
     private final AgentEventService agentEventService;
     private final ArchitectBriefRepository architectBriefRepository;
 
-    @Value("${docker.container.max-lifetime-minutes:30}")
+    @Value("${docker.container.max-lifetime-minutes:60}")
     private int maxLifetimeMinutes;
 
     // ─── Heartbeat — runs every 60 seconds ────────────────

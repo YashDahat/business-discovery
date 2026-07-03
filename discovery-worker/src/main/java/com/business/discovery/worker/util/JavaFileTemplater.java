@@ -18,12 +18,25 @@ import java.util.stream.Collectors;
 @Slf4j
 public final class JavaFileTemplater {
 
-    public enum TemplateType { ENUM, REPOSITORY, DTO, NONE }
+    public enum TemplateType { ENUM, REPOSITORY, DTO, JWT_UTIL, NONE }
 
     private JavaFileTemplater() {}
 
+    // JWT util files by any common name the LLM might use
+    private static final java.util.Set<String> JWT_UTIL_FILENAMES = java.util.Set.of(
+            "JwtUtil.java", "JwtUtils.java", "JwtService.java",
+            "JwtTokenUtil.java", "JwtTokenService.java", "JwtTokenProvider.java",
+            "JwtHelper.java", "JwtProvider.java"
+    );
+
     public static TemplateType classify(FileSpec spec, int layerPriority) {
         if (spec == null) return TemplateType.NONE;
+
+        // JWT_UTIL: always template — LLM consistently generates the wrong API version.
+        // Template is pinned to JJWT 0.11.5 which matches ProjectPlanningNode.injectJwtDependencies().
+        if (spec.getFileName() != null && JWT_UTIL_FILENAMES.contains(spec.getFileName())) {
+            return TemplateType.JWT_UTIL;
+        }
 
         // ENUM (priority 8): must have declared constants in publicVariables
         if (layerPriority == 8
@@ -52,8 +65,98 @@ public final class JavaFileTemplater {
             case ENUM       -> generateEnum(spec, basePackage);
             case REPOSITORY -> generateRepository(spec, basePackage);
             case DTO        -> generateDto(spec, basePackage);
+            case JWT_UTIL   -> generateJwtUtil(spec);
             case NONE       -> null;
         };
+    }
+
+    /**
+     * Generates a complete, correct JwtUtil using JJWT 0.11.5 API.
+     * Pinned to match ProjectPlanningNode.injectJwtDependencies() which always injects 0.11.5.
+     *
+     * JJWT 0.11.5 key API differences from 0.12.x:
+     *   - Jwts.parserBuilder()  (not Jwts.parser())
+     *   - .setSigningKey(key)   (not .verifyWith(key))
+     *   - .parseClaimsJws(token) (not .parseSignedClaims(token))
+     *   - .getBody()            (not .getPayload())
+     *   - Jwts.builder().setSubject() / .setExpiration() (not .subject() / .expiration())
+     *   - signWith(key, SignatureAlgorithm.HS256)
+     */
+    private static String generateJwtUtil(FileSpec spec) {
+        String pkg = extractPackage(spec.getFilePath());
+        String className = spec.getFileName().replace(".java", "");
+        log.info("[JavaFileTemplater] Generated JWT_UTIL template for {} (JJWT 0.11.5 API)", spec.getFileName());
+        return """
+                package %s;
+
+                import io.jsonwebtoken.Claims;
+                import io.jsonwebtoken.Jwts;
+                import io.jsonwebtoken.SignatureAlgorithm;
+                import io.jsonwebtoken.security.Keys;
+                import org.springframework.beans.factory.annotation.Value;
+                import org.springframework.security.core.userdetails.UserDetails;
+                import org.springframework.stereotype.Component;
+
+                import java.nio.charset.StandardCharsets;
+                import java.security.Key;
+                import java.util.Date;
+                import java.util.HashMap;
+                import java.util.Map;
+                import java.util.function.Function;
+
+                @Component
+                public class %s {
+
+                    @Value("${jwt.secret}")
+                    private String secret;
+
+                    @Value("${jwt.expiration-ms}")
+                    private long expirationMs;
+
+                    public String generateToken(UserDetails userDetails) {
+                        return generateToken(new HashMap<>(), userDetails.getUsername());
+                    }
+
+                    public String generateToken(Map<String, Object> extraClaims, String subject) {
+                        return Jwts.builder()
+                                .setClaims(extraClaims)
+                                .setSubject(subject)
+                                .setIssuedAt(new Date())
+                                .setExpiration(new Date(System.currentTimeMillis() + expirationMs))
+                                .signWith(getSigningKey(), SignatureAlgorithm.HS256)
+                                .compact();
+                    }
+
+                    public String extractUsername(String token) {
+                        return extractClaim(token, Claims::getSubject);
+                    }
+
+                    public Date extractExpiration(String token) {
+                        return extractClaim(token, Claims::getExpiration);
+                    }
+
+                    public <T> T extractClaim(String token, Function<Claims, T> resolver) {
+                        return resolver.apply(extractAllClaims(token));
+                    }
+
+                    public boolean validateToken(String token, UserDetails userDetails) {
+                        return extractUsername(token).equals(userDetails.getUsername())
+                                && !extractExpiration(token).before(new Date());
+                    }
+
+                    private Claims extractAllClaims(String token) {
+                        return Jwts.parserBuilder()
+                                .setSigningKey(getSigningKey())
+                                .build()
+                                .parseClaimsJws(token)
+                                .getBody();
+                    }
+
+                    private Key getSigningKey() {
+                        return Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
+                    }
+                }
+                """.formatted(pkg, className);
     }
 
     private static String generateEnum(FileSpec spec, String basePackage) {
@@ -70,13 +173,12 @@ public final class JavaFileTemplater {
         String pkg = extractPackage(spec.getFilePath());
         String className = spec.getFileName().replace(".java", "");
         String entityName = className.replace("Repository", "");
-        // Try entity in model or entity subpackage; default to model
         String entityFqn = basePackage + ".model." + entityName;
 
         List<PublicFunction> custom = getCustomFunctions(spec);
         String customMethods = custom.isEmpty() ? "" :
                 "\n" + custom.stream()
-                        .map(f -> "    // " + f.getName() + "()")
+                        .map(f -> "    " + generateRepositoryMethodSignature(f, entityName) + ";")
                         .collect(Collectors.joining("\n")) + "\n";
 
         log.info("[JavaFileTemplater] Generated REPOSITORY template for {}", spec.getFileName());
@@ -87,11 +189,42 @@ public final class JavaFileTemplater {
                 import org.springframework.data.jpa.repository.JpaRepository;
                 import org.springframework.stereotype.Repository;
                 import java.util.List;
+                import java.util.Optional;
                 import java.util.UUID;
 
                 @Repository
                 public interface %s extends JpaRepository<%s, UUID> {%s}
                 """.formatted(pkg, entityFqn, className, entityName, customMethods);
+    }
+
+    private static String generateRepositoryMethodSignature(PublicFunction f, String entityName) {
+        String name = f.getName();
+        if (name == null || name.isBlank()) return "// unknown method";
+        String lower = name.toLowerCase();
+        String returnType;
+        if (lower.startsWith("findallby") || lower.startsWith("getallby")) returnType = "List<" + entityName + ">";
+        else if (lower.startsWith("findby") || lower.startsWith("getby")) returnType = "Optional<" + entityName + ">";
+        else if (lower.startsWith("existsby")) returnType = "boolean";
+        else if (lower.startsWith("countby")) returnType = "long";
+        else if (lower.startsWith("deleteby") || lower.startsWith("removeby")) returnType = "void";
+        else returnType = "Optional<" + entityName + ">";
+
+        // Derive param name from method name (findByEmail → email)
+        String paramName = "value";
+        for (String prefix : List.of("findAllBy", "findBy", "getBy", "getAllBy",
+                "existsBy", "countBy", "deleteBy", "removeBy")) {
+            if (name.startsWith(prefix) && name.length() > prefix.length()) {
+                String field = name.substring(prefix.length());
+                paramName = Character.toLowerCase(field.charAt(0)) + field.substring(1);
+                break;
+            }
+        }
+
+        // Param type: use returnType declared in spec if available, else String
+        String paramType = (f.getReturnType() != null && !f.getReturnType().isBlank())
+                ? f.getReturnType() : "String";
+
+        return returnType + " " + name + "(" + paramType + " " + paramName + ")";
     }
 
     private static String generateDto(FileSpec spec, String basePackage) {
@@ -123,26 +256,27 @@ public final class JavaFileTemplater {
                 """.formatted(pkg, className, fields);
     }
 
+    // Methods already provided by JpaRepository — no need to declare in the interface.
+    // Derived queries (findByEmail, findByRazorpayOrderId, existsByUsername, etc.) are NOT
+    // provided by JpaRepository and must be declared explicitly, even though they start with
+    // findBy/existsBy. We use exact-name matching here to avoid incorrectly treating
+    // findByRazorpayOrderId as a standard method.
+    private static final java.util.Set<String> JPAREPOSITORY_PROVIDED = java.util.Set.of(
+            "findAll", "findById", "save", "saveAll", "deleteById", "delete",
+            "existsById", "count", "getById", "getReferenceById",
+            "flush", "saveAndFlush", "deleteAll", "deleteAllById"
+    );
+
     private static boolean hasOnlyStandardCrud(FileSpec spec) {
         if (spec.getPublicFunctions() == null || spec.getPublicFunctions().isEmpty()) return true;
-        List<String> standard = List.of(
-                "findAll", "findById", "findBy", "save", "saveAll",
-                "deleteById", "delete", "existsById", "count", "getById"
-        );
         return spec.getPublicFunctions().stream()
-                .allMatch(f -> f.getName() == null
-                        || standard.stream().anyMatch(s -> f.getName().startsWith(s)));
+                .allMatch(f -> f.getName() == null || JPAREPOSITORY_PROVIDED.contains(f.getName()));
     }
 
     private static List<PublicFunction> getCustomFunctions(FileSpec spec) {
         if (spec.getPublicFunctions() == null) return List.of();
-        List<String> standard = List.of(
-                "findAll", "findById", "findBy", "save", "saveAll",
-                "deleteById", "delete", "existsById", "count", "getById"
-        );
         return spec.getPublicFunctions().stream()
-                .filter(f -> f.getName() != null
-                        && standard.stream().noneMatch(s -> f.getName().startsWith(s)))
+                .filter(f -> f.getName() != null && !JPAREPOSITORY_PROVIDED.contains(f.getName()))
                 .toList();
     }
 
