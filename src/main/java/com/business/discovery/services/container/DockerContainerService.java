@@ -77,6 +77,14 @@ public class DockerContainerService {
     @Value("${worker.github.token:}")
     private String githubToken;
 
+    // Docker endpoint the WORKER should use for smoke-test/publish sibling containers.
+    // Defaults to the same proxy the master uses; on EC2 set to the socket-equivalent TCP proxy.
+    @Value("${app.docker.worker-docker-host:tcp://docker-proxy:2375}")
+    private String workerDockerHost;
+
+    @Value("${app.worker.smoke-enabled:true}")
+    private boolean workerSmokeEnabled;
+
     // ─── Spawn a sub-container for a task ─────────────────
 
     @Transactional
@@ -219,6 +227,13 @@ public class DockerContainerService {
         env.add("GEMINI_FLASH_THINKING_BUDGET=" + geminiFlashThinkingBudget);
         env.add("ANTHROPIC_API_KEY=" + anthropicApiKey);
         env.add("TAVILY_API_KEY=" + tavilyApiKey);
+
+        // Smoke test / image publish — worker's docker CLI targets the same proxy as the master.
+        // Named WORKER_DOCKER_HOST (not DOCKER_HOST) so Docker doesn't treat it specially at spawn;
+        // the worker maps it to worker.docker.host and sets DOCKER_HOST per-process itself.
+        env.add("WORKER_DOCKER_HOST=" + workerDockerHost);
+        env.add("WORKER_SMOKE_ENABLED=" + workerSmokeEnabled);
+        env.add("DOCKER_NETWORK_NAME=" + networkName);
 
         return env;
     }

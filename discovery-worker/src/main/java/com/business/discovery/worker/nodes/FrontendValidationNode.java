@@ -45,12 +45,17 @@ public class FrontendValidationNode implements WorkerNode {
         // Pre-ErrorFixAgent mechanical fixes — same pattern as BackendValidationNode:
         //   1. TsxExportGuard: wraps raw JSX files that have no export default (truncated LLM output)
         //   2. NpmPackageFixer: installs missing npm packages / rewrites renamed package imports
-        // Both are deterministic and fast. Doing them first saves ErrorFixAgent rounds.
+        //   3. JsxTypeImportFixer: adds `import type { JSX }` where JSX.Element annotations slipped in
+        //   4. UiImportRewriter: inventory-driven correction of invented Radix/shadcn imports
+        // All deterministic and fast. Doing them first saves ErrorFixAgent rounds.
         Path frontendSrc = frontendDir.resolve("src");
         boolean exportsFixed = TsxExportGuard.fix(frontendSrc);
         boolean packagesFixed = NpmPackageFixer.fix(frontendDir, initial.output(), buildTool);
+        boolean jsxImportsFixed = com.business.discovery.worker.util.JsxTypeImportFixer.fix(frontendSrc);
+        boolean uiImportsFixed = com.business.discovery.worker.util.UiImportRewriter.fix(frontendSrc,
+                com.business.discovery.worker.util.UiComponentInventory.build(frontendDir));
 
-        if (exportsFixed || packagesFixed) {
+        if (exportsFixed || packagesFixed || jsxImportsFixed || uiImportsFixed) {
             BuildResult postFix = buildTool.runNpmBuild(frontendDir);
             if (postFix.success()) {
                 log.info("[FrontendValidationNode] npm build passed after mechanical fixes — skipping ErrorFixAgent");
@@ -75,11 +80,42 @@ public class FrontendValidationNode implements WorkerNode {
     }
 
     private void markFilesValidated(WorkerContext ctx) {
+        assertAppHasRouting(ctx.getWorkspaceDir());
         try {
             ArchitectureJsonUtil.markAllByTypeAsValidated(ctx.getWorkspaceDir(), "FRONTEND");
             log.info("[FrontendValidationNode] Marked frontend files as VALIDATED in ARCHITECTURE.json");
         } catch (IOException e) {
             log.warn("[FrontendValidationNode] Could not update ARCHITECTURE.json: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Blank-SPA guard: a compiling, bundling frontend whose App.tsx renders nothing is a
+     * white page in production — multifit-aundh shipped `return <div />` while all page
+     * content sat in unrouted Next.js-style pages/ files. Compile checks and even the
+     * smoke frontend gate (which only asserts the bundle serves) cannot see this; the
+     * router wiring is the one structural fact we can assert statically.
+     */
+    private void assertAppHasRouting(java.nio.file.Path workspace) {
+        java.nio.file.Path appTsx = workspace.resolve("frontend/src/App.tsx");
+        try {
+            if (!java.nio.file.Files.exists(appTsx)) {
+                throw new WorkerException(FailureType.CODE,
+                        "frontend/src/App.tsx is missing — the SPA entry point was never generated");
+            }
+            String content = java.nio.file.Files.readString(appTsx);
+            boolean hasRouting = content.contains("<Route")
+                    || content.contains("createBrowserRouter")
+                    || content.contains("RouterProvider");
+            if (!hasRouting) {
+                throw new WorkerException(FailureType.CODE,
+                        "frontend/src/App.tsx contains no router wiring (no <Route>/createBrowserRouter) — "
+                        + "the built SPA would render a blank page. App.tsx must declare BrowserRouter + "
+                        + "Routes for every page per the architecture spec's FRONTEND ROUTING section.");
+            }
+        } catch (IOException e) {
+            throw new WorkerException(FailureType.CODE,
+                    "Could not verify App.tsx routing: " + e.getMessage(), e);
         }
     }
 }

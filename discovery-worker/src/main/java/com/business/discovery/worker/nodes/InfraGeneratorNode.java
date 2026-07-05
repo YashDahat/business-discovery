@@ -210,7 +210,7 @@ public class InfraGeneratorNode implements WorkerNode {
             COPY --from=builder /app/target/*.jar app.jar
             USER appuser
             EXPOSE 8080
-            HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8080/actuator/health || exit 1
+            HEALTHCHECK --interval=30s --timeout=5s CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080' || exit 1
             ENTRYPOINT ["java", "-jar", "app.jar"]
             """;
 

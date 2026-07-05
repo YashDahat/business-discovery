@@ -57,7 +57,12 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
     // ── Standard single-turn call (used by all generation except enrichment) ─
 
     @Override
-    protected String callLlm(String systemPrompt, String userPrompt) {
+    protected String modelName() {
+        return modelKey;
+    }
+
+    @Override
+    protected String doCallLlm(String systemPrompt, String userPrompt) {
         try {
             ChatResponse response = model.chat(
                     SystemMessage.from(systemPrompt),
@@ -105,6 +110,10 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
             messages.add(aiMessage);
 
             if (!aiMessage.hasToolExecutionRequests()) {
+                if (interactionLogger() != null) {
+                    interactionLogger().log(modelKey, "enrichment-tools (" + round + " rounds)",
+                            systemPrompt, userPrompt, aiMessage.text());
+                }
                 return aiMessage.text();
             }
 
@@ -127,6 +136,7 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
                                    String userTrigger,
                                    List<ToolSpecification> tools,
                                    Function<ToolExecutionRequest, String> toolHandler,
+                                   Function<List<String>, String> postRoundHook,
                                    int maxRounds) {
         List<ChatMessage> messages = new ArrayList<>();
         messages.add(SystemMessage.from(systemPrompt));
@@ -152,12 +162,19 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
                 return true;
             }
 
+            List<String> executedTools = new ArrayList<>();
             for (var req : aiMessage.toolExecutionRequests()) {
                 String preview = req.arguments() != null && req.arguments().length() > 120
                         ? req.arguments().substring(0, 120) + "..." : req.arguments();
                 log.info("[GeminiLlmGeneratorService] Fix agent tool: {}({})", req.name(), preview);
                 String result = toolHandler.apply(req);
+                executedTools.add(req.name());
                 messages.add(ToolExecutionResultMessage.from(req, result));
+            }
+
+            String hookOutput = postRoundHook != null ? postRoundHook.apply(executedTools) : null;
+            if (hookOutput != null && !hookOutput.isBlank()) {
+                messages.add(UserMessage.from(hookOutput));
             }
         }
 

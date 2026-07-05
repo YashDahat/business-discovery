@@ -11,6 +11,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useBusinessDetail } from '@/hooks/useBusinessDetail'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { ErrorState } from '@/components/shared/ErrorState'
+import { DemoButton } from '@/components/shared/DemoButton'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 import { runCoderAgent, generateBrief, submitChanges, getBriefStatus } from '@/services/businessService'
@@ -627,6 +628,11 @@ function AiPipelineCard({ business, brief, latestTask, opsStatus, onBriefTrigger
           View GitHub PR
         </a>
       )}
+      <DemoButton
+        briefId={brief?.id ?? null}
+        publishedImage={latestTask?.publishedImage ?? null}
+      />
+
       {latestTask?.githubRepoUrl && (
         <a
           href={latestTask.githubRepoUrl}

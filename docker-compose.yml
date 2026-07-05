@@ -27,8 +27,10 @@ services:
       CONTAINERS: 1
       IMAGES: 1
       NETWORKS: 1
-      VOLUMES: 0
-      AUTH: 0
+      VOLUMES: 1          # smoke-test compose stacks create named volumes
+      BUILD: 1            # smoke test builds the generated project's image
+      INFO: 1             # docker compose queries /info before operations
+      AUTH: 1             # docker login/push to GHCR sends auth through the daemon
       POST: 1
       DELETE: 1
     volumes:

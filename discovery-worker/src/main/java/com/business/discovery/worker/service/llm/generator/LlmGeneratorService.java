@@ -274,7 +274,39 @@ public abstract class LlmGeneratorService {
 
     // ── Subclass contract ─────────────────────────────────────────────────────
 
-    protected abstract String callLlm(String systemPrompt, String userPrompt);
+    /** Optional interaction logger — set by LlmConfig; null in tests. */
+    private com.business.discovery.worker.service.LlmInteractionLogger interactionLogger;
+
+    public void setInteractionLogger(com.business.discovery.worker.service.LlmInteractionLogger logger) {
+        this.interactionLogger = logger;
+    }
+
+    protected com.business.discovery.worker.service.LlmInteractionLogger interactionLogger() {
+        return interactionLogger;
+    }
+
+    /** Model identifier for interaction logs; subclasses return their configured model id. */
+    protected String modelName() {
+        return getClass().getSimpleName();
+    }
+
+    /**
+     * Single interception point for all single-turn calls: every prompt/response pair
+     * is journaled to the workspace (docs/llm/) so failed runs carry their own evidence.
+     */
+    protected final String callLlm(String systemPrompt, String userPrompt) {
+        String response = null;
+        try {
+            response = doCallLlm(systemPrompt, userPrompt);
+            return response;
+        } finally {
+            if (interactionLogger != null) {
+                interactionLogger.log(modelName(), "single-turn", systemPrompt, userPrompt, response);
+            }
+        }
+    }
+
+    protected abstract String doCallLlm(String systemPrompt, String userPrompt);
 
     /**
      * Override in implementations that support tool use (Gemini Pro).
@@ -290,11 +322,16 @@ public abstract class LlmGeneratorService {
      * Agentic fix loop: LLM calls tools to investigate and repair compilation errors.
      * Returns true if the LLM stopped voluntarily, false if maxRounds was exhausted.
      * Default throws — only Pro model beans implement this.
+     *
+     * @param postRoundHook called after each round's tools execute with the list of tool
+     *                      names used; a non-null return is appended to the conversation as
+     *                      extra context (e.g. auto-verification compile results). May be null.
      */
     public boolean runFixAgentLoop(String systemPrompt,
                                    String userTrigger,
                                    List<ToolSpecification> tools,
                                    Function<ToolExecutionRequest, String> toolHandler,
+                                   Function<List<String>, String> postRoundHook,
                                    int maxRounds) {
         throw new UnsupportedOperationException(
                 getClass().getSimpleName() + " does not support fix agent loop");

@@ -66,6 +66,29 @@ MAVEN TEST DEPENDENCY — only one test starter exists:
        Separator): import from @/components/ui/<name> (shadcn — files are pre-generated).
    (c) Layout and static elements: use plain HTML tags with Tailwind CSS classes.
    NEVER import from @/lib/utils. Use clsx for className merging.
+   UI IMPORT GROUND TRUTH: the dependency context includes an "AVAILABLE UI IMPORTS"
+   section enumerating the EXACT exports of every installed @radix-ui package and every
+   @/components/ui file. Import ONLY names that appear there, from the path they appear
+   under — anything else does not exist and will not compile. Paths are case-sensitive;
+   use them exactly as listed.
+
+# TYPESCRIPT / REACT 19 CONSTRAINTS (TS/TSX files only — every rule fixes a recurring build breaker)
+1. NEVER annotate return types or props as JSX.Element — the global JSX namespace does not
+   exist under React 19's jsx-runtime. Let component return types be INFERRED; for props that
+   accept markup use React.ReactNode. If a JSX type is truly unavoidable, the file must start
+   with: import type { JSX } from 'react'
+2. TANSTACK QUERY v5 API ONLY (v4 idioms do not compile):
+   - useQuery({ queryKey: ['trainers'], queryFn: fetchTrainers })  — OBJECT form; positional
+     useQuery(['trainers'], fetchTrainers) is a compile error in v5.
+   - Mutations expose isPending — mutation.isLoading DOES NOT EXIST on useMutation results.
+   - useMutation({ mutationFn: createTrainer, onSuccess: ... }) — object form here too.
+3. ZOD NUMERIC FORM FIELDS: HTML inputs yield strings — use z.coerce.number() (NOT z.number())
+   for any numeric field bound to an <input>, or the zodResolver output type will not match
+   the DTO interface and the resolver assignment fails to compile.
+4. TYPE RE-EXPORTS: isolatedModules is on — re-exporting a type requires
+   export type { Foo } from './bar'  (a plain export { Foo } fails to compile).
+5. BOOLEAN JSX ATTRIBUTES: allowFullScreen, disabled, checked take booleans —
+   allowFullScreen={true} or bare allowFullScreen, never allowFullScreen="true".
 
 # UI QUALITY STANDARDS (PAGE and COMPONENT files only — skip for Java/config files)
 1. LAYOUT WRAPPER: public Page.tsx wraps JSX in <Layout> from @/components/Layout. Admin*Page.tsx wraps in <AdminLayout> from @/components/AdminLayout. Never inline nav or sidebar inside a page.

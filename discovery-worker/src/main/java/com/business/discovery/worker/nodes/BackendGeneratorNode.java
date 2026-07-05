@@ -117,7 +117,8 @@ public class BackendGeneratorNode implements WorkerNode {
                         FileSpec spec = specByPath.get(e.path());
                         FeatureSpec feature = spec != null && spec.getFeatureName() != null
                                 ? featuresByName.get(spec.getFeatureName()) : null;
-                        return !shouldSkip(spec, feature, requestedChangesMode);
+                        boolean exists = Files.exists(workspace.resolve(e.path()));
+                        return !shouldSkip(spec, feature, requestedChangesMode, exists);
                     })
                     .toList();
 
@@ -274,13 +275,18 @@ public class BackendGeneratorNode implements WorkerNode {
 
     // ── shouldSkip ────────────────────────────────────────────────────────────
 
-    private boolean shouldSkip(FileSpec spec, FeatureSpec feature, boolean requestedChangesMode) {
+    private boolean shouldSkip(FileSpec spec, FeatureSpec feature, boolean requestedChangesMode,
+                               boolean existsOnDisk) {
         if (spec == null) return false;
         if (requestedChangesMode) return feature == null || !feature.isChangeRequired();
         String status = spec.getStatus();
-        // GENERATION_FAILED must NOT be skipped — re-generate on retry runs
+        // GENERATION_FAILED must NOT be skipped — re-generate on retry runs.
+        // GENERATED + present on disk IS skipped: after generation the fix loop owns the
+        // file. Regenerating it on retry destroyed the previous attempt's ErrorFixAgent
+        // patches (Sisyphus loop, multifit-aundh 2026-07-04) — retries never converged.
         return "SPEC_COMPLIANT".equalsIgnoreCase(status)
-                || "VALIDATED".equalsIgnoreCase(status);
+                || "VALIDATED".equalsIgnoreCase(status)
+                || ("GENERATED".equalsIgnoreCase(status) && existsOnDisk);
     }
 
     // ── Spec loading ──────────────────────────────────────────────────────────

@@ -82,6 +82,20 @@ public class GitService {
     }
 
     /**
+     * Stages a gitignored path (git add -f). No-op when the path doesn't exist;
+     * never throws — used for best-effort evidence capture on the failure push.
+     */
+    public void addForce(Path repoDir, String relativePath) {
+        try {
+            if (!java.nio.file.Files.exists(repoDir.resolve(relativePath))) return;
+            run(repoDir, List.of("git", "add", "-f", "--", relativePath),
+                    "git add -f failed for " + relativePath);
+        } catch (Exception e) {
+            log.warn("[GitService] Could not force-add {}: {}", relativePath, e.getMessage());
+        }
+    }
+
+    /**
      * Returns true if there are staged or unstaged changes in the working tree.
      * Uses --porcelain so the output is empty on a clean tree.
      */
@@ -103,6 +117,22 @@ public class GitService {
     public void commit(Path repoDir, String message) {
         run(repoDir, List.of("git", "commit", "-m", message),
                 "git commit failed");
+    }
+
+    /** Short SHA of HEAD, or null if it cannot be determined (never throws). */
+    public String getShortCommitSha(Path repoDir) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder("git", "rev-parse", "--short", "HEAD");
+            pb.redirectErrorStream(true);
+            pb.directory(repoDir.toFile());
+            Process proc = pb.start();
+            String output = new String(proc.getInputStream().readAllBytes()).trim();
+            proc.waitFor();
+            return proc.exitValue() == 0 && !output.isBlank() ? output : null;
+        } catch (Exception e) {
+            log.warn("[GitService] Could not resolve HEAD sha: {}", e.getMessage());
+            return null;
+        }
     }
 
     public void push(Path repoDir, String branch) {

@@ -74,6 +74,15 @@ public class ContainerTask {
     @Column(name = "github_pr_url")
     private String githubPrUrl;
 
+    // GHCR image ref pushed after smoke gates pass — written by ImagePublishNode
+    @Column(name = "published_image")
+    private String publishedImage;
+
+    // Which smoke gate failed (launch/boot/frontend/api-data) — null when passed or not run.
+    // Structured so stage pass-rates are a GROUP BY, not log archaeology.
+    @Column(name = "failed_gate")
+    private String failedGate;
+
     @Column(name = "github_token_expires_at")
     private LocalDateTime githubTokenExpiresAt;
 

@@ -56,7 +56,12 @@ public class ClaudeLlmGeneratorService extends LlmGeneratorService {
     // ── Single-turn call ──────────────────────────────────────────────────────
 
     @Override
-    protected String callLlm(String systemPrompt, String userPrompt) {
+    protected String modelName() {
+        return model;
+    }
+
+    @Override
+    protected String doCallLlm(String systemPrompt, String userPrompt) {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("model", model);
         body.put("max_tokens", MAX_TOKENS);
@@ -81,6 +86,7 @@ public class ClaudeLlmGeneratorService extends LlmGeneratorService {
                                    String userTrigger,
                                    List<ToolSpecification> tools,
                                    Function<ToolExecutionRequest, String> toolHandler,
+                                   Function<List<String>, String> postRoundHook,
                                    int maxRounds) {
         ArrayNode toolsJson = toAnthropicTools(tools);
 
@@ -93,6 +99,7 @@ public class ClaudeLlmGeneratorService extends LlmGeneratorService {
         long totalOutputTokens      = 0;
         long totalCacheWriteTokens  = 0;
         long totalCacheReadTokens   = 0;
+        int truncatedResponses      = 0;
 
         for (int round = 0; round < maxRounds; round++) {
             ObjectNode body = objectMapper.createObjectNode();
@@ -108,6 +115,10 @@ public class ClaudeLlmGeneratorService extends LlmGeneratorService {
             systemBlock.putObject("cache_control").put("type", "ephemeral");
 
             body.set("tools", toolsJson);
+            // Moving breakpoint: cache the whole conversation up to the newest tool result.
+            // Without this the growing history (compiler dumps, file bodies) is re-billed at
+            // full input price every round — 57% of a run's cost in the multifit post-mortem.
+            setMovingCacheBreakpoint(messages);
             body.set("messages", messages);
 
             JsonNode response = send(body);
@@ -129,6 +140,30 @@ public class ClaudeLlmGeneratorService extends LlmGeneratorService {
             JsonNode content   = response.path("content");
             String  stopReason = response.path("stop_reason").asText();
 
+            // A max_tokens stop means the response was cut mid-thought — any tool_use in it
+            // may have truncated input. Previously this fell through the !tool_use check and
+            // was silently treated as SUCCESS. Discard the partial response (keeps history
+            // API-valid: no dangling tool_use without tool_result) and ask for smaller steps.
+            if ("max_tokens".equals(stopReason)) {
+                truncatedResponses++;
+                log.warn("[ErrorFixAgent/Claude] round={} hit max_tokens ({}/3) — discarding partial response",
+                        round + 1, truncatedResponses);
+                if (interactionLogger() != null) {
+                    interactionLogger().log(model, "fix-agent-round-" + (round + 1) + "-truncated",
+                            null, null, "[response discarded: stop_reason=max_tokens]");
+                }
+                if (truncatedResponses >= 3) {
+                    log.warn("[ErrorFixAgent/Claude] 3 truncated responses — aborting loop");
+                    return false;
+                }
+                ObjectNode retryMsg = messages.addObject();
+                retryMsg.put("role", "user");
+                retryMsg.put("content", "[system] Your previous response exceeded the output limit and was "
+                        + "discarded. Redo that step in smaller pieces: use str_replace with a minimal "
+                        + "old_string/new_string instead of write_file, and make one change per response.");
+                continue;
+            }
+
             // Add assistant turn to conversation history
             ObjectNode assistantMsg = messages.addObject();
             assistantMsg.put("role", "assistant");
@@ -139,12 +174,27 @@ public class ClaudeLlmGeneratorService extends LlmGeneratorService {
                         round + 1, totalInputTokens, totalOutputTokens,
                         totalCacheWriteTokens, totalCacheReadTokens,
                         tokenCost(totalInputTokens, totalOutputTokens, totalCacheWriteTokens, totalCacheReadTokens));
+                if (interactionLogger() != null) {
+                    StringBuilder finalText = new StringBuilder("[stop_reason=" + stopReason + "]\n");
+                    for (JsonNode block : content) {
+                        if ("text".equals(block.path("type").asText())) {
+                            finalText.append(block.path("text").asText()).append("\n");
+                        }
+                    }
+                    interactionLogger().log(model, "fix-agent-final-round-" + (round + 1),
+                            null, null, finalText.toString());
+                }
                 return true;
             }
 
             // Execute every tool call the model requested
             ArrayNode toolResults = objectMapper.createArrayNode();
+            StringBuilder roundJournal = new StringBuilder();
+            List<String> executedTools = new java.util.ArrayList<>();
             for (JsonNode block : content) {
+                if ("text".equals(block.path("type").asText())) {
+                    roundJournal.append("[assistant] ").append(block.path("text").asText()).append("\n");
+                }
                 if (!"tool_use".equals(block.path("type").asText())) continue;
 
                 String toolId    = block.path("id").asText();
@@ -161,11 +211,32 @@ public class ClaudeLlmGeneratorService extends LlmGeneratorService {
                         .build();
 
                 String result = toolHandler.apply(req);
+                executedTools.add(toolName);
+                roundJournal.append("[tool] ").append(toolName).append("(").append(preview).append(") -> ")
+                        .append(result.length() > 300 ? result.substring(0, 300) + "..." : result).append("\n");
 
                 ObjectNode resultBlock = toolResults.addObject();
                 resultBlock.put("type", "tool_result");
                 resultBlock.put("tool_use_id", toolId);
                 resultBlock.put("content", result);
+            }
+
+            // Post-round hook: the harness may contribute extra context (e.g. an automatic
+            // compile after file mutations) so the model gets verification without spending
+            // a round asking for it. Appended as a text block after the tool_results.
+            String hookOutput = postRoundHook != null ? postRoundHook.apply(executedTools) : null;
+            if (hookOutput != null && !hookOutput.isBlank()) {
+                ObjectNode hookBlock = toolResults.addObject();
+                hookBlock.put("type", "text");
+                hookBlock.put("text", hookOutput);
+                roundJournal.append("[auto] ").append(
+                        hookOutput.length() > 300 ? hookOutput.substring(0, 300) + "..." : hookOutput).append("\n");
+            }
+
+            // Journal the round so failed fix sessions are reconstructable from docs/llm/
+            if (interactionLogger() != null) {
+                interactionLogger().log(model, "fix-agent-round-" + (round + 1),
+                        null, null, roundJournal.toString());
             }
 
             // Append tool results as the next user turn
@@ -183,47 +254,85 @@ public class ClaudeLlmGeneratorService extends LlmGeneratorService {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    /** Sends a request to the Anthropic Messages API and returns the parsed response body. */
+    /**
+     * Moves the conversation cache breakpoint to the newest message: clears any previous
+     * per-message markers, then marks the last content block of the last message. Combined
+     * with the system+tools markers this stays within Anthropic's 4-breakpoint limit while
+     * letting each round read the prior history from cache at 10% of input price.
+     */
+    private void setMovingCacheBreakpoint(ArrayNode messages) {
+        for (JsonNode msg : messages) {
+            JsonNode content = msg.get("content");
+            if (content != null && content.isArray()) {
+                for (JsonNode block : content) {
+                    ((ObjectNode) block).remove("cache_control");
+                }
+            }
+        }
+        JsonNode last = messages.get(messages.size() - 1);
+        JsonNode content = last.get("content");
+        if (content != null && content.isArray() && !content.isEmpty()) {
+            ((ObjectNode) content.get(content.size() - 1))
+                    .putObject("cache_control").put("type", "ephemeral");
+        }
+        // String-content messages (the initial trigger) are left unmarked — round 1
+        // has no history worth caching beyond the system+tools prefix anyway.
+    }
+
+    /**
+     * Sends a request to the Anthropic Messages API. Transient failures (429 rate limit,
+     * 529 overloaded, 5xx) are retried with exponential backoff — a single blip must not
+     * kill a 20-minute generation run.
+     */
     private JsonNode send(ObjectNode body) {
-        try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(MESSAGES_URL))
-                    .header("x-api-key", apiKey)
-                    .header("anthropic-version", ANTHROPIC_VERSION)
-                    .header("anthropic-beta", "prompt-caching-2024-07-31")
-                    .header("content-type", "application/json")
-                    .timeout(Duration.ofMinutes(5))
-                    .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
-                    .build();
+        int transientFailures = 0;
+        while (true) {
+            try {
+                HttpRequest request = HttpRequest.newBuilder()
+                        .uri(URI.create(MESSAGES_URL))
+                        .header("x-api-key", apiKey)
+                        .header("anthropic-version", ANTHROPIC_VERSION)
+                        .header("anthropic-beta", "prompt-caching-2024-07-31")
+                        .header("content-type", "application/json")
+                        .timeout(Duration.ofMinutes(5))
+                        .POST(HttpRequest.BodyPublishers.ofString(objectMapper.writeValueAsString(body)))
+                        .build();
 
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-            int status = response.statusCode();
+                HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                int status = response.statusCode();
 
-            if (status == 401 || status == 403) {
-                throw new WorkerException(FailureType.CONFIG_AUTH,
-                        "Anthropic auth failed — check ANTHROPIC_API_KEY. HTTP " + status);
-            }
-            if (status == 429) {
-                throw new WorkerException(FailureType.CODE,
-                        "Anthropic rate limit — HTTP 429: " + response.body());
-            }
-            if (status >= 500) {
-                throw new WorkerException(FailureType.INFRA,
-                        "Anthropic server error HTTP " + status + ": " + response.body());
-            }
-            if (status != 200) {
-                throw new WorkerException(FailureType.CODE,
-                        "Anthropic unexpected HTTP " + status + ": " + response.body());
-            }
+                if (status == 401 || status == 403) {
+                    throw new WorkerException(FailureType.CONFIG_AUTH,
+                            "Anthropic auth failed — check ANTHROPIC_API_KEY. HTTP " + status);
+                }
+                if (status == 429 || status == 529 || status >= 500) {
+                    transientFailures++;
+                    if (transientFailures > 3) {
+                        throw new WorkerException(FailureType.INFRA,
+                                "Anthropic HTTP " + status + " after 3 retries: " + response.body());
+                    }
+                    long backoffMs = (long) Math.pow(2, transientFailures) * 2000L; // 4s, 8s, 16s
+                    log.warn("[Claude] HTTP {} — retry {}/3 in {}ms", status, transientFailures, backoffMs);
+                    Thread.sleep(backoffMs);
+                    continue;
+                }
+                if (status != 200) {
+                    throw new WorkerException(FailureType.CODE,
+                            "Anthropic unexpected HTTP " + status + ": " + response.body());
+                }
 
-            return objectMapper.readTree(response.body());
+                return objectMapper.readTree(response.body());
 
-        } catch (WorkerException e) {
-            throw e;
-        } catch (java.net.http.HttpTimeoutException e) {
-            throw new WorkerException(FailureType.INFRA, "Anthropic request timed out", e);
-        } catch (Exception e) {
-            throw new WorkerException(FailureType.INFRA, "Anthropic call failed: " + e.getMessage(), e);
+            } catch (WorkerException e) {
+                throw e;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new WorkerException(FailureType.INFRA, "Anthropic call interrupted", e);
+            } catch (java.net.http.HttpTimeoutException e) {
+                throw new WorkerException(FailureType.INFRA, "Anthropic request timed out", e);
+            } catch (Exception e) {
+                throw new WorkerException(FailureType.INFRA, "Anthropic call failed: " + e.getMessage(), e);
+            }
         }
     }
 

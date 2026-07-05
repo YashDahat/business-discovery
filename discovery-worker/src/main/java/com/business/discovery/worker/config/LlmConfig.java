@@ -4,11 +4,13 @@ import com.business.discovery.worker.service.LlmTokenAccumulator;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.service.llm.generator.claude.ClaudeLlmGeneratorService;
 import com.business.discovery.worker.service.llm.generator.gemini.GeminiLlmGeneratorService;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration
+@Slf4j
 public class LlmConfig {
 
     @Value("${worker.llm.anthropic.api-key:}")
@@ -51,23 +53,32 @@ public class LlmConfig {
 
     // Architecture spec planning — needs Gemini Pro's reasoning depth + high output limit
     @Bean("geminiPro")
-    public LlmGeneratorService geminiPro(LlmTokenAccumulator accumulator) {
-        return new GeminiLlmGeneratorService(geminiApiKey, geminiProModel,
+    public LlmGeneratorService geminiPro(LlmTokenAccumulator accumulator,
+                                         com.business.discovery.worker.service.LlmInteractionLogger interactionLogger) {
+        var service = new GeminiLlmGeneratorService(geminiApiKey, geminiProModel,
                 geminiProMaxTokens, java.time.Duration.ofSeconds(geminiProTimeoutSeconds),
                 geminiProThinkingBudget, accumulator);
+        service.setInteractionLogger(interactionLogger);
+        return service;
     }
 
     // Backend / frontend / infra code generation — repetitive, Flash is sufficient and 10-15x cheaper
     @Bean("geminiFlash")
-    public LlmGeneratorService geminiFlash(LlmTokenAccumulator accumulator) {
-        return new GeminiLlmGeneratorService(geminiApiKey, geminiFlashModel,
+    public LlmGeneratorService geminiFlash(LlmTokenAccumulator accumulator,
+                                           com.business.discovery.worker.service.LlmInteractionLogger interactionLogger) {
+        var service = new GeminiLlmGeneratorService(geminiApiKey, geminiFlashModel,
                 geminiFlashMaxTokens, java.time.Duration.ofSeconds(geminiFlashTimeoutSeconds),
                 geminiFlashThinkingBudget, accumulator);
+        service.setInteractionLogger(interactionLogger);
+        return service;
     }
 
     // Validation error fixing — Claude Sonnet excels at spotting and correcting subtle code bugs
     @Bean("claudeSonnet")
-    public LlmGeneratorService claudeSonnet(LlmTokenAccumulator accumulator) {
-        return new ClaudeLlmGeneratorService(anthropicApiKey, anthropicModel, accumulator);
+    public LlmGeneratorService claudeSonnet(LlmTokenAccumulator accumulator,
+                                            com.business.discovery.worker.service.LlmInteractionLogger interactionLogger) {
+        var service = new ClaudeLlmGeneratorService(anthropicApiKey, anthropicModel, accumulator);
+        service.setInteractionLogger(interactionLogger);
+        return service;
     }
 }

@@ -84,6 +84,11 @@ public class WorkerContext {
     @Setter
     private String githubPrUrl; // set by PullRequestNode
 
+    // Set by SmokeTestNode when all gates pass — the locally-built, gate-passing image tag.
+    // ImagePublishNode pushes it to GHCR; null when smoke testing is disabled or skipped.
+    @Setter
+    private String smokeTestedImage;
+
     // Populated by GitWorkspaceNode — null on first run
     @Setter
     private String projectHistory;

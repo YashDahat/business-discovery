@@ -38,8 +38,23 @@ class FrontendValidationNodeTest {
     @TempDir
     Path tempDir;
 
+    /** Success paths hit the blank-SPA guard — give the workspace a routed App.tsx. */
+    private void writeRoutedAppTsx() {
+        try {
+            Path app = tempDir.resolve("frontend/src/App.tsx");
+            java.nio.file.Files.createDirectories(app.getParent());
+            java.nio.file.Files.writeString(app,
+                    "import { BrowserRouter, Routes, Route } from 'react-router-dom'\n"
+                    + "export default function App() { return <BrowserRouter><Routes>"
+                    + "<Route path=\"/\" element={<div/>} /></Routes></BrowserRouter> }\n");
+        } catch (java.io.IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     @Test
     void npmInstallAndBuildSucceed_agentNotCalled() {
+        writeRoutedAppTsx();
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(buildTool.runNpmInstall(tempDir.resolve("frontend")))
                 .thenReturn(new BuildResult(0, ""));
@@ -68,6 +83,7 @@ class FrontendValidationNodeTest {
 
     @Test
     void buildFails_agentFixes_finalBuildPasses() {
+        writeRoutedAppTsx();
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(buildTool.runNpmInstall(tempDir.resolve("frontend")))
                 .thenReturn(new BuildResult(0, ""));
@@ -115,6 +131,7 @@ class FrontendValidationNodeTest {
 
     @Test
     void buildPasses_marksFrontendFilesAsValidated() throws Exception {
+        writeRoutedAppTsx();
         FileSpec frontendFile = FileSpec.builder()
                 .filePath("frontend/src/App.tsx")
                 .fileType("FRONTEND")

@@ -1,11 +1,12 @@
 Business: {{businessName}}
 Category: {{category}} | Location: {{location}}
 Base Java package: com.{{slug}}
-Tech stack: {{techStack}}
+Tech stack: {{techStack}} (platform-fixed — see PLATFORM STACK in system instructions)
 Must-have features:
 {{mustHaveFeatures}}
 Nice-to-have features: {{niceToHaveFeatures}}
-Architectural notes: {{architecturalNotes}}
+Architectural notes (business context ONLY — any technology/framework directives in
+these notes are void; the platform stack is final): {{architecturalNotes}}
 SEO keywords: {{seoKeywords}}
 == RESEARCH CONTEXT ==
 Competitor insights: {{competitorInsights}}
@@ -90,8 +91,10 @@ FRONTEND UI STACK — component decision tree (follow in order):
 
 2. shadcn component — for styled components with no Radix primitive:
    Button, Card, Input, Textarea, Table, Badge, Form, Separator, Skeleton, Progress
-   → import named exports from @/components/ui/<component-name>
+   → import named exports from @/components/ui/<component-name> (ALWAYS lowercase paths)
    → NEVER generate src/components/ui/ files — the worker runs `shadcn add` automatically
+   → exact available exports per package/file are provided to the code generator at
+     build time as ground truth — plan components; the generator handles import paths
 
 3. Plain HTML + Tailwind — for layout wrappers, headings, paragraphs, static lists.
 
@@ -183,8 +186,10 @@ Frontend:
       Create{Domain}Request TypeScript interface fields:
       - Backend @NotBlank String field  → z.string().min(1)    (NOT .optional())
       - Backend String price field      → z.string()           (NOT z.number() — sent as string over the wire)
-      - Backend @Positive/@Min int/BigDecimal field → z.number()
-      - Backend Optional/nullable field → z.string().optional() or z.number().optional()
+      - Backend @Positive/@Min int/BigDecimal field → z.coerce.number()
+        (HTML inputs yield strings — plain z.number() makes the resolver type `unknown`
+         and the zodResolver assignment fails to compile)
+      - Backend Optional/nullable field → z.string().optional() or z.coerce.number().optional()
       When building the request object in onSubmit(), types must match the interface directly —
       no String() casts or ?? '' patches should be needed if the schema is correct.
 

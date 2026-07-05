@@ -49,11 +49,27 @@ public class ProjectPlanningNode implements WorkerNode {
 
     private static final int PROCESS_TIMEOUT_MINUTES = 5;
 
+    // "mail" is included by default: briefs routinely produce Notification/Lead features whose
+    // services autowire JavaMailSender — without the starter the app compiles but fails to boot
+    // (caught by the smoke boot gate on multifit-aundh, 2026-07-04).
     private static final List<String> DEFAULT_SPRING_STARTERS =
-            List.of("web", "data-jpa", "postgresql", "lombok", "validation", "actuator", "security");
+            List.of("web", "data-jpa", "postgresql", "lombok", "validation", "actuator", "security", "mail");
 
     private static final List<String> DEFAULT_NPM_PACKAGES =
             List.of("@tanstack/react-query", "react-hook-form", "zod", "axios", "react-router-dom");
+
+    // The platform stack is fixed — briefs describe the business, never the technology.
+    // A brief-supplied stack (e.g. "Next.js frontend") once reached the planning prompt and
+    // made the model return an empty spec; see docs/llm evidence on multifit-aundh attempt 1-4.
+    private static final Map<String, String> PLATFORM_TECH_STACK = Map.of(
+            "frontend", "React 19 + TypeScript on Vite, react-router-dom, Tailwind CSS",
+            "backend", "Spring Boot 3 (Java 17) + Spring Data JPA",
+            "database", "PostgreSQL");
+
+    // Frameworks that conflict with the platform stack — never installed even if the spec asks
+    private static final Set<String> FORBIDDEN_NPM_PACKAGES = Set.of(
+            "next", "nuxt", "gatsby", "remix", "@remix-run/react", "svelte", "vue",
+            "@angular/core", "express", "@nestjs/core");
 
     private final LlmGeneratorService llm;        // Pro — used for architecture spec generation only
     private final LlmGeneratorService enrichLlm;  // Flash — used for per-feature enrichment
@@ -251,6 +267,11 @@ public class ProjectPlanningNode implements WorkerNode {
                 jwt.expiration-ms=${JWT_EXPIRATION_MS:86400000}
                 admin.email=${ADMIN_EMAIL:admin@example.com}
                 admin.password=${ADMIN_PASSWORD:admin123}
+                spring.mail.host=${SMTP_HOST:localhost}
+                spring.mail.port=${SMTP_PORT:587}
+                spring.mail.username=${SMTP_USERNAME:}
+                spring.mail.password=${SMTP_PASSWORD:}
+                management.health.mail.enabled=false
                 """.formatted(slug));
 
         // Write canonical SpaController — forwards all non-file, non-API routes to index.html
@@ -487,7 +508,7 @@ public class ProjectPlanningNode implements WorkerNode {
                 COPY --from=backend-build /app/target/*.jar app.jar
                 USER app
                 EXPOSE 8080
-                HEALTHCHECK --interval=30s --timeout=5s CMD curl -f http://localhost:8080/actuator/health || exit 1
+                HEALTHCHECK --interval=30s --timeout=5s CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080' || exit 1
                 ENTRYPOINT ["java", "-jar", "app.jar"]
                 """);
 
@@ -504,7 +525,8 @@ public class ProjectPlanningNode implements WorkerNode {
                       db:
                         condition: service_healthy
                     healthcheck:
-                      test: ["CMD", "wget", "-qO-", "http://localhost:8080/actuator/health"]
+                      # temurin-jammy has no wget/curl — probe the port with bash's /dev/tcp instead
+                      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080'"]
                       interval: 30s
                       retries: 3
                   db:
@@ -533,10 +555,16 @@ public class ProjectPlanningNode implements WorkerNode {
                 JWT_EXPIRATION_MS=86400000
                 ADMIN_EMAIL=owner@yourbusiness.com
                 ADMIN_PASSWORD=changeme123
+                SMTP_HOST=localhost
+                SMTP_PORT=587
+                SMTP_USERNAME=
+                SMTP_PASSWORD=
                 """.formatted(slug, slug));
 
         Files.writeString(workspace.resolve(".gitignore"), """
                 .env
+                .smoke/
+                docs/llm/
                 target/
                 node_modules/
                 dist/
@@ -889,16 +917,39 @@ public class ProjectPlanningNode implements WorkerNode {
 
     // ── Dependency resolver ───────────────────────────────────────────────
 
+    /**
+     * Union of platform defaults and spec extras — the spec can ADD packages but never
+     * REPLACE the baseline. A spec once dropped react-router-dom by shipping its own
+     * (Next.js-flavored) npm list; the frontend then couldn't compile its router imports.
+     * Forbidden framework packages are stripped regardless of what the spec asks for.
+     */
     private ProjectDependencies resolveDependencies(ArchitectureSpec spec) {
+        List<String> starters = new ArrayList<>(DEFAULT_SPRING_STARTERS);
+        List<String> npm = new ArrayList<>(DEFAULT_NPM_PACKAGES);
+        List<com.business.discovery.worker.service.llm.MavenCoordinate> maven = null;
+
         if (spec.getProjectDependencies() != null) {
             ProjectDependencies deps = spec.getProjectDependencies();
-            List<String> starters = (deps.getSpringBootStarters() != null && !deps.getSpringBootStarters().isEmpty())
-                    ? deps.getSpringBootStarters() : DEFAULT_SPRING_STARTERS;
-            List<String> npm = (deps.getNpmPackages() != null && !deps.getNpmPackages().isEmpty())
-                    ? deps.getNpmPackages() : DEFAULT_NPM_PACKAGES;
-            return new ProjectDependencies(starters, npm, deps.getMavenDependencies());
+            if (deps.getSpringBootStarters() != null) {
+                deps.getSpringBootStarters().stream()
+                        .filter(s -> s != null && !starters.contains(s))
+                        .forEach(starters::add);
+            }
+            if (deps.getNpmPackages() != null) {
+                deps.getNpmPackages().stream()
+                        .filter(p -> p != null && !npm.contains(p))
+                        .filter(p -> {
+                            if (FORBIDDEN_NPM_PACKAGES.contains(p.toLowerCase())) {
+                                log.warn("[ProjectPlanningNode] Spec requested forbidden framework package '{}' — stripped", p);
+                                return false;
+                            }
+                            return true;
+                        })
+                        .forEach(npm::add);
+            }
+            maven = deps.getMavenDependencies();
         }
-        return new ProjectDependencies(DEFAULT_SPRING_STARTERS, DEFAULT_NPM_PACKAGES, null);
+        return new ProjectDependencies(starters, npm, maven);
     }
 
     // ── BriefContext builder ──────────────────────────────────────────────
@@ -912,7 +963,9 @@ public class ProjectPlanningNode implements WorkerNode {
                 nullSafeList(brief.getMustHaveFeatures()),
                 nullSafeList(brief.getNiceToHaveFeatures()),
                 nullSafeList(brief.getRecommendedPages()),
-                nullSafeMap(brief.getRecommendedTechStack()),
+                // NEVER brief.getRecommendedTechStack() — the platform stack is fixed and
+                // brief-supplied stacks (Next.js etc.) have derailed planning before
+                PLATFORM_TECH_STACK,
                 nullSafeList(brief.getSeoKeywords()),
                 nullSafe(brief.getDesignDirection(), "modern and professional"),
                 nullSafe(brief.getColorScheme(), "blue and white"),

@@ -83,6 +83,16 @@ public class ContainerTask {
     @Column(name = "github_pr_url")
     private String githubPrUrl;
 
+    // GHCR image ref pushed by the worker after smoke gates pass — the demoable artifact.
+    // Null until an attempt passes the smoke test; DemoService pulls and runs this image.
+    @Column(name = "published_image")
+    private String publishedImage;
+
+    // Which smoke gate failed (launch/boot/frontend/api-data) — null when passed or not run.
+    // Structured so stage pass-rates are a GROUP BY, not log archaeology.
+    @Column(name = "failed_gate")
+    private String failedGate;
+
     // GitHub App installation token — expires in 1hr
     @Column(name = "github_token_expires_at")
     private LocalDateTime githubTokenExpiresAt;

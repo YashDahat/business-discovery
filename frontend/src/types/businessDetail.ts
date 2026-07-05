@@ -38,6 +38,8 @@ export interface ContainerTaskSummary {
   dockerContainerId: string | null
   githubPrUrl: string | null
   githubRepoUrl: string | null
+  publishedImage: string | null
+  failedGate: string | null
   spawnedAt: string | null
   completedAt: string | null
   llmInputTokens: number | null

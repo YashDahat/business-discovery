@@ -21,12 +21,13 @@ public class WorkerOrchestrator {
 
     // Total number of WorkerNode beans expected in the pipeline.
     // Update this constant whenever a node is added or removed.
-    private static final int EXPECTED_NODE_COUNT = 12;
+    private static final int EXPECTED_NODE_COUNT = 14;
 
     private final WorkerContext ctx;
     private final GitService gitService;
     private final LlmTokenAccumulator tokenAccumulator;
     private final ContainerTaskRepository taskRepo;
+    private final com.business.discovery.worker.service.LlmInteractionLogger interactionLogger;
 
     // All WorkerNode beans, ordered by @Order(N). Spring injects them sorted.
     @Autowired
@@ -34,11 +35,13 @@ public class WorkerOrchestrator {
 
     public WorkerOrchestrator(WorkerContext ctx, GitService gitService,
                               LlmTokenAccumulator tokenAccumulator,
-                              ContainerTaskRepository taskRepo) {
+                              ContainerTaskRepository taskRepo,
+                              com.business.discovery.worker.service.LlmInteractionLogger interactionLogger) {
         this.ctx = ctx;
         this.gitService = gitService;
         this.tokenAccumulator = tokenAccumulator;
         this.taskRepo = taskRepo;
+        this.interactionLogger = interactionLogger;
     }
 
     @PostConstruct
@@ -72,6 +75,7 @@ public class WorkerOrchestrator {
         log.info("[worker] Starting — taskId={} briefId={} attempt={}",
                 ctx.getTaskIdStr(), ctx.getBriefIdStr(), ctx.getAttemptNumber());
         tokenAccumulator.reset();
+        interactionLogger.init(ctx.getWorkspaceDir());
 
         try {
             for (WorkerNode node : nodes) {
@@ -117,10 +121,14 @@ public class WorkerOrchestrator {
             return;
         }
 
-        // Skip entirely if there is nothing new to commit — avoids the "nothing to commit"
-        // non-zero exit that previously swallowed the real error message
-        if (!gitService.hasChanges(ctx.getWorkspaceDir())) {
-            log.info("[WorkerOrchestrator] Working tree clean — no progress to push on failure");
+        // docs/llm/ is gitignored, so hasChanges() can't see it — an early failure
+        // (e.g. arch-spec call dies before any file is generated) leaves a "clean" tree
+        // whose only evidence is the LLM journal. Push whenever either exists.
+        boolean hasChanges = gitService.hasChanges(ctx.getWorkspaceDir());
+        boolean hasLlmEvidence = Files.exists(ctx.getWorkspaceDir()
+                .resolve(com.business.discovery.worker.service.LlmInteractionLogger.LOG_DIR));
+        if (!hasChanges && !hasLlmEvidence) {
+            log.info("[WorkerOrchestrator] Working tree clean and no LLM evidence — nothing to push on failure");
             return;
         }
 
@@ -130,6 +138,16 @@ public class WorkerOrchestrator {
                     : "unknown error";
 
             gitService.addAll(ctx.getWorkspaceDir());
+            // on failure the gitignored LLM journal IS the evidence — force-add it
+            gitService.addForce(ctx.getWorkspaceDir(),
+                    com.business.discovery.worker.service.LlmInteractionLogger.LOG_DIR);
+
+            // addAll/addForce may still have staged nothing (e.g. evidence dir empty) —
+            // a "nothing to commit" exit would swallow the real error message
+            if (!gitService.hasChanges(ctx.getWorkspaceDir())) {
+                log.info("[WorkerOrchestrator] Nothing staged after adds — no progress to push on failure");
+                return;
+            }
             gitService.commit(ctx.getWorkspaceDir(),
                     "wip: failed attempt %d — %s".formatted(ctx.getAttemptNumber(), shortMsg));
             gitService.push(ctx.getWorkspaceDir(), ctx.getGithubBranch());

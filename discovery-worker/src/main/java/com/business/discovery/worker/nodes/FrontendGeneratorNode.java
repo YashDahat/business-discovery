@@ -207,6 +207,14 @@ public class FrontendGeneratorNode implements WorkerNode {
         try {
             ensureFrontendWorkspace(frontendDir, workspace);
 
+            // Ground-truth UI inventory: what @radix-ui packages and shadcn ui files ACTUALLY
+            // export, enumerated from the installed workspace. Injected into every generation
+            // prompt and consumed by UiImportRewriter — replaces hardcoded component knowledge.
+            this.uiInventory = com.business.discovery.worker.util.UiComponentInventory.build(frontendDir);
+            this.uiInventory.writeJson(workspace);
+            log.info("[FrontendGeneratorNode] UI inventory: {} radix packages, {} shadcn ui files",
+                    uiInventory.radixExports().size(), uiInventory.shadcnUiExports().size());
+
             // Group files by layer priority — within a layer, files don't depend on each other
             // and can be generated concurrently. TreeMap gives sorted layer iteration.
             TreeMap<Integer, List<FileEntry>> filesByLayer = frontendFiles.stream()
@@ -225,8 +233,8 @@ public class FrontendGeneratorNode implements WorkerNode {
                     FileSpec spec = specByPath.get(entry.path());
                     FeatureSpec feature = spec != null && spec.getFeatureName() != null
                             ? featuresByName.get(spec.getFeatureName()) : null;
-                    if (shouldSkip(spec, feature, requestedChangesMode)) {
-                        Path filePath = workspace.resolve(entry.path());
+                    Path filePath = workspace.resolve(entry.path());
+                    if (shouldSkip(spec, feature, requestedChangesMode, Files.exists(filePath))) {
                         if (Files.exists(filePath)) {
                             exportRegistry.register(filePath, Files.readString(filePath));
                         }
@@ -238,7 +246,8 @@ public class FrontendGeneratorNode implements WorkerNode {
                             FileSpec spec = specByPath.get(e.path());
                             FeatureSpec feature = spec != null && spec.getFeatureName() != null
                                     ? featuresByName.get(spec.getFeatureName()) : null;
-                            return !shouldSkip(spec, feature, requestedChangesMode);
+                            boolean exists = Files.exists(workspace.resolve(e.path()));
+                            return !shouldSkip(spec, feature, requestedChangesMode, exists);
                         })
                         .toList();
 
@@ -337,12 +346,19 @@ public class FrontendGeneratorNode implements WorkerNode {
 
     // ── PLANNED → GENERATED ───────────────────────────────────────────────────
 
+    // Set once per execute() before the parallel generation block; read-only afterwards.
+    private volatile com.business.discovery.worker.util.UiComponentInventory uiInventory;
+
     private void runGenerateStage(WorkerContext ctx, Path workspace, FileEntry entry,
                                   Path filePath, FileSpec spec, String featureInstruction,
                                   String fileRole, boolean requestedChangesMode,
                                   FeatureSpec feature, Set<String> manifestPaths,
                                   TypeScriptExportRegistry exportRegistry) throws IOException {
         Map<String, String> depFiles = loadDependencyFiles(workspace, spec);
+        if (uiInventory != null && !uiInventory.isEmpty()) {
+            depFiles.put("AVAILABLE UI IMPORTS (ground truth — import ONLY names listed here)",
+                    uiInventory.toPromptSection());
+        }
         String existingContent = (requestedChangesMode && feature != null && feature.isChangeRequired())
                 ? readIfExists(filePath) : null;
 
@@ -859,13 +875,18 @@ public class FrontendGeneratorNode implements WorkerNode {
 
     // ── shouldSkip ────────────────────────────────────────────────────────────
 
-    private boolean shouldSkip(FileSpec spec, FeatureSpec feature, boolean requestedChangesMode) {
+    private boolean shouldSkip(FileSpec spec, FeatureSpec feature, boolean requestedChangesMode,
+                               boolean existsOnDisk) {
         if (spec == null) return false;
         if (requestedChangesMode) return feature == null || !feature.isChangeRequired();
         String status = spec.getStatus();
         // GENERATION_FAILED is NOT skipped — falls through to runGenerateStage for a fresh attempt.
+        // GENERATED + present on disk IS skipped: after generation the fix loop owns the
+        // file. Regenerating on retry destroyed the previous attempt's ErrorFixAgent
+        // patches (Sisyphus loop, multifit-aundh 2026-07-04) — retries never converged.
         return "SPEC_COMPLIANT".equalsIgnoreCase(status)
-                || "VALIDATED".equalsIgnoreCase(status);
+                || "VALIDATED".equalsIgnoreCase(status)
+                || ("GENERATED".equalsIgnoreCase(status) && existsOnDisk);
     }
 
     // ── Spec loading ──────────────────────────────────────────────────────────

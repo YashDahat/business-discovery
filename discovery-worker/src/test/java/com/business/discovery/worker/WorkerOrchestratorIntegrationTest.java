@@ -65,6 +65,8 @@ import static org.mockito.Mockito.when;
         "worker.github.branch=feature/shree-cafe-attempt-1",
         "worker.github.repo-url=",
         "worker.llm.anthropic.api-key=test-key",
+        // No docker daemon in unit-test environments — SmokeTestNode must no-op
+        "worker.smoke.enabled=false",
 })
 @ActiveProfiles("test")
 class WorkerOrchestratorIntegrationTest {

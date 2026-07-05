@@ -1,5 +1,6 @@
 package com.business.discovery.worker.config;
 
+import com.business.discovery.worker.service.LlmInteractionLogger;
 import com.business.discovery.worker.service.LlmTokenAccumulator;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.service.llm.generator.claude.ClaudeLlmGeneratorService;
@@ -13,6 +14,7 @@ import static org.mockito.Mockito.mock;
 class LlmConfigTest {
 
     private final LlmTokenAccumulator accumulator = mock(LlmTokenAccumulator.class);
+    private final LlmInteractionLogger interactionLogger = mock(LlmInteractionLogger.class);
 
     private LlmConfig buildConfig() {
         LlmConfig config = new LlmConfig();
@@ -32,25 +34,26 @@ class LlmConfigTest {
 
     @Test
     void geminiPro_returnsGeminiImpl() {
-        LlmGeneratorService service = buildConfig().geminiPro(accumulator);
+        LlmGeneratorService service = buildConfig().geminiPro(accumulator, interactionLogger);
         assertThat(service).isInstanceOf(GeminiLlmGeneratorService.class);
     }
 
     @Test
     void geminiFlash_returnsGeminiImpl() {
-        LlmGeneratorService service = buildConfig().geminiFlash(accumulator);
+        LlmGeneratorService service = buildConfig().geminiFlash(accumulator, interactionLogger);
         assertThat(service).isInstanceOf(GeminiLlmGeneratorService.class);
     }
 
     @Test
     void claudeSonnet_returnsClaudeImpl() {
-        LlmGeneratorService service = buildConfig().claudeSonnet(accumulator);
+        LlmGeneratorService service = buildConfig().claudeSonnet(accumulator, interactionLogger);
         assertThat(service).isInstanceOf(ClaudeLlmGeneratorService.class);
     }
 
     @Test
     void geminiProAndFlash_areDistinctInstances() {
         LlmConfig config = buildConfig();
-        assertThat(config.geminiPro(accumulator)).isNotSameAs(config.geminiFlash(accumulator));
+        assertThat(config.geminiPro(accumulator, interactionLogger))
+                .isNotSameAs(config.geminiFlash(accumulator, interactionLogger));
     }
 }

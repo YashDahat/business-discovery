@@ -21,31 +21,53 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
  * Agentic fix loop for compilation errors — replaces the single-file ErrorFixNode
  * pattern used by ValidationNodes.
  *
- * The LLM drives the loop: it calls tools (run_compiler, read_file, write_file,
- * search_symbol, read_architecture_spec, list_files) to investigate root causes,
- * patch source files, and verify via the compiler. Java code only executes what
- * the LLM requests — it does not decide which files to fix.
+ * The LLM drives the loop: it calls tools (str_replace, write_file, read_file,
+ * search_symbol, run_compiler, run_npm_install, read_architecture_spec, list_files)
+ * to investigate root causes, patch source files, and verify. Java code only executes
+ * what the LLM requests — it does not decide which files to fix.
+ *
+ * Design informed by the multifit-aundh post-mortem (2026-07-04): the old 10-round
+ * budget was spent as 1 diagnose + 4 investigate + 5 blind patches + 0 verification.
+ * Changes: 30 rounds (affordable via the moving cache breakpoint in the Claude loop),
+ * edit-based patching (str_replace) instead of full-file rewrites, the pre-check
+ * compiler output seeded into the trigger, automatic post-mutation compiles via the
+ * post-round hook, and an npm install tool for missing-module errors.
  */
 @Component
 @Slf4j
 public class ErrorFixAgent {
 
-    static final int MAX_TOOL_ROUNDS = 10;
+    static final int MAX_TOOL_ROUNDS = 30;
+
+    private static final int SEEDED_ERRORS_MAX_CHARS = 6000;
+    private static final int AUTO_VERIFY_MAX_CHARS = 4000;
+
+    private static final Set<String> MUTATING_TOOLS =
+            Set.of("write_file", "str_replace", "run_npm_install");
+
+    // Framework packages that conflict with the platform stack — installing them "fixes"
+    // the compile error while breaking the app (e.g. `next` for a next/navigation import).
+    private static final Set<String> NPM_FRAMEWORK_BLACKLIST = Set.of(
+            "next", "nuxt", "gatsby", "remix", "@remix-run/react", "svelte", "vue",
+            "@angular/core", "express", "@nestjs/core");
 
     private static final String SYSTEM_PROMPT = """
             You are a senior engineer debugging multi-file compilation failures in a generated project.
 
-            You have 6 tools:
-            - run_compiler           — run the compiler and get ALL current errors
+            You have 8 tools:
+            - str_replace            — PREFERRED for fixes: replace an exact text snippet in a file
+            - write_file             — for NEW files or unavoidable full rewrites only
             - read_file              — read any file's current content
-            - write_file             — overwrite a file with the complete fixed content
             - search_symbol          — grep for a class/type/function across the project
+            - run_compiler           — run the compiler and get ALL current errors
+            - run_npm_install        — install a missing npm package (frontend only)
             - read_architecture_spec — get the spec (contract) for any file from ARCHITECTURE.json
             - list_files             — list all files in a workspace directory
 
@@ -54,27 +76,36 @@ public class ErrorFixAgent {
             - Maven: invoked via ./mvnw wrapper inside backend/. No need to locate javac or mvn binaries.
             - All project files are inside the workspace. list_files and read_file are restricted to it.
             - NEVER explore system paths: /usr, /opt, /etc, /bin, /lib, /jvm — they have no project files.
-            - If a Maven dependency is missing, fix backend/pom.xml — do not search for local JARs.
+            - If a Maven dependency is missing, fix backend/pom.xml — mvn re-resolves on compile.
+            - If an npm module is missing and it's a legitimate library, use run_npm_install.
             - If a class fails to compile, it is a code issue — not a JDK installation problem.
 
-            STRATEGY — always follow this order:
-            1. Call run_compiler first to collect ALL current errors.
-            2. For each error, classify it:
+            AUTOMATIC VERIFICATION: after every response in which you modify anything
+            (str_replace / write_file / run_npm_install), the harness automatically runs the
+            compiler and appends the result. DO NOT call run_compiler after making changes —
+            you will get the result for free. Only call run_compiler when you need a fresh
+            error list without having just changed something.
+
+            The current compiler errors are provided in the first message — do not re-run
+            the compiler to discover them.
+
+            STRATEGY:
+            1. Group the provided errors by ROOT CAUSE, not by file. One missing export can
+               produce ten downstream errors — fix the source, not the symptoms.
+            2. For each root cause, classify:
                - CROSS-FILE: "cannot find symbol X", "Module Y has no exported member X",
-                 "Cannot find module X" — the fix belongs in the SOURCE file (add the export/type).
+                 "Cannot find module X" — the fix belongs in the SOURCE file (add the export/type)
+                 or, for a missing npm library, run_npm_install.
                - SELF-CONTAINED: syntax error, wrong return type, bad import — fix the file itself.
-            3. For CROSS-FILE errors:
-               a. Call search_symbol to find where X is defined (or confirm it is missing).
-               b. Call read_architecture_spec on the source file to see what it must export.
-               c. Call read_file on the source file to see its current state.
-               d. Call write_file to add the missing export/type to the SOURCE file first,
-                  not to the importing file.
-            4. For SELF-CONTAINED errors:
-               a. Call read_file on the failing file.
-               b. Call write_file with the complete corrected file.
-            5. After patching, call run_compiler again to verify.
-            6. If new errors remain, investigate and fix them the same way.
-            7. Stop calling tools when: compiler passes, or you have exhausted every fix you can apply.
+            3. Investigate briskly: read only the files you intend to change plus the involved
+               contract (read_architecture_spec). Do not re-read files you have already seen.
+            4. Patch with str_replace: minimal old_string (with enough context to be unique)
+               and minimal new_string. One str_replace per distinct defect. Use write_file only
+               to CREATE a file that should exist but doesn't.
+            5. React to the automatic verification after each change: fixed errors disappear,
+               new ones mean your patch was wrong — revert or adjust before moving on.
+            6. Stop calling tools when the automatic verification reports the compiler passes,
+               or you have exhausted every fix you can apply.
 
             RULES:
             - Always fix root causes before symptoms — patch the source file first.
@@ -110,27 +141,38 @@ public class ErrorFixAgent {
 
         List<ToolSpecification> tools = buildToolSpecs();
 
-        String trigger = "Begin: call run_compiler(\"" + (fileType == FileType.BACKEND ? "backend" : "frontend")
-                + "\") to see current errors, then investigate and fix them.";
+        // Seed the trigger with the actual error list — the old trigger made the model
+        // spend its first round rediscovering errors we had already collected.
+        BuildToolService.BuildResult preCheck = check(fileType, compileDir);
 
-        BuildToolService.BuildResult preCheck = (fileType == FileType.BACKEND)
-                ? buildTool.runMvnCompile(compileDir)
-                : buildTool.runTscCheck(compileDir);
-        if (!preCheck.success()) {
-            String preview = preCheck.output();
-            if (preview.length() > 3000) preview = preview.substring(0, 3000) + "\n[...truncated]";
-            log.warn("[ErrorFixAgent] {} errors before fix loop:\n{}", fileType, preview);
+        if (preCheck.success()) {
+            log.info("[ErrorFixAgent] {} already compiles — no fix loop needed", fileType);
+            return true;
         }
+
+        String errors = preCheck.output();
+        if (errors.length() > SEEDED_ERRORS_MAX_CHARS) {
+            errors = errors.substring(0, SEEDED_ERRORS_MAX_CHARS) + "\n[...truncated]";
+        }
+        log.warn("[ErrorFixAgent] {} errors before fix loop:\n{}", fileType, errors);
+
+        String trigger = """
+                Fix the %s compilation. Current compiler errors:
+
+                %s
+
+                Group these by root cause, investigate the minimum necessary, and patch with
+                str_replace. The harness auto-compiles after each of your changes.
+                """.formatted(fileType == FileType.BACKEND ? "backend (Java)" : "frontend (TypeScript)", errors);
 
         log.info("[ErrorFixAgent] Starting fix loop for {} — max {} tool rounds", fileType, MAX_TOOL_ROUNDS);
 
         proLlm.runFixAgentLoop(SYSTEM_PROMPT, trigger, tools,
                 req -> executeToolCall(req, fileType, workspace, compileDir, reader, ctx),
+                executedTools -> autoVerify(executedTools, fileType, compileDir),
                 MAX_TOOL_ROUNDS);
 
-        BuildToolService.BuildResult finalResult = (fileType == FileType.BACKEND)
-                ? buildTool.runMvnCompile(compileDir)
-                : buildTool.runTscCheck(compileDir);
+        BuildToolService.BuildResult finalResult = check(fileType, compileDir);
 
         if (finalResult.success()) {
             log.info("[ErrorFixAgent] {} compilation passes after agent loop", fileType);
@@ -140,6 +182,27 @@ public class ErrorFixAgent {
         if (remainingErrors.length() > 3000) remainingErrors = remainingErrors.substring(0, 3000) + "\n[...truncated]";
         log.warn("[ErrorFixAgent] {} compilation still failing after agent loop:\n{}", fileType, remainingErrors);
         return false;
+    }
+
+    /**
+     * Post-round hook: when the model changed anything this round, run the compiler and
+     * hand it the result for free — the multifit session made five consecutive patches
+     * without a single verification because each compile cost a round.
+     */
+    private String autoVerify(List<String> executedTools, FileType fileType, Path compileDir) {
+        boolean mutated = executedTools.stream().anyMatch(MUTATING_TOOLS::contains);
+        if (!mutated) return null;
+
+        BuildToolService.BuildResult result = check(fileType, compileDir);
+
+        if (result.success()) {
+            return "[auto-verify] COMPILATION PASSED — all errors resolved. You are done; stop calling tools.";
+        }
+        String output = result.output();
+        if (output.length() > AUTO_VERIFY_MAX_CHARS) {
+            output = output.substring(0, AUTO_VERIFY_MAX_CHARS) + "\n[...truncated]";
+        }
+        return "[auto-verify] Compiler run after your changes — remaining errors:\n" + output;
     }
 
     // ── Tool Dispatch ─────────────────────────────────────────────────────────
@@ -153,6 +216,9 @@ public class ErrorFixAgent {
                 case "run_compiler"           -> runCompiler(args.path("type").asText(), fileType, compileDir);
                 case "read_file"              -> reader.readFile(args.path("path").asText());
                 case "write_file"             -> writeFile(args.path("path").asText(), args.path("content").asText(), workspace, ctx);
+                case "str_replace"            -> strReplace(args.path("path").asText(), args.path("old_string").asText(),
+                                                            args.path("new_string").asText(), workspace, ctx);
+                case "run_npm_install"        -> runNpmInstall(args.path("package").asText(), fileType, workspace);
                 case "search_symbol"          -> searchSymbol(args.path("symbol").asText(), args.path("scope").asText("all"), workspace);
                 case "read_architecture_spec" -> readArchSpec(args.path("path").asText(), workspace);
                 case "list_files"             -> listFiles(args.path("directory").asText(), workspace);
@@ -166,13 +232,24 @@ public class ErrorFixAgent {
 
     // ── Tool Implementations ──────────────────────────────────────────────────
 
+    /**
+     * The authoritative check per side — MUST match what the ValidationNodes enforce.
+     * Frontend uses `npm run build` (tsc + vite bundling), NOT bare tsc: the multifit
+     * debut run had the agent win on tsc while the node's final vite build still failed,
+     * trapping retries in a loop where the agent saw nothing wrong.
+     */
+    private BuildToolService.BuildResult check(FileType fileType, Path compileDir) {
+        return fileType == FileType.BACKEND
+                ? buildTool.runMvnCompile(compileDir)
+                : buildTool.runNpmBuild(compileDir);
+    }
+
     private String runCompiler(String type, FileType defaultType, Path compileDir) {
         boolean isBackend = "backend".equalsIgnoreCase(type)
                 || (type == null || type.isBlank()) && defaultType == FileType.BACKEND;
 
-        BuildToolService.BuildResult result = isBackend
-                ? buildTool.runMvnCompile(compileDir)
-                : buildTool.runTscCheck(compileDir);
+        BuildToolService.BuildResult result = check(
+                isBackend ? FileType.BACKEND : FileType.FRONTEND, compileDir);
 
         if (result.success()) return "COMPILATION PASSED — no errors.";
 
@@ -191,11 +268,91 @@ public class ErrorFixAgent {
             Files.createDirectories(target.getParent());
             Files.writeString(target, content);
             updateDbRecord(relativePath, ctx);
-            log.info("[ErrorFixAgent] Patched {} ({} chars)", relativePath, content.length());
+            log.info("[ErrorFixAgent] Wrote {} ({} chars)", relativePath, content.length());
             return "OK";
         } catch (IOException e) {
             return "ERROR: " + e.getMessage();
         }
+    }
+
+    /**
+     * Edit-based patching: replaces one exact occurrence of old_string. Enforcing
+     * uniqueness keeps edits deterministic; a minimal diff also cuts output tokens
+     * ~10x vs full-file rewrites and eliminates max_tokens truncation of large files.
+     */
+    private String strReplace(String relativePath, String oldString, String newString,
+                              Path workspace, WorkerContext ctx) {
+        if (relativePath == null || relativePath.isBlank()) return "ERROR: path is required";
+        if (oldString == null || oldString.isEmpty()) return "ERROR: old_string is required";
+        if (newString == null) newString = "";
+
+        Path target = workspace.resolve(relativePath).normalize();
+        if (!target.startsWith(workspace)) return "ERROR: path traversal not allowed: " + relativePath;
+        if (!Files.exists(target)) return "ERROR: file not found: " + relativePath
+                + " (use write_file to create new files)";
+
+        try {
+            String content = Files.readString(target);
+            int occurrences = countOccurrences(content, oldString);
+            if (occurrences == 0) {
+                return "ERROR: old_string not found in " + relativePath
+                        + ". Read the file and copy the exact text including whitespace.";
+            }
+            if (occurrences > 1) {
+                return "ERROR: old_string occurs " + occurrences + " times in " + relativePath
+                        + " — include more surrounding context to make it unique.";
+            }
+            Files.writeString(target, content.replace(oldString, newString));
+            updateDbRecord(relativePath, ctx);
+            log.info("[ErrorFixAgent] Patched {} ({} -> {} chars)", relativePath,
+                    oldString.length(), newString.length());
+            return "OK — replaced 1 occurrence";
+        } catch (IOException e) {
+            return "ERROR: " + e.getMessage();
+        }
+    }
+
+    private static int countOccurrences(String haystack, String needle) {
+        int count = 0;
+        int idx = 0;
+        while ((idx = haystack.indexOf(needle, idx)) != -1) {
+            count++;
+            idx += needle.length();
+        }
+        return count;
+    }
+
+    /**
+     * Installs a missing npm package. Previously "Cannot find module 'x'" was unfixable:
+     * the agent could edit package.json but tsc reads node_modules. Framework packages
+     * are refused — installing `next` to satisfy a next/navigation import "fixes" the
+     * compile while breaking the Vite app at runtime.
+     */
+    private String runNpmInstall(String packageName, FileType fileType, Path workspace) {
+        if (packageName == null || packageName.isBlank()) return "ERROR: package is required";
+        if (fileType == FileType.BACKEND) {
+            return "ERROR: run_npm_install is frontend-only. For Maven dependencies edit backend/pom.xml"
+                    + " — mvn re-resolves on the next compile.";
+        }
+        String normalized = packageName.trim().toLowerCase();
+        if (NPM_FRAMEWORK_BLACKLIST.contains(normalized)) {
+            return "ERROR: '" + packageName + "' is a framework package that conflicts with the platform"
+                    + " stack (Vite + react-router-dom). Fix the importing file to use the platform"
+                    + " equivalents instead (e.g. next/navigation -> react-router-dom useNavigate).";
+        }
+        if (!packageName.matches("(@[a-z0-9-~][a-z0-9-._~]*/)?[a-z0-9-~][a-z0-9-._~]*")) {
+            return "ERROR: invalid npm package name: " + packageName;
+        }
+
+        BuildToolService.BuildResult result =
+                buildTool.runNpmInstallPackage(workspace.resolve("frontend"), packageName);
+        if (result.success()) {
+            log.info("[ErrorFixAgent] Installed npm package {}", packageName);
+            return "OK — installed " + packageName;
+        }
+        String output = result.output();
+        return "ERROR: npm install failed:\n"
+                + (output.length() > 1000 ? output.substring(output.length() - 1000) : output);
     }
 
     private String searchSymbol(String symbol, String scope, Path workspace) {
@@ -276,11 +433,23 @@ public class ErrorFixAgent {
     private List<ToolSpecification> buildToolSpecs() {
         return List.of(
                 ToolSpecification.builder()
-                        .name("run_compiler")
-                        .description("Run the compiler and get all current errors. Call this first to see what's broken, and again after patching to verify fixes.")
+                        .name("str_replace")
+                        .description("PREFERRED fix tool: replace one exact occurrence of old_string with new_string in a file. old_string must match exactly (including whitespace) and be unique in the file — include surrounding context lines to disambiguate. Keep both strings minimal.")
                         .parameters(JsonObjectSchema.builder()
-                                .addStringProperty("type", "\"backend\" to run mvn compile, \"frontend\" to run tsc --noEmit")
-                                .required(List.of("type"))
+                                .addStringProperty("path", "Relative path from workspace root")
+                                .addStringProperty("old_string", "Exact text to replace — must occur exactly once in the file")
+                                .addStringProperty("new_string", "Replacement text")
+                                .required(List.of("path", "old_string", "new_string"))
+                                .build())
+                        .build(),
+
+                ToolSpecification.builder()
+                        .name("write_file")
+                        .description("Create a NEW file, or fully rewrite one when str_replace is impractical. Write the entire file — not a diff. No markdown fences in the content.")
+                        .parameters(JsonObjectSchema.builder()
+                                .addStringProperty("path", "Relative path from workspace root")
+                                .addStringProperty("content", "Complete new file content — raw source code only")
+                                .required(List.of("path", "content"))
                                 .build())
                         .build(),
 
@@ -294,12 +463,20 @@ public class ErrorFixAgent {
                         .build(),
 
                 ToolSpecification.builder()
-                        .name("write_file")
-                        .description("Overwrite a file with the complete fixed content. Write the entire file — not a diff. No markdown fences in the content.")
+                        .name("run_compiler")
+                        .description("Run the compiler for a fresh error list. NOT needed after your own changes — the harness auto-compiles and reports after every mutating response.")
                         .parameters(JsonObjectSchema.builder()
-                                .addStringProperty("path", "Relative path from workspace root")
-                                .addStringProperty("content", "Complete new file content — raw source code only")
-                                .required(List.of("path", "content"))
+                                .addStringProperty("type", "\"backend\" to run mvn compile, \"frontend\" to run tsc --noEmit")
+                                .required(List.of("type"))
+                                .build())
+                        .build(),
+
+                ToolSpecification.builder()
+                        .name("run_npm_install")
+                        .description("Install a missing npm package into the frontend (fixes 'Cannot find module X' for real libraries). Framework packages (next, vue, express...) are refused — fix those imports to platform equivalents instead.")
+                        .parameters(JsonObjectSchema.builder()
+                                .addStringProperty("package", "npm package name, e.g. date-fns or @radix-ui/react-tabs")
+                                .required(List.of("package"))
                                 .build())
                         .build(),
 

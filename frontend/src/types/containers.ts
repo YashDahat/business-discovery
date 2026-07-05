@@ -22,6 +22,8 @@ export interface ContainerTask {
   githubRepoUrl: string | null
   githubBranch: string | null
   githubPrUrl: string | null
+  publishedImage: string | null
+  failedGate: string | null
   spawnedAt: string | null
   completedAt: string | null
   createdAt: string
