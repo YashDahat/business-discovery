@@ -29,6 +29,17 @@ public class FrontendValidationNode implements WorkerNode {
     @Override
     public void execute(WorkerContext ctx) {
         Path frontendDir = ctx.getWorkspaceDir().resolve("frontend");
+        Path frontendSrc = frontendDir.resolve("src");
+
+        // Unconditional pre-pass: a blank App.tsx (return <div/>) COMPILES, so it would sail
+        // past the build and only trip the routing assertion at the end. Repair it in place
+        // from the page files + link graph before we build.
+        com.business.discovery.worker.util.AppRouteSynthesizer.fixIfMissingRoutes(frontendSrc);
+
+        // Frontend↔backend contract: auto-fix API prefix doubling and report method/path
+        // mismatches — runtime bugs the compiler and bundler cannot see.
+        com.business.discovery.worker.util.ApiContractChecker.fixAndReport(
+                frontendSrc, ctx.getWorkspaceDir().resolve("backend/src/main/java"));
 
         BuildResult install = buildTool.runNpmInstall(frontendDir);
         if (!install.success()) throw new WorkerException(FailureType.INFRA,
@@ -48,7 +59,6 @@ public class FrontendValidationNode implements WorkerNode {
         //   3. JsxTypeImportFixer: adds `import type { JSX }` where JSX.Element annotations slipped in
         //   4. UiImportRewriter: inventory-driven correction of invented Radix/shadcn imports
         // All deterministic and fast. Doing them first saves ErrorFixAgent rounds.
-        Path frontendSrc = frontendDir.resolve("src");
         boolean exportsFixed = TsxExportGuard.fix(frontendSrc);
         boolean packagesFixed = NpmPackageFixer.fix(frontendDir, initial.output(), buildTool);
         boolean jsxImportsFixed = com.business.discovery.worker.util.JsxTypeImportFixer.fix(frontendSrc);

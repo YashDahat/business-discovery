@@ -10,6 +10,7 @@ import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import com.business.discovery.worker.util.EnvVarScanner;
 import com.business.discovery.worker.util.MavenDependencyInjector;
 import com.business.discovery.worker.util.RepositoryMethodInjector;
+import com.business.discovery.worker.util.RolePrefixPatcher;
 import com.business.discovery.worker.util.SecurityConfigPatcher;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -32,6 +33,12 @@ public class BackendValidationNode implements WorkerNode {
     @Override
     public void execute(WorkerContext ctx) {
         Path backendDir = ctx.getWorkspaceDir().resolve("backend");
+        Path backendSrcJava = backendDir.resolve("src/main/java");
+
+        // Unconditional runtime-correctness patch — must run whether or not the code compiles,
+        // because a ROLE_/hasRole mismatch compiles fine but 403s every admin endpoint at runtime.
+        RolePrefixPatcher.fix(backendSrcJava);
+
         BuildResult initial = buildTool.runMvnCompile(backendDir);
 
         if (initial.success()) {
@@ -46,8 +53,7 @@ public class BackendValidationNode implements WorkerNode {
         //   2. MavenDependencyInjector: adds missing classpath jars (ErrorFixAgent can't fix these)
         //   3. RepositoryMethodInjector: adds missing Spring Data findBy* declarations that the
         //      SERVICE layer called but the REPOSITORY template didn't generate (cross-file gap)
-        Path backendSrc = backendDir.resolve("src/main/java");
-        boolean securityPatched = SecurityConfigPatcher.patch(backendSrc);
+        boolean securityPatched = SecurityConfigPatcher.patch(backendSrcJava);
         boolean depsInjected = MavenDependencyInjector.injectFromCompileErrors(
                 backendDir.resolve("pom.xml"), initial.output());
         boolean methodsInjected = RepositoryMethodInjector.injectMissingMethods(

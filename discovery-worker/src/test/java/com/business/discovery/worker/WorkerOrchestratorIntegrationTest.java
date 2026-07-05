@@ -208,8 +208,18 @@ class WorkerOrchestratorIntegrationTest {
 
         // featureInstruction already set → allFeaturesHaveInstructions = true → enrichment loop skipped
 
+        // App.tsx must carry router wiring or FrontendValidationNode's blank-SPA gate fails —
+        // reflect what correct generation produces; every other file is a stub.
         when(geminiFlashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
-                .thenReturn("// generated");
+                .thenAnswer(inv -> {
+                    String path = inv.getArgument(0);
+                    if (path != null && path.endsWith("App.tsx")) {
+                        return "import { BrowserRouter, Routes, Route } from 'react-router-dom'\n"
+                             + "export default function App() { return <BrowserRouter><Routes>"
+                             + "<Route path=\"/\" element={<div/>} /></Routes></BrowserRouter> }\n";
+                    }
+                    return "// generated";
+                });
 
         // GitHub stubs
         when(gitHubApiService.createRepo(any(), any())).thenReturn(REPO_URL);
