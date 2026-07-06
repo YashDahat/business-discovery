@@ -77,6 +77,12 @@ Never skip the types file for a frontend domain. A service.ts that imports
 from '@/types/<domain>' without a matching manifest entry causes a TypeScript
 compile error that cannot be auto-fixed at generation time.
 
+NOTE — these types and service files are DERIVED FROM THE BACKEND at build time
+(not LLM-generated): still plan them in the manifest with imports_from wiring —
+the manifest paths tell the derivation where to emit — and note in their file_role
+that they are "generated from the backend API contract". Pages and hooks import
+from them exactly as planned.
+
 ## Step 2 — Page → Files (SECOND)
 Every recommendedPage needs a Page.tsx (a page without one is NOT implemented). Data-driven
 pages (Menu, Reservation, Order, Events) are already covered by Step 1 — do not duplicate.

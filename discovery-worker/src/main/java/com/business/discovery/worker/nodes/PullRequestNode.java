@@ -13,7 +13,7 @@ import org.springframework.stereotype.Component;
 import java.util.stream.Collectors;
 
 @Component
-@Order(17)
+@Order(18)
 @Slf4j
 @RequiredArgsConstructor
 public class PullRequestNode implements WorkerNode {

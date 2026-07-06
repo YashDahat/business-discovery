@@ -45,7 +45,8 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
                 .maxOutputTokens(maxOutputTokens)
                 .timeout(timeout)
                 .temperature(0.3);
-        if (thinkingBudget != 0) {
+        log.info("[Gemini] model={} thinkingBudget={} maxOutputTokens={}", modelName, thinkingBudget, maxOutputTokens);
+        if (thinkingBudget > 0) {
             builder.thinkingConfig(
                     GeminiThinkingConfig.builder().thinkingBudget(thinkingBudget).build());
         }

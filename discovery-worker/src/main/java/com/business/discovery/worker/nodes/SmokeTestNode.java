@@ -41,7 +41,7 @@ import java.time.LocalDateTime;
  * the demo later runs the exact image that passed these gates.
  */
 @Component
-@Order(13)
+@Order(14)
 @Slf4j
 public class SmokeTestNode implements WorkerNode {
 

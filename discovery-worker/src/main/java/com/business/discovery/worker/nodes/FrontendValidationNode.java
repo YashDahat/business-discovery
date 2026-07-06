@@ -18,7 +18,7 @@ import java.io.IOException;
 import java.nio.file.Path;
 
 @Component
-@Order(12)
+@Order(13)
 @Slf4j
 @RequiredArgsConstructor
 public class FrontendValidationNode implements WorkerNode {

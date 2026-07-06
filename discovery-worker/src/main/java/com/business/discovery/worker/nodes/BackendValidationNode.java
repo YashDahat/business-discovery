@@ -22,7 +22,7 @@ import java.nio.file.Path;
 import java.util.Set;
 
 @Component
-@Order(11)
+@Order(8)
 @Slf4j
 @RequiredArgsConstructor
 public class BackendValidationNode implements WorkerNode {

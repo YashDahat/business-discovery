@@ -18,7 +18,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 
 @Component
-@Order(10)
+@Order(12)
 @Slf4j
 public class DocumentationGeneratorNode implements WorkerNode {
 

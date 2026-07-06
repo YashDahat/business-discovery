@@ -25,7 +25,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 @Component
-@Order(9)
+@Order(11)
 @Slf4j
 public class InfraGeneratorNode implements WorkerNode {
 

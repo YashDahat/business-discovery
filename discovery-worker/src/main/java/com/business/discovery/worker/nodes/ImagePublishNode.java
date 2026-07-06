@@ -30,7 +30,7 @@ import java.util.concurrent.TimeUnit;
  * Requires GITHUB_TOKEN with the `write:packages` scope (documented in README/.env.example).
  */
 @Component
-@Order(16)
+@Order(17)
 @Slf4j
 public class ImagePublishNode implements WorkerNode {
 

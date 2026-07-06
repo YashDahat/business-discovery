@@ -95,11 +95,14 @@ MAVEN TEST DEPENDENCY — only one test starter exists:
      <BrowserRouter> <QueryClientProvider> <AuthProvider> <Routes>…</Routes> </AuthProvider> </QueryClientProvider> </BrowserRouter>
    Placing AuthProvider outside BrowserRouter throws "useNavigate() may be used only in the
    context of a <Router>" at runtime and renders a blank page.
-7. API CALL PATHS: the axios client (@/api/client) already sets baseURL. Service files pass
-   ONLY the path SUFFIX after that baseURL. Match the exact backend route including the
-   /api/v1 prefix exactly ONCE across baseURL + call path — never double it, never omit it.
-   Admin list/manage endpoints live under /api/v1/admin/... ; public form POSTs under
-   /api/v1/... — use the path the backend controller actually declares.
+7. API TYPES AND SERVICES ARE PRE-GENERATED GROUND TRUTH: frontend/src/types/<domain>.ts
+   and frontend/src/services/<domain>Service.ts are DERIVED from the backend contract and
+   already exist — NEVER generate or modify them (like @/components/ui files). Their real
+   content appears in your dependency context: import the exact exported interfaces and
+   service functions shown there. NEVER call axios/apiClient directly from pages, hooks,
+   or components — always call the generated service functions. Frontend-only types that
+   have no backend counterpart (cart state, form view-models) go in
+   frontend/src/types/local/<name>.ts.
 
 # UI QUALITY STANDARDS (PAGE and COMPONENT files only — skip for Java/config files)
 1. LAYOUT WRAPPER: public Page.tsx wraps JSX in <Layout> from @/components/Layout. Admin*Page.tsx wraps in <AdminLayout> from @/components/AdminLayout. Never inline nav or sidebar inside a page.

@@ -43,7 +43,7 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Component
-@Order(8)
+@Order(10)
 @Slf4j
 public class FrontendGeneratorNode implements WorkerNode {
 
