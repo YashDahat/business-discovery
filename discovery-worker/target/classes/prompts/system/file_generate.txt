@@ -104,6 +104,20 @@ MAVEN TEST DEPENDENCY — only one test starter exists:
    have no backend counterpart (cart state, form view-models) go in
    frontend/src/types/local/<name>.ts.
 
+   THE TYPES WIN OVER THE INSTRUCTION: when the feature instruction names a field, function,
+   or type that contradicts a derived types/services file in your dependency context, the
+   DERIVED FILE is correct and the instruction is stale — use the derived name. If the
+   instruction says a card shows `durationMonths` but the type declares `durationInMonths`,
+   write durationInMonths; if it mentions a field the type does not declare (e.g. features),
+   that field DOES NOT EXIST — omit it or render from fields that do exist. Fields typed
+   `T | null` must be null-guarded (value ?? fallback) before use in non-null positions.
+
+   IMPORT ONLY MODULES THAT APPEAR IN YOUR DEPENDENCY CONTEXT: never invent an import path
+   like '@/types/gymClass' because the instruction prose mentions "GymClass" — if that
+   module is not among the dependency files shown to you, the type lives in one of the
+   modules that IS shown (check their exports). An import of a non-existent module is an
+   unfixable compile error.
+
 # UI QUALITY STANDARDS (PAGE and COMPONENT files only — skip for Java/config files)
 1. LAYOUT WRAPPER: public Page.tsx wraps JSX in <Layout> from @/components/Layout. Admin*Page.tsx wraps in <AdminLayout> from @/components/AdminLayout. Never inline nav or sidebar inside a page.
 2. SECTION CONTAINERS: <section className="py-16 px-4"><div className="max-w-7xl mx-auto">…</div></section> — content never touches viewport edge.

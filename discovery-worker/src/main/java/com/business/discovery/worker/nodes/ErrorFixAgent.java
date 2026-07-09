@@ -89,6 +89,17 @@ public class ErrorFixAgent {
             The current compiler errors are provided in the first message — do not re-run
             the compiler to discover them.
 
+            YOUR ROUND BUDGET IS LIMITED — BATCH AGGRESSIVELY:
+            Each of your responses costs one round regardless of how many tool calls it
+            contains, and you may make MANY tool calls in a single response. Never spend a
+            round on a single read_file or a single str_replace:
+            - Reconnaissance: ONE response that read_file's EVERY file appearing in the
+              error list (plus the types files they import). Ten reads in one response
+              costs one round; ten rounds of one read each wastes a third of your budget.
+            - Fixing: apply EVERY confident str_replace in the same response — group all
+              edits for all files you have already read. A response with 8 edits across
+              4 files is normal and desired.
+
             STRATEGY:
             1. Group the provided errors by ROOT CAUSE, not by file. One missing export can
                produce ten downstream errors — fix the source, not the symptoms.
@@ -98,14 +109,29 @@ public class ErrorFixAgent {
                  or, for a missing npm library, run_npm_install.
                - SELF-CONTAINED: syntax error, wrong return type, bad import — fix the file itself.
             3. Investigate briskly: read only the files you intend to change plus the involved
-               contract (read_architecture_spec). Do not re-read files you have already seen.
+               contract (read_architecture_spec) — in as few responses as possible. Do not
+               re-read files you have already seen.
             4. Patch with str_replace: minimal old_string (with enough context to be unique)
-               and minimal new_string. One str_replace per distinct defect. Use write_file only
-               to CREATE a file that should exist but doesn't.
+               and minimal new_string. One str_replace per distinct defect, many per response.
+               Use write_file only to CREATE a file that should exist but doesn't.
             5. React to the automatic verification after each change: fixed errors disappear,
                new ones mean your patch was wrong — revert or adjust before moving on.
             6. Stop calling tools when the automatic verification reports the compiler passes,
                or you have exhausted every fix you can apply.
+
+            DERIVED API LAYER (frontend — read carefully):
+            Files under frontend/src/types/ (except types/local/) and frontend/src/services/*Service.ts
+            are DERIVED from the compiled backend. They are ground truth and are regenerated
+            on every attempt — the harness REFUSES edits to them, and any workaround you find
+            will be overwritten. When a page/hook disagrees with a derived type or service:
+            - "Property 'x' does not exist on type 'YDto'" → rename x in the PAGE to the
+              field the derived type actually declares (the error usually suggests it).
+            - "'string | null' not assignable to 'string'" → add a null guard or fallback
+              in the PAGE (e.g. value ?? '').
+            - "Cannot find module '@/types/foo'" → the module was never derived; change the
+              PAGE's import to a derived module that exports the needed type. NEVER create
+              the missing types/services file.
+            - Frontend-only types (UI state, view models) belong in frontend/src/types/local/.
 
             RULES:
             - Always fix root causes before symptoms — patch the source file first.
@@ -257,12 +283,55 @@ public class ErrorFixAgent {
         return output.length() > 5000 ? output.substring(0, 5000) + "\n[...truncated]" : output;
     }
 
+    /** Marker line stamped by TsTypeGenerator/TsSdkGenerator on every derived file. */
+    private static final String DERIVED_MARKER = "GENERATED from the backend API contract";
+
+    /**
+     * Fence around the derived API layer. Observed failure mode: the agent "fixes"
+     * unresolvable imports by hand-writing phantom type/service files or rewriting
+     * derived ones — which the next attempt's re-derivation clobbers (churn loop).
+     * Mutations are refused with a redirect to fixing the importing file instead.
+     *
+     * @return an error string when the mutation must be refused, else null
+     */
+    private String derivedFileGuard(Path target, String relativePath) {
+        String p = relativePath.replace('\\', '/');
+        boolean inTypes    = p.startsWith("frontend/src/types/") && !p.startsWith("frontend/src/types/local/");
+        boolean isSdkFile  = p.startsWith("frontend/src/services/") && p.endsWith("Service.ts");
+
+        if (Files.exists(target)) {
+            try {
+                String firstLine = Files.readAllLines(target).stream().findFirst().orElse("");
+                if (firstLine.contains(DERIVED_MARKER)) {
+                    return "REFUSED: " + relativePath + " is DERIVED from the compiled backend contract "
+                            + "and is regenerated on every attempt — edits here are discarded. The types and "
+                            + "paths in it are ground truth. Fix the files that IMPORT it instead: rename the "
+                            + "mismatched field/function in the page/hook to match what this file actually exports.";
+                }
+            } catch (IOException ignored) {
+                // unreadable — fall through to normal handling
+            }
+            return null;
+        }
+
+        if (inTypes || isSdkFile) {
+            return "REFUSED: cannot create " + relativePath + " — wire types and API services are "
+                    + "DERIVED from the backend and this module was not derived, so the import path is "
+                    + "wrong. Fix the importing file to use a module that exists (see the derived files "
+                    + "under frontend/src/types/ and frontend/src/services/). Frontend-only types belong "
+                    + "in frontend/src/types/local/.";
+        }
+        return null;
+    }
+
     private String writeFile(String relativePath, String content, Path workspace, WorkerContext ctx) {
         if (relativePath == null || relativePath.isBlank()) return "ERROR: path is required";
         if (content == null || content.isBlank()) return "ERROR: content is required";
 
         Path target = workspace.resolve(relativePath).normalize();
         if (!target.startsWith(workspace)) return "ERROR: path traversal not allowed: " + relativePath;
+        String refusal = derivedFileGuard(target, relativePath);
+        if (refusal != null) return refusal;
 
         try {
             Files.createDirectories(target.getParent());
@@ -290,6 +359,8 @@ public class ErrorFixAgent {
         if (!target.startsWith(workspace)) return "ERROR: path traversal not allowed: " + relativePath;
         if (!Files.exists(target)) return "ERROR: file not found: " + relativePath
                 + " (use write_file to create new files)";
+        String refusal = derivedFileGuard(target, relativePath);
+        if (refusal != null) return refusal;
 
         try {
             String content = Files.readString(target);

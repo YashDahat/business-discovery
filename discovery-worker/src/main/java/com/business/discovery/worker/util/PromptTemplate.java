@@ -5,7 +5,7 @@ package com.business.discovery.worker.util;
  * All occurrences of {{key}} are replaced — null values become empty strings.
  *
  * Usage:
- *   PromptTemplate.from(PromptLoader.load("user/arch_spec.txt"))
+ *   PromptTemplate.from(PromptLoader.load("user/arch_outline.txt"))
  *       .with("businessName", brief.businessName())
  *       .with("category",     brief.category())
  *       .render();

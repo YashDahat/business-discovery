@@ -10,6 +10,7 @@ import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import com.business.discovery.worker.util.EnvVarScanner;
 import com.business.discovery.worker.util.MavenDependencyInjector;
 import com.business.discovery.worker.util.RepositoryMethodInjector;
+import com.business.discovery.worker.util.JwtCircularDependencyPatcher;
 import com.business.discovery.worker.util.RolePrefixPatcher;
 import com.business.discovery.worker.util.SecurityConfigPatcher;
 import lombok.RequiredArgsConstructor;
@@ -35,9 +36,10 @@ public class BackendValidationNode implements WorkerNode {
         Path backendDir = ctx.getWorkspaceDir().resolve("backend");
         Path backendSrcJava = backendDir.resolve("src/main/java");
 
-        // Unconditional runtime-correctness patch — must run whether or not the code compiles,
-        // because a ROLE_/hasRole mismatch compiles fine but 403s every admin endpoint at runtime.
+        // Unconditional runtime-correctness patches — must run whether or not the code compiles,
+        // because these defect classes compile clean and only surface at boot/request time.
         RolePrefixPatcher.fix(backendSrcJava);
+        JwtCircularDependencyPatcher.fix(backendSrcJava);
 
         BuildResult initial = buildTool.runMvnCompile(backendDir);
 

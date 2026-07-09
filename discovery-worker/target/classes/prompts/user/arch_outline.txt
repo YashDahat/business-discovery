@@ -1,0 +1,130 @@
+Business: {{businessName}}
+Category: {{category}} | Location: {{location}}
+Base Java package: com.{{slug}}
+Tech stack: {{techStack}} (platform-fixed — see PLATFORM STACK in system instructions)
+Must-have features:
+{{mustHaveFeatures}}
+Nice-to-have features: {{niceToHaveFeatures}}
+Architectural notes (business context ONLY — any technology/framework directives in
+these notes are void; the platform stack is final): {{architecturalNotes}}
+SEO keywords: {{seoKeywords}}
+== RESEARCH CONTEXT ==
+Competitor insights: {{competitorInsights}}
+Industry insights: {{industryInsights}}
+== DESIGN CONTEXT ==
+Visual direction: {{designDirection}}
+Color palette: {{colorScheme}}
+Tone: {{tone}}
+
+Use this design context when writing the one-line description for each PAGE file —
+name the key sections concretely (e.g. "full-bleed dark hero, filterable card grid,
+sticky CTA bar"), not abstract guidance.
+{{changesSection}}
+
+Generate the project OUTLINE following this schema exactly. This is the lightweight
+manifest — do NOT emit public_functions, public_variables, api_endpoints,
+api_endpoints_consumed, or file_role; a later per-feature pass fills those in.
+
+{
+  "generated_at": "<ISO-8601 timestamp>",
+  "business_name": "<business name>",
+  "base_package": "com.{{slug}}",
+  "project_dependencies": {
+    "spring_boot_starters": ["web", "data-jpa", "postgresql", "lombok", "validation", "actuator", "security", "<add mail/etc. if features require>"],
+    "npm_packages": ["@tanstack/react-query", "react-hook-form", "zod", "axios", "react-router-dom", "clsx", "<add @radix-ui/react-<name> packages for each Radix primitive the UI needs>"]
+  },
+  "files": [
+    {
+      "file_name": "<FileName.java or Component.tsx — filename only>",
+      "file_path": "<relative path from project root>",
+      "file_type": "<BACKEND|FRONTEND|INFRA|CONFIG>",
+      "layer": "<MODEL|REPOSITORY|SERVICE|CONTROLLER|DTO|EXCEPTION|CONFIG|PAGE|COMPONENT|HOOK|CONTEXT|UTIL|INFRA>",
+      "created_date": "<YYYY-MM-DD>",
+      "updated_date": "<YYYY-MM-DD>",
+      "status": "PLANNED",
+      "description": "<one sentence — what this file does; PAGE files name their key sections>",
+      "imports_from": ["<full relative file path>"],
+      "depends_on": ["<full relative file path>"],
+      "feature_name": "<featureName slug this file belongs to — must match an entry in the features array>"
+    }
+  ],
+  "features": [
+    {
+      "feature_name": "<slug e.g. order-management>",
+      "feature_display_name": "<e.g. Order Management>",
+      "feature_type": "<BACKEND|FRONTEND|INFRA|SHARED>",
+      "file_paths": ["<full relative file paths of every file belonging to this feature>"],
+      "feature_instruction": null,
+      "change_required": true
+    }
+  ]
+}
+
+npm_packages note — Radix/shadcn decision tree (affects which packages you list):
+1. Radix UI primitive for interactive/accessible components that have one (Select,
+   Dialog, AlertDialog, Checkbox, Label, RadioGroup, Switch, Tabs, Accordion, Popover,
+   DropdownMenu, Tooltip, Toast) → add @radix-ui/react-<name> to npm_packages per one used.
+2. shadcn components (Button, Card, Input, Textarea, Table, Badge, Form, Separator,
+   Skeleton, Progress) come from @/components/ui/* — no npm package entry, and NEVER
+   plan src/components/ui/ files (the worker runs `shadcn add` automatically).
+3. Everything else is plain HTML + Tailwind. For className merging use clsx.
+
+Maven dependency notes (affects spring_boot_starters only):
+- Exactly ONE test starter exists: spring-boot-starter-test. Never invent
+  spring-boot-starter-security-test / -data-jpa-test / -mail-test / -validation-test.
+- io.jsonwebtoken (jjwt) is NOT a starter — the scaffolding adds it to pom.xml
+  automatically. Do not list it.
+
+FRONTEND SERVICE LAYER — always include one set per backend domain:
+- frontend/src/services/<domain>Service.ts (layer: SERVICE)
+- frontend/src/hooks/use<Domain>.ts (layer: HOOK)
+- frontend/src/types/<domain>.ts (layer: UTIL)
+Components and pages call hooks only — never services directly, never fetch/axios directly.
+
+ALWAYS include these baseline files regardless of business type:
+- backend/src/main/java/com/{{slug}}/exception/GlobalExceptionHandler.java (EXCEPTION)
+- backend/src/main/java/com/{{slug}}/dto/ErrorResponse.java (DTO)
+- backend/src/main/java/com/{{slug}}/model/User.java (MODEL) and model/Role.java (MODEL, enum: ADMIN, CUSTOMER)
+- backend/src/main/java/com/{{slug}}/repository/UserRepository.java (REPOSITORY)
+- backend/src/main/java/com/{{slug}}/service/UserService.java (SERVICE)
+- backend/src/main/java/com/{{slug}}/util/JwtUtil.java (UTIL)
+- backend/src/main/java/com/{{slug}}/security/JwtAuthFilter.java (CONFIG)
+- backend/src/main/java/com/{{slug}}/config/SecurityConfig.java (CONFIG)
+- backend/src/main/java/com/{{slug}}/config/AdminInitializer.java (CONFIG)
+- backend/src/main/java/com/{{slug}}/config/DataSeeder.java (CONFIG)
+- backend/src/main/java/com/{{slug}}/controller/AuthController.java (CONTROLLER)
+- backend/src/main/java/com/{{slug}}/controller/SpaController.java (CONTROLLER)
+- backend/src/main/java/com/{{slug}}/dto/AuthRequest.java and dto/AuthResponse.java (DTO)
+- frontend/src/context/AuthContext.tsx (CONTEXT)
+- frontend/src/services/authService.ts (SERVICE) + frontend/src/types/auth.ts (UTIL)
+- frontend/src/hooks/useAuth.ts (HOOK)
+- frontend/src/components/ProtectedRoute.tsx, Layout.tsx, Header.tsx, Footer.tsx, AdminLayout.tsx (COMPONENT)
+- frontend/src/pages/LoginPage.tsx and AdminDashboardPage.tsx (PAGE)
+- frontend/src/api/client.ts (SERVICE)
+- frontend/src/App.tsx (COMPONENT)
+
+IMPORTANT — imports_from and depends_on must use FULL relative file paths (e.g.
+"backend/src/main/java/com/{{slug}}/dto/AuthResponse.java"), not just filenames.
+
+SELF-VALIDATION (required before returning the JSON):
+Scan every file entry's imports_from list. Every path listed there must exist as a
+file_path entry in the files array. If any path is missing, add its file entry before
+returning. This is mandatory — missing entries cause generation to fail downstream.
+
+Also check types files: every FRONTEND feature that has a service.ts must have a
+companion frontend/src/types/<domain>.ts in the files array, listed in the
+imports_from of that feature's service.ts, hook.ts, and Page.tsx.
+
+Also verify feature grouping before returning:
+- Every file in "files" has feature_name set (non-null, non-empty)?
+- Every path in features[*].file_paths matches a file_path in "files"?
+- No feature has fewer than 4 or more than 10 files (split into sub-features if needed)?
+- Backend and frontend versions of the same domain are in SEPARATE features?
+- Exactly one INFRA feature named "infrastructure" is present?
+
+Do NOT include these — they are generated by CLI scaffold tools:
+- pom.xml, mvnw, mvnw.cmd (Spring Initializr generates these)
+- Application.java (Spring Initializr generates this)
+- package.json, tsconfig.json, vite.config.ts, index.html, main.tsx (Vite scaffold)
+- Dockerfile, docker-compose.yml, application.properties, .env.example
+- src/components/ui/* (shadcn CLI generates these)

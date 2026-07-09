@@ -40,29 +40,51 @@ public abstract class LlmGeneratorService {
     // ── Public API ────────────────────────────────────────────────────────────
 
     /**
-     * Pro call 1: generates the structural ARCHITECTURE.json spec including features array,
-     * feature_name, and file_role on every file entry.
+     * Pro call 1: generates the architecture OUTLINE — the complete file manifest with
+     * feature grouping, one-line descriptions, and imports_from/depends_on wiring, but
+     * WITHOUT per-file heavy detail (public_functions, api_endpoints, file_role). The
+     * per-feature enrichment pass fills those in afterwards.
+     *
+     * Kept deliberately small (~15-25K chars) so it can never hit the output-token
+     * ceiling, and retried in-process because the single-shot call was observed to
+     * intermittently degenerate to an empty "files": [] stub — a 20-second retry here
+     * beats burning a ~5-minute container attempt.
      */
     public ArchitectureSpec generateArchitectureSpec(BriefContext brief, String slug) {
         boolean isUpdate = brief.requestedChanges() != null && !brief.requestedChanges().isBlank();
 
-        String system = PromptLoader.load("system/arch_spec.txt");
+        String system = PromptLoader.load("system/arch_outline.txt");
         String user   = buildArchSpecUserPrompt(brief, slug, isUpdate);
 
-        String json = stripMarkdown(callLlm(system, user));
-//        log.info("[LlmGeneratorService] Arch spec raw response length={} first500={}",
-//                json == null ? 0 : json.length(),
-//                json == null ? "null" : json.substring(0, Math.min(json.length(), 500)));
-        try {
-            ArchitectureSpec spec = SPEC_MAPPER.readValue(json, ArchitectureSpec.class);
-//            int fileCount = spec.getFiles() == null ? 0 : spec.getFiles().size();
-//            int featureCount = spec.getFeatures() == null ? 0 : spec.getFeatures().size();
-//            log.info("[LlmGeneratorService] Arch spec parsed: files={} features={}", fileCount, featureCount);
-            return spec;
-        } catch (Exception e) {
-            throw new WorkerException(FailureType.CODE,
-                    "ARCHITECTURE.json parsing failed: " + e.getMessage(), e);
+        Exception lastError = null;
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            String json = stripMarkdown(callLlm(system, user));
+            try {
+                ArchitectureSpec spec = SPEC_MAPPER.readValue(json, ArchitectureSpec.class);
+                int fileCount    = spec.getFiles()    == null ? 0 : spec.getFiles().size();
+                int featureCount = spec.getFeatures() == null ? 0 : spec.getFeatures().size();
+                if (fileCount == 0 || featureCount == 0) {
+                    log.warn("[generateArchitectureSpec] Attempt {}/3 returned empty outline "
+                            + "(files={} features={} responseChars={}) — retrying",
+                            attempt, fileCount, featureCount, json == null ? 0 : json.length());
+                    lastError = new WorkerException(FailureType.CODE,
+                            "Architecture outline had " + fileCount + " files / " + featureCount + " features");
+                    continue;
+                }
+                log.info("[generateArchitectureSpec] Outline parsed on attempt {}/3: files={} features={}",
+                        attempt, fileCount, featureCount);
+                return spec;
+            } catch (WorkerException e) {
+                throw e;
+            } catch (Exception e) {
+                log.warn("[generateArchitectureSpec] Attempt {}/3 parse failed (responseChars={}): {}",
+                        attempt, json == null ? 0 : json.length(), e.getMessage());
+                lastError = e;
+            }
         }
+        throw new WorkerException(FailureType.CODE,
+                "Architecture outline empty/unparseable after 3 attempts: "
+                + (lastError != null ? lastError.getMessage() : "unknown"), lastError);
     }
 
     /**
@@ -140,6 +162,7 @@ public abstract class LlmGeneratorService {
                 if (!requestedChangesSection.isBlank() && result.has("change_required")) {
                     feature.setChangeRequired(result.path("change_required").asBoolean(true));
                 }
+                mergeFileDetail(feature, featureFiles, result);
                 return feature;
 
             } catch (WorkerException e) {
@@ -234,6 +257,55 @@ public abstract class LlmGeneratorService {
     }
 
     /**
+     * Merges the per-file structural detail from an enrichment response into the outline's
+     * FileSpec entries (matched by file_path). The outline OWNS the file list: entries for
+     * unknown paths are dropped with a warning, never added. A response without a "files"
+     * array degrades gracefully to instruction-only enrichment (pre-batching behavior).
+     */
+    private void mergeFileDetail(FeatureSpec feature, List<FileSpec> featureFiles, JsonNode result) {
+        JsonNode filesNode = result.path("files");
+        if (!filesNode.isArray() || filesNode.isEmpty()) {
+            log.info("[enrichFeature] No per-file detail in response for '{}' — instruction-only enrichment",
+                    feature.getFeatureName());
+            return;
+        }
+
+        Map<String, FileSpec> byPath = featureFiles.stream()
+                .filter(f -> f.getFilePath() != null)
+                .collect(Collectors.toMap(FileSpec::getFilePath, f -> f, (a, b) -> a));
+
+        int merged = 0;
+        for (JsonNode entry : filesNode) {
+            String path = entry.path("file_path").asText(null);
+            FileSpec target = path == null ? null : byPath.get(path);
+            if (target == null) {
+                log.warn("[enrichFeature] Detail for unknown file '{}' in feature '{}' — dropped "
+                        + "(the outline owns the file list)", path, feature.getFeatureName());
+                continue;
+            }
+            try {
+                FileSpec detail = SPEC_MAPPER.treeToValue(entry, FileSpec.class);
+                if (detail.getFileRole() != null && !detail.getFileRole().isBlank()) {
+                    target.setFileRole(detail.getFileRole());
+                }
+                if (detail.getDescription() != null && !detail.getDescription().isBlank()) {
+                    target.setDescription(detail.getDescription());
+                }
+                if (detail.getPublicFunctions() != null)      target.setPublicFunctions(detail.getPublicFunctions());
+                if (detail.getPublicVariables() != null)      target.setPublicVariables(detail.getPublicVariables());
+                if (detail.getApiEndpoints() != null)         target.setApiEndpoints(detail.getApiEndpoints());
+                if (detail.getApiEndpointsConsumed() != null) target.setApiEndpointsConsumed(detail.getApiEndpointsConsumed());
+                merged++;
+            } catch (Exception e) {
+                log.warn("[enrichFeature] Could not parse detail for '{}' in feature '{}': {}",
+                        path, feature.getFeatureName(), e.getMessage());
+            }
+        }
+        log.info("[enrichFeature] Merged structural detail for {}/{} files in feature '{}'",
+                merged, featureFiles.size(), feature.getFeatureName());
+    }
+
+    /**
      * Builds a lightweight API summary of a feature for use as peer context in enrichFeature.
      * Keeps only featureName + featureType + publicFunctions + apiEndpoints (~100 tokens per feature).
      */
@@ -244,6 +316,7 @@ public abstract class LlmGeneratorService {
 
         List<Map<String, Object>> functions = new ArrayList<>();
         List<Map<String, Object>> endpoints = new ArrayList<>();
+        Map<String, String> fieldShapes = new LinkedHashMap<>();
 
         for (FileSpec f : featureFiles) {
             if (f.getPublicFunctions() != null) {
@@ -255,6 +328,18 @@ public abstract class LlmGeneratorService {
                     fnMap.put("return_type", fn.getReturnType());
                     functions.add(fnMap);
                 }
+            }
+            // Field shapes of DTOs/entities — the wire contract. Omitting these caused
+            // frontend enrichment to INVENT field names (durationMonths vs the backend's
+            // durationInMonths) because peers only ever saw functions and endpoints.
+            if (f.getPublicVariables() != null && !f.getPublicVariables().isEmpty()
+                    && ("DTO".equalsIgnoreCase(f.getLayer()) || "MODEL".equalsIgnoreCase(f.getLayer()))) {
+                String typeName = f.getFileName() == null ? "?"
+                        : f.getFileName().replaceAll("\\.(java|ts)$", "");
+                String fields = f.getPublicVariables().stream()
+                        .map(v -> v.getName() + ": " + v.getType())
+                        .collect(Collectors.joining(", "));
+                fieldShapes.put(typeName, fields);
             }
             if (f.getApiEndpoints() != null) {
                 for (ApiEndpoint ep : f.getApiEndpoints()) {
@@ -269,6 +354,27 @@ public abstract class LlmGeneratorService {
 
         summary.put("public_functions", functions);
         summary.put("api_endpoints", endpoints);
+        if (!fieldShapes.isEmpty()) {
+            summary.put("data_shapes", fieldShapes);
+        }
+
+        // Outline-only fallback: before a feature is enriched its files carry no
+        // publicFunctions/apiEndpoints — summarize from fileRole/description instead of
+        // handing peers empty lists (which read as "this feature exposes nothing").
+        if (functions.isEmpty() && endpoints.isEmpty()) {
+            List<Map<String, Object>> fileRoles = new ArrayList<>();
+            for (FileSpec f : featureFiles) {
+                String role = f.getFileRole() != null && !f.getFileRole().isBlank()
+                        ? f.getFileRole() : f.getDescription();
+                if (role == null || role.isBlank()) continue;
+                Map<String, Object> roleMap = new LinkedHashMap<>();
+                roleMap.put("file", f.getFilePath());
+                roleMap.put("role", role);
+                fileRoles.add(roleMap);
+            }
+            summary.put("note", "feature not yet detailed — contracts below are outline-level roles");
+            summary.put("file_roles", fileRoles);
+        }
         return summary;
     }
 
@@ -355,7 +461,7 @@ public abstract class LlmGeneratorService {
                 .map(p -> "- " + p)
                 .collect(Collectors.joining("\n"));
 
-        return PromptTemplate.from(PromptLoader.load("user/arch_spec.txt"))
+        return PromptTemplate.from(PromptLoader.load("user/arch_outline.txt"))
                 .with("businessName",       b.businessName())
                 .with("category",           b.category())
                 .with("location",           b.location())

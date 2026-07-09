@@ -31,6 +31,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -127,15 +128,14 @@ public class ProjectPlanningNode implements WorkerNode {
             }
         }
 
-        // ── Spec generation ───────────────────────────────────────────────────
+        // ── Outline generation (retried in-process inside generateArchitectureSpec) ──
         if (!skipGeneration) {
             spec = llm.generateArchitectureSpec(briefCtx, slug);
             int fileCount = spec.getFiles() == null ? 0 : spec.getFiles().size();
-//            log.info("[ProjectPlanningNode] Generated spec with {} files for '{}'",
-//                    fileCount, business.getTitle());
+            // Belt-and-suspenders: the retry loop already guards this
             if (fileCount == 0) {
                 throw new WorkerException(FailureType.CODE,
-                        "LLM returned architecture spec with 0 files — increase GEMINI_PRO_THINKING_BUDGET or check model response in logs");
+                        "Architecture outline has 0 files after retries — check model response in docs/llm/interactions.jsonl");
             }
         }
 
@@ -702,14 +702,18 @@ public class ProjectPlanningNode implements WorkerNode {
         }
 
         Map<String, List<FileSpec>> filesByFeature = buildFilesByFeature(spec);
-        // Build API summaries for ALL features upfront — publicFunctions/apiEndpoints are complete
-        // at plan time, so every feature gets full peer context regardless of enrichment order.
-        Map<String, Map<String, Object>> allPeerSummaries = buildAllPeerSummaries(features, filesByFeature);
 
         WorkspaceReader workspaceReader = new WorkspaceReader(workspace);
 
-        for (int i = 0; i < features.size(); i++) {
-            FeatureSpec feature = features.get(i);
+        // Enrich BACKEND features first (then SHARED, then FRONTEND): enrichment now fills
+        // the per-file heavy detail (publicFunctions/apiEndpoints) that the outline omits,
+        // so frontend features see REAL backend API summaries instead of empty stubs.
+        // enrichFeature mutates the shared FeatureSpec/FileSpec objects, so the lazy
+        // per-iteration peer summaries below pick up detail from earlier iterations.
+        List<FeatureSpec> ordered = new ArrayList<>(features);
+        ordered.sort(Comparator.comparingInt(f -> enrichmentPriority(f.getFeatureType())));
+
+        for (FeatureSpec feature : ordered) {
 
             if ("INFRA".equalsIgnoreCase(feature.getFeatureType())) {
                 log.info("[ProjectPlanningNode] Skipping INFRA feature: {}", feature.getFeatureName());
@@ -727,14 +731,16 @@ public class ProjectPlanningNode implements WorkerNode {
                 continue;
             }
 
+            // Lazy: reflects the heavy detail features enriched earlier in this loop just filled in
+            Map<String, Map<String, Object>> allPeerSummaries = buildAllPeerSummaries(features, filesByFeature);
             Map<String, Object> peerSummaries = buildPeerSummariesExcluding(allPeerSummaries, feature.getFeatureName());
 
             log.info("[ProjectPlanningNode] Enriching feature: {} ({} files)",
                     feature.getFeatureName(), featureFiles.size());
 
             // WorkerException (CODE/INFRA) propagates immediately — no catch-and-swallow
-            FeatureSpec enriched = enrichLlm.enrichFeature(feature, featureFiles, peerSummaries, briefCtx, workspaceReader);
-            features.set(i, enriched);
+            // (enrichFeature mutates `feature` in place; it remains referenced by spec.features)
+            enrichLlm.enrichFeature(feature, featureFiles, peerSummaries, briefCtx, workspaceReader);
 
             // Checkpoint after every feature — enables resume on container retry
             try {
@@ -751,6 +757,17 @@ public class ProjectPlanningNode implements WorkerNode {
             }
         }
         log.info("[ProjectPlanningNode] Feature enrichment complete — {} features processed", features.size());
+    }
+
+    /** BACKEND and SHARED enrich before FRONTEND so frontend sees real backend API summaries. */
+    private static int enrichmentPriority(String featureType) {
+        if (featureType == null) return 3;
+        return switch (featureType.toUpperCase()) {
+            case "SHARED"  -> 0;   // auth/security contracts referenced by everything
+            case "BACKEND" -> 1;
+            case "FRONTEND" -> 2;
+            default -> 3;          // INFRA (skipped) and unknowns last
+        };
     }
 
     private Map<String, List<FileSpec>> buildFilesByFeature(ArchitectureSpec spec) {

@@ -121,6 +121,68 @@ class ProjectPlanningNodeTest {
     }
 
     @Test
+    void enrichment_runsBackendFeaturesBeforeFrontend() {
+        org.mockito.Mockito.lenient().when(initializrClient.filterValidDependencies(any()))
+                .thenAnswer(inv -> inv.getArgument(0));
+        org.mockito.Mockito.lenient().when(initializrClient.getDefaultBootVersion())
+                .thenReturn("3.4.5");
+
+        ProjectPlanningNode node = new ProjectPlanningNode(llm, enrichLlm, initializrClient, gitService);
+
+        ArchitectBrief brief = ArchitectBrief.builder()
+                .id(UUID.randomUUID()).businessCategory("Gym").location("Pune")
+                .mustHaveFeatures(List.of("Booking"))
+                .recommendedTechStack(Map.of("frontend", "React 19"))
+                .websiteType(ArchitectBrief.WebsiteType.INFORMATIONAL)
+                .build();
+        BusinessEntity business = BusinessEntity.builder()
+                .id(UUID.randomUUID()).title("MultiFit").category("Gym").build();
+
+        String bePath = "backend/src/main/java/com/multifit/model/Trainer.java";
+        String fePath = "frontend/src/pages/TrainerPage.tsx";
+        // Deliberately FRONTEND-first in the spec — the node must reorder
+        ArchitectureSpec spec = ArchitectureSpec.builder()
+                .generatedAt("2026-07-06").businessName("MultiFit").basePackage("com.multifit")
+                .files(List.of(
+                        FileSpec.builder().fileName("TrainerPage.tsx").filePath(fePath)
+                                .fileType("FRONTEND").layer("PAGE").status("PLANNED")
+                                .description("trainer page").build(),
+                        FileSpec.builder().fileName("Trainer.java").filePath(bePath)
+                                .fileType("BACKEND").layer("MODEL").status("PLANNED")
+                                .description("trainer entity").build()))
+                .features(new java.util.ArrayList<>(List.of(
+                        com.business.discovery.worker.service.llm.FeatureSpec.builder()
+                                .featureName("trainer-ui").featureDisplayName("Trainer UI")
+                                .featureType("FRONTEND").filePaths(List.of(fePath)).build(),
+                        com.business.discovery.worker.service.llm.FeatureSpec.builder()
+                                .featureName("trainer-backend").featureDisplayName("Trainer Backend")
+                                .featureType("BACKEND").filePaths(List.of(bePath)).build())))
+                .build();
+
+        when(ctx.getBrief()).thenReturn(brief);
+        when(ctx.getBusiness()).thenReturn(business);
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(ctx.getProjectHistory()).thenReturn(null);
+        when(llm.generateArchitectureSpec(any(BriefContext.class), any())).thenReturn(spec);
+
+        List<String> enrichOrder = new java.util.ArrayList<>();
+        org.mockito.Mockito.lenient().when(enrichLlm.enrichFeature(any(), any(), any(), any(), any()))
+                .thenAnswer(inv -> {
+                    com.business.discovery.worker.service.llm.FeatureSpec f = inv.getArgument(0);
+                    enrichOrder.add(f.getFeatureName());
+                    f.setFeatureInstruction("A sufficiently long holistic instruction covering all files "
+                            + "in this feature including exact signatures and wiring for " + f.getFeatureName());
+                    return f;
+                });
+
+        try {
+            node.execute(ctx);
+        } catch (Exception ignored) {}
+
+        assertThat(enrichOrder).containsExactly("trainer-backend", "trainer-ui");
+    }
+
+    @Test
     void slugUtil_handlesSpecialCharsAndLeadingDigits() {
         assertThat(SlugUtil.toSlug("Shree Restaurant")).isEqualTo("shreerestaurant");
         assertThat(SlugUtil.toSlug("Pizza & Co.")).isEqualTo("pizzaco");

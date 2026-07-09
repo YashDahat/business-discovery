@@ -173,19 +173,72 @@ class ErrorFixAgentTest {
 
         GeneratedFile dbRow = GeneratedFile.builder()
                 .taskId(taskId)
-                .filePath("frontend/src/types/order.ts")
+                .filePath("frontend/src/types/local/order.ts")
                 .status(GeneratedFile.FileStatus.GENERATION_FAILED)
                 .build();
-        when(fileRepo.findByTaskIdAndFilePath(taskId, "frontend/src/types/order.ts"))
+        when(fileRepo.findByTaskIdAndFilePath(taskId, "frontend/src/types/local/order.ts"))
                 .thenReturn(Optional.of(dbRow));
 
         String result = invokeTool(FileType.FRONTEND, "write_file",
-                "{\"path\":\"frontend/src/types/order.ts\",\"content\":\"export type OrderResponse = { id: string; };\"}");
+                "{\"path\":\"frontend/src/types/local/order.ts\",\"content\":\"export type OrderResponse = { id: string; };\"}");
 
         assertThat(result).isEqualTo("OK");
-        assertThat(Files.readString(tempDir.resolve("frontend/src/types/order.ts")))
+        assertThat(Files.readString(tempDir.resolve("frontend/src/types/local/order.ts")))
                 .isEqualTo("export type OrderResponse = { id: string; };");
         verify(fileRepo).save(argThat(f -> f.getStatus() == GeneratedFile.FileStatus.VALIDATED));
+    }
+
+    // ── Derived-file fence ────────────────────────────────────────────────
+
+    @Test
+    void strReplace_refusesDerivedFile() throws Exception {
+        Path derived = tempDir.resolve("frontend/src/services/trainerService.ts");
+        Files.createDirectories(derived.getParent());
+        Files.writeString(derived, "// GENERATED from the backend API contract — do not edit by hand.\n"
+                + "export const getAllTrainers = async () => {};\n");
+
+        String result = invokeTool(FileType.FRONTEND, "str_replace",
+                "{\"path\":\"frontend/src/services/trainerService.ts\","
+                + "\"old_string\":\"getAllTrainers\",\"new_string\":\"getTrainers\"}");
+
+        assertThat(result).startsWith("REFUSED");
+        assertThat(result).contains("Fix the files that IMPORT it");
+        assertThat(Files.readString(derived)).contains("getAllTrainers"); // untouched
+    }
+
+    @Test
+    void writeFile_refusesCreatingPhantomTypeModule() throws Exception {
+        String typeResult = invokeTool(FileType.FRONTEND, "write_file",
+                "{\"path\":\"frontend/src/types/gymClass.ts\",\"content\":\"export interface GymClassDto { id: string; }\"}");
+        assertThat(typeResult).startsWith("REFUSED");
+        assertThat(Files.exists(tempDir.resolve("frontend/src/types/gymClass.ts"))).isFalse();
+    }
+
+    @Test
+    void writeFile_refusesCreatingPhantomServiceModule() throws Exception {
+        String svcResult = invokeTool(FileType.FRONTEND, "write_file",
+                "{\"path\":\"frontend/src/services/gymClassService.ts\",\"content\":\"export const x = 1;\"}");
+        assertThat(svcResult).startsWith("REFUSED");
+        assertThat(Files.exists(tempDir.resolve("frontend/src/services/gymClassService.ts"))).isFalse();
+    }
+
+    @Test
+    void writeFile_allowsLocalTypes() throws Exception {
+        String localResult = invokeTool(FileType.FRONTEND, "write_file",
+                "{\"path\":\"frontend/src/types/local/cart.ts\",\"content\":\"export interface CartItem { qty: number; }\"}");
+        assertThat(localResult).isEqualTo("OK");
+    }
+
+    @Test
+    void strReplace_allowsNonDerivedPageFiles() throws Exception {
+        // A page without the GENERATED marker is freely editable
+        Path page = tempDir.resolve("frontend/src/pages/MembershipsPage.tsx");
+        Files.createDirectories(page.getParent());
+        Files.writeString(page, "const label = plan.durationMonths;");
+        String pageResult = invokeTool(FileType.FRONTEND, "str_replace",
+                "{\"path\":\"frontend/src/pages/MembershipsPage.tsx\","
+                + "\"old_string\":\"plan.durationMonths\",\"new_string\":\"plan.durationInMonths\"}");
+        assertThat(pageResult).startsWith("OK");
     }
 
     @Test
