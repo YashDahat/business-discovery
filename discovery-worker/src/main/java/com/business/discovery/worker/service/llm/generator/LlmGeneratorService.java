@@ -8,6 +8,7 @@ import com.business.discovery.worker.service.llm.BriefContext;
 import com.business.discovery.worker.service.llm.ComplianceResult;
 import com.business.discovery.worker.service.llm.FeatureSpec;
 import com.business.discovery.worker.service.llm.FileSpec;
+import com.business.discovery.worker.util.ChangeTargetingUtil;
 import com.business.discovery.worker.util.LlmResponseParser;
 import com.business.discovery.worker.util.PromptLoader;
 import com.business.discovery.worker.util.PromptTemplate;
@@ -180,6 +181,87 @@ public abstract class LlmGeneratorService {
                 ? we
                 : new WorkerException(FailureType.CODE,
                         "enrichFeature failed after 2 attempts for: " + feature.getFeatureName(), lastError);
+    }
+
+    /**
+     * Update-run change targeting: ONE call over the whole manifest that resolves the client's
+     * natural-language change request to (a) change_required per feature, (b) change_required per
+     * file, and (c) a change_instruction per changed feature. This is the update path's ONLY entry
+     * point for the request text — enrichment does not re-run on update runs (its per-feature
+     * resume guard skips every already-enriched feature), so without this pass the request never
+     * reaches the generation prompts and every feature keeps its stale change_required mark.
+     *
+     * <p>Fallback on failure: marks ALL non-INFRA features changed (full minimal-diff
+     * regeneration — the de-facto pre-targeting behavior). Expensive but never drops a client's
+     * requested change silently.
+     */
+    public void targetChanges(ArchitectureSpec spec, BriefContext brief) {
+        String manifestJson;
+        try {
+            manifestJson = SPEC_MAPPER.writeValueAsString(buildTargetingManifest(spec));
+        } catch (Exception e) {
+            throw new WorkerException(FailureType.CODE,
+                    "Failed to serialize targeting manifest: " + e.getMessage(), e);
+        }
+
+        String system = PromptLoader.load("system/change_targeting.txt");
+        String user = PromptTemplate.from(PromptLoader.load("user/change_targeting.txt"))
+                .with("businessName",     brief.businessName())
+                .with("category",         brief.category())
+                .with("requestedChanges", brief.requestedChanges())
+                .with("manifestJson",     manifestJson)
+                .render();
+
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                JsonNode result = LlmResponseParser.parseJsonObject(callLlm(system, user));
+                if (!result.path("features").isArray() || result.path("features").isEmpty()) {
+                    log.warn("[targetChanges] Attempt {}/2 returned no features array", attempt);
+                    continue;
+                }
+                int changed = ChangeTargetingUtil.apply(spec, result);
+                log.info("[targetChanges] {} feature(s) targeted by requested changes", changed);
+                if (changed == 0) {
+                    // Legal (request may be a no-op) but suspicious — surface it loudly.
+                    log.warn("[targetChanges] Requested changes matched ZERO features — nothing will "
+                            + "be regenerated. Request was:\n{}", brief.requestedChanges());
+                }
+                return;
+            } catch (LlmResponseParser.LlmParseException e) {
+                log.warn("[targetChanges] Attempt {}/2 parse error: {}", attempt, e.getMessage());
+            }
+        }
+        log.warn("[targetChanges] Targeting failed after 2 attempts — falling back to marking ALL "
+                + "features changed (full minimal-diff regeneration)");
+        ChangeTargetingUtil.markAllChanged(spec);
+    }
+
+    /** Compact manifest for targeting: paths + descriptions + roles only — not full FileSpecs. */
+    private static List<Map<String, Object>> buildTargetingManifest(ArchitectureSpec spec) {
+        Map<String, List<FileSpec>> filesByFeature = (spec.getFiles() == null ? List.<FileSpec>of() : spec.getFiles())
+                .stream()
+                .filter(f -> f.getFeatureName() != null)
+                .collect(Collectors.groupingBy(FileSpec::getFeatureName));
+
+        List<Map<String, Object>> manifest = new ArrayList<>();
+        for (FeatureSpec feature : spec.getFeatures() == null ? List.<FeatureSpec>of() : spec.getFeatures()) {
+            if ("INFRA".equalsIgnoreCase(feature.getFeatureType())) continue;
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("feature_name", feature.getFeatureName());
+            entry.put("feature_type", feature.getFeatureType());
+            entry.put("files", filesByFeature.getOrDefault(feature.getFeatureName(), List.of()).stream()
+                    .map(f -> {
+                        Map<String, Object> fm = new LinkedHashMap<>();
+                        fm.put("file_path", f.getFilePath());
+                        fm.put("layer", f.getLayer());
+                        fm.put("description", f.getDescription());
+                        fm.put("file_role", f.getFileRole());
+                        return fm;
+                    })
+                    .toList());
+            manifest.add(entry);
+        }
+        return manifest;
     }
 
     /**

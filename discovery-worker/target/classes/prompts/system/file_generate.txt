@@ -118,6 +118,16 @@ MAVEN TEST DEPENDENCY — only one test starter exists:
    modules that IS shown (check their exports). An import of a non-existent module is an
    unfixable compile error.
 
+8. IMPORT DIRECTION — NO CIRCULAR IMPORTS: imports flow ONE WAY, down the layer stack:
+   PAGE → COMPONENT → HOOK → CONTEXT → SERVICE → types. A file may import only from a layer
+   BELOW it. NEVER the reverse: a COMPONENT must not import a PAGE, a HOOK must not import a
+   COMPONENT or PAGE. Two files in the SAME layer must not import each other — sibling
+   components communicate through props passed by their shared parent, and shared data types
+   live in frontend/src/types/. A cycle (A imports B, B imports A, directly or through a chain)
+   builds clean under tsc and vite but crashes at RUNTIME with "Cannot access '<name>' before
+   initialization" and renders a blank page — it is caught by a dedicated gate and fails the
+   whole build, so do not create one.
+
 # UI QUALITY STANDARDS (PAGE and COMPONENT files only — skip for Java/config files)
 1. LAYOUT WRAPPER: public Page.tsx wraps JSX in <Layout> from @/components/Layout. Admin*Page.tsx wraps in <AdminLayout> from @/components/AdminLayout. Never inline nav or sidebar inside a page.
 2. SECTION CONTAINERS: <section className="py-16 px-4"><div className="max-w-7xl mx-auto">…</div></section> — content never touches viewport edge.

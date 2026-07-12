@@ -20,8 +20,11 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
@@ -176,10 +179,7 @@ public class ErrorFixAgent {
             return true;
         }
 
-        String errors = preCheck.output();
-        if (errors.length() > SEEDED_ERRORS_MAX_CHARS) {
-            errors = errors.substring(0, SEEDED_ERRORS_MAX_CHARS) + "\n[...truncated]";
-        }
+        String errors = prioritizeCompilerOutput(preCheck.output(), SEEDED_ERRORS_MAX_CHARS);
         log.warn("[ErrorFixAgent] {} errors before fix loop:\n{}", fileType, errors);
 
         String trigger = """
@@ -224,10 +224,7 @@ public class ErrorFixAgent {
         if (result.success()) {
             return "[auto-verify] COMPILATION PASSED — all errors resolved. You are done; stop calling tools.";
         }
-        String output = result.output();
-        if (output.length() > AUTO_VERIFY_MAX_CHARS) {
-            output = output.substring(0, AUTO_VERIFY_MAX_CHARS) + "\n[...truncated]";
-        }
+        String output = prioritizeCompilerOutput(result.output(), AUTO_VERIFY_MAX_CHARS);
         return "[auto-verify] Compiler run after your changes — remaining errors:\n" + output;
     }
 
@@ -279,8 +276,71 @@ public class ErrorFixAgent {
 
         if (result.success()) return "COMPILATION PASSED — no errors.";
 
-        String output = result.output();
-        return output.length() > 5000 ? output.substring(0, 5000) + "\n[...truncated]" : output;
+        return prioritizeCompilerOutput(result.output(), 5000);
+    }
+
+    private static final Pattern TSC_ERROR_LINE =
+            Pattern.compile("^(\\S+?)\\(\\d+,\\d+\\): error TS\\d+");
+
+    /**
+     * Surfaces derived-type errors first and makes truncation loss-aware. tsc lists errors
+     * in path order (components < ... < types), so with a fixed-size window the derived
+     * src/types/ errors — the ones the agent must escalate rather than work around — were
+     * always the part cut off (circuit-house 2026-07-12: 37KB of output, types errors
+     * starting at byte 25K, every window capped well below that). Reorders tsc error
+     * blocks so src/types/ comes first, then truncates on a block boundary and reports
+     * how many errors were dropped. Non-tsc output (mvn) falls back to plain truncation.
+     */
+    static String prioritizeCompilerOutput(String output, int maxChars) {
+        List<String> lines = output.lines().toList();
+
+        List<String> preamble = new ArrayList<>();
+        List<List<String>> typeBlocks = new ArrayList<>();
+        List<List<String>> otherBlocks = new ArrayList<>();
+        List<String> current = null;
+
+        for (String line : lines) {
+            Matcher m = TSC_ERROR_LINE.matcher(line);
+            if (m.find()) {
+                current = new ArrayList<>();
+                (m.group(1).startsWith("src/types/") ? typeBlocks : otherBlocks).add(current);
+            }
+            if (current == null) preamble.add(line);
+            else current.add(line);
+        }
+
+        int totalErrors = typeBlocks.size() + otherBlocks.size();
+        if (totalErrors == 0) {
+            return output.length() > maxChars
+                    ? output.substring(0, maxChars) + "\n[...truncated]" : output;
+        }
+
+        StringBuilder sb = new StringBuilder(String.join("\n", preamble));
+        if (!typeBlocks.isEmpty()) {
+            sb.append("\nNOTE: ").append(typeBlocks.size()).append(" error(s) are inside DERIVED files ")
+              .append("(src/types/*), listed first below. Those files are regenerated every attempt and ")
+              .append("cannot be edited — if a derived file itself is malformed, no page-level fix can ")
+              .append("succeed; say so and stop instead of patching consumers.\n");
+        }
+
+        int shown = 0;
+        for (List<String> block : concat(typeBlocks, otherBlocks)) {
+            String rendered = "\n" + String.join("\n", block);
+            if (sb.length() + rendered.length() > maxChars) break;
+            sb.append(rendered);
+            shown++;
+        }
+        if (shown < totalErrors) {
+            sb.append("\n[...truncated: showing ").append(shown).append(" of ")
+              .append(totalErrors).append(" errors — recompile after fixing these to see the rest]");
+        }
+        return sb.toString();
+    }
+
+    private static List<List<String>> concat(List<List<String>> a, List<List<String>> b) {
+        List<List<String>> out = new ArrayList<>(a);
+        out.addAll(b);
+        return out;
     }
 
     /** Marker line stamped by TsTypeGenerator/TsSdkGenerator on every derived file. */

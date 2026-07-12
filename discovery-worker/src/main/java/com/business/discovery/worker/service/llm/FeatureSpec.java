@@ -39,9 +39,31 @@ public class FeatureSpec {
 
     /**
      * True if any file in this feature needs regeneration on an update run.
-     * Replaces per-file FileSpec.changeRequired — features are regenerated atomically.
      * Defaults to true so old specs without this field regenerate everything (safe).
+     * FileSpec.changeRequired (nullable) narrows the decision to file grain when present.
      */
     @Builder.Default
     private boolean changeRequired = true;
+
+    /**
+     * What to change in this feature on an update run — set by the change-targeting pass from the
+     * client's requested changes, null otherwise. Kept SEPARATE from featureInstruction: the
+     * enrichment instruction is stable across runs (and signals "already enriched" for resume),
+     * while this is per-update-run and overwritten by the next targeting pass.
+     */
+    private String changeInstruction;
+
+    /**
+     * The instruction the file-generation prompt should see. On update runs the change directive
+     * is appended so the minimal-diff edit knows WHAT to change — without this the client's
+     * request never reaches the generation prompt (enrichment does not re-run on update runs).
+     */
+    public String effectiveInstruction(boolean requestedChangesMode) {
+        if (!requestedChangesMode || changeInstruction == null || changeInstruction.isBlank()) {
+            return featureInstruction;
+        }
+        return (featureInstruction == null ? "" : featureInstruction)
+                + "\n\n== REQUESTED CHANGE (this update run — apply as a minimal edit) ==\n"
+                + changeInstruction;
+    }
 }

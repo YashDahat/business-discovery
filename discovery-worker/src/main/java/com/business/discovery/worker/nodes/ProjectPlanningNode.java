@@ -56,8 +56,12 @@ public class ProjectPlanningNode implements WorkerNode {
     private static final List<String> DEFAULT_SPRING_STARTERS =
             List.of("web", "data-jpa", "postgresql", "lombok", "validation", "actuator", "security", "mail");
 
+    // zod pinned to v3: v4 makes z.coerce.number() input type `unknown`, which breaks the
+    // @hookform/resolvers v5 Resolver generic — an unfixable-by-prompt error class that sank
+    // the yeti-himalayan-kitchen frontend build (2026-07-07). Prompt guidance in file_generate.txt
+    // and feature_enrichment.txt did not prevent it; the version pin is the real defense.
     private static final List<String> DEFAULT_NPM_PACKAGES =
-            List.of("@tanstack/react-query", "react-hook-form", "zod", "axios", "react-router-dom");
+            List.of("@tanstack/react-query", "react-hook-form", "zod@^3", "axios", "react-router-dom");
 
     // The platform stack is fixed — briefs describe the business, never the technology.
     // A brief-supplied stack (e.g. "Next.js frontend") once reached the planning prompt and
@@ -125,6 +129,21 @@ public class ProjectPlanningNode implements WorkerNode {
                 }
             } catch (IOException e) {
                 log.warn("[ProjectPlanningNode] Could not read existing spec, replanning: {}", e.getMessage());
+            }
+        }
+
+        // ── Change targeting: resolve the client's request to specific features + files ──
+        // This is the update path's ONLY way to route the request into generation: enrichment
+        // does not re-run on update runs (its per-feature resume guard skips every enriched
+        // feature), so without this pass change_required keeps its stale persisted marks and
+        // the request text never reaches a generation prompt.
+        if (hasChanges && skipGeneration && spec != null) {
+            enrichLlm.targetChanges(spec, briefCtx);
+            try {
+                ArchitectureJsonUtil.write(workspace, spec);
+            } catch (IOException e) {
+                throw new WorkerException(FailureType.INFRA,
+                        "Checkpoint write failed after change targeting: " + e.getMessage(), e);
             }
         }
 
@@ -903,7 +922,10 @@ public class ProjectPlanningNode implements WorkerNode {
                 boolean isTerminal = "VALIDATED".equalsIgnoreCase(oldStatus)
                         || "SPEC_COMPLIANT".equalsIgnoreCase(oldStatus)
                         || "GENERATION_FAILED".equalsIgnoreCase(oldStatus);
-                boolean changeRequired = featureChangeRequired.getOrDefault(f.getFeatureName(), true);
+                // File-grain flag wins when present; feature grain is the fallback (old specs).
+                boolean changeRequired = f.getChangeRequired() != null
+                        ? f.getChangeRequired()
+                        : featureChangeRequired.getOrDefault(f.getFeatureName(), true);
                 if (isTerminal && !changeRequired) {
                     f.setStatus(oldStatus);
                 }
@@ -953,20 +975,39 @@ public class ProjectPlanningNode implements WorkerNode {
                         .forEach(starters::add);
             }
             if (deps.getNpmPackages() != null) {
+                // Dedup by BASE package name (version- and scope-aware), not exact string: a
+                // pinned default like "zod@^3" must suppress an LLM-supplied bare "zod" or "zod@4",
+                // otherwise `npm install zod@^3 zod` installs both and the later (v4) wins.
+                Set<String> presentBases = npm.stream()
+                        .map(ProjectPlanningNode::basePackageName)
+                        .collect(Collectors.toCollection(HashSet::new));
                 deps.getNpmPackages().stream()
-                        .filter(p -> p != null && !npm.contains(p))
+                        .filter(Objects::nonNull)
                         .filter(p -> {
-                            if (FORBIDDEN_NPM_PACKAGES.contains(p.toLowerCase())) {
+                            if (FORBIDDEN_NPM_PACKAGES.contains(basePackageName(p))) {
                                 log.warn("[ProjectPlanningNode] Spec requested forbidden framework package '{}' — stripped", p);
                                 return false;
                             }
                             return true;
                         })
+                        .filter(p -> presentBases.add(basePackageName(p)))
                         .forEach(npm::add);
             }
             maven = deps.getMavenDependencies();
         }
         return new ProjectDependencies(starters, npm, maven);
+    }
+
+    /**
+     * Strips a trailing {@code @version} range from an npm package spec, preserving the leading
+     * scope marker: {@code "zod@^3" → "zod"}, {@code "@tanstack/react-query@5" → "@tanstack/react-query"}.
+     * Lower-cased so it can key dedup and forbidden-package sets.
+     */
+    private static String basePackageName(String pkg) {
+        if (pkg == null) return "";
+        String p = pkg.trim();
+        int at = p.startsWith("@") ? p.indexOf('@', 1) : p.indexOf('@');
+        return (at > 0 ? p.substring(0, at) : p).toLowerCase();
     }
 
     // ── BriefContext builder ──────────────────────────────────────────────

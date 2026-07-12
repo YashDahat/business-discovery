@@ -56,6 +56,20 @@ public class BuildToolService {
                 "src/"));
     }
 
+    /**
+     * Runs eslint in JSON-report mode (no --fix) purely to surface import-x/no-cycle violations
+     * for parsing. import/no-cycle is not auto-fixable, so the --fix pass cannot repair or reliably
+     * flag it; the machine-readable JSON output is parsed by {@link com.business.discovery.worker.util.EslintCycleParser}.
+     * Exit code is 1 when any error (incl. a cycle) is present and 2 when eslint itself crashed —
+     * the caller must distinguish "found cycles" (parseable JSON) from "eslint errored" (unparseable).
+     */
+    public BuildResult runEslintCycleCheck(Path frontendDir) {
+        return run(frontendDir, List.of(
+                "npx", "eslint", "--format", "json",
+                "--config", "eslint.fix.config.mjs",
+                "src/"));
+    }
+
     // ── Internal ──────────────────────────────────────────────────────────
 
     private BuildResult run(Path workDir, List<String> cmd) {

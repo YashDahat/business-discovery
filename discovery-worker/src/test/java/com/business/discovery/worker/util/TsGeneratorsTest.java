@@ -121,6 +121,45 @@ class TsGeneratorsTest {
         assertThat(enumHome).contains("'CONFIRMED' | 'CANCELLED_BY_USER'");
     }
 
+    // circuit-house 2026-07-12: ApiInventory attributes nested-class fields to the outer
+    // DTO (no class-boundary tracking) and mangles multi-var declarations into one field
+    // with an unresolvable javaType — emitted raw, every interface was a TS2300 farm
+    @Test
+    void dedupesInventoryArtifactsFromNestedClassesAndMultiVarDeclarations() throws Exception {
+        write("com/x/controller/OrderController.java", """
+                @RequestMapping("/api/v1")
+                public class OrderController {
+                    @GetMapping("/orders")
+                    public ResponseEntity<List<OrderDto>> getOrders() { return null; }
+                }
+                """);
+        write("com/x/dto/OrderDto.java", """
+                public class OrderDto {
+                    private UUID id;
+                    private String customerName;
+                    private String customerEmail;
+                    private String customerPhone;
+                    private BigDecimal totalAmount;
+                    public static class Builder {
+                        private UUID id;
+                        private String customerName, customerEmail, customerPhone;
+                        private BigDecimal totalAmount;
+                    }
+                }
+                """);
+
+        TsTypeGenerator.Result result = TsTypeGenerator.generate(ApiInventory.extract(src),
+                List.of("frontend/src/types/order.ts"));
+        String order = result.files().get("frontend/src/types/order.ts");
+
+        assertThat(order).containsOnlyOnce("  id: string | null;");
+        assertThat(order).containsOnlyOnce("  customerPhone: string | null;");
+        assertThat(order).containsOnlyOnce("  totalAmount: number | null;");
+        // the multi-var junk duplicate ("String customerName, customerEmail," customerPhone)
+        // must lose to the properly-typed first declaration
+        assertThat(order).doesNotContain("unknown");
+    }
+
     // ── SDK emission ──────────────────────────────────────────────────────
 
     @Test

@@ -38,4 +38,12 @@ public class FileSpec {
      * and getOrderById(UUID): OrderResponseDTO using OrderRepository and PaymentService"
      */
     private String fileRole;
+
+    /**
+     * File-grain change targeting for update runs — set by the change-targeting pass, consumed by
+     * shouldSkip in the generator nodes. Deliberately Boolean, not boolean: null means "no
+     * file-grain decision exists" (old spec, or targeting omitted this file) and the decision
+     * falls back to the feature-level FeatureSpec.changeRequired — the pre-file-grain behavior.
+     */
+    private Boolean changeRequired;
 }

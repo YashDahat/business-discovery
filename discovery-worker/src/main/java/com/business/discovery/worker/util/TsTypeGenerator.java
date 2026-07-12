@@ -138,7 +138,7 @@ public final class TsTypeGenerator {
                   .append(";\n\n");
             } else {
                 sb.append("export interface ").append(def.name()).append(" {\n");
-                for (Field f : def.fields()) {
+                for (Field f : dedupeFields(def.name(), def.fields(), known.keySet())) {
                     String ts = mapType(f.javaType(), known.keySet());
                     sb.append("  ").append(f.name()).append(": ").append(ts);
                     if (!f.required()) sb.append(" | null");
@@ -148,6 +148,32 @@ public final class TsTypeGenerator {
             }
         }
         return sb.toString();
+    }
+
+    /**
+     * ApiInventory's FIELD regex scans whole files without class-boundary tracking, so a
+     * nested class re-contributes the outer DTO's fields, and a multi-variable declaration
+     * (`private String a, b, c;`) yields one field whose javaType is unresolvable garbage.
+     * Emitting those raw made every derived interface a TS2300/TS2717 error farm (circuit-house,
+     * 2026-07-12: 85 of 149 build errors). First occurrence wins; a later duplicate only
+     * replaces it when the kept type maps to `unknown` and the newcomer resolves.
+     */
+    static List<Field> dedupeFields(String typeName, List<Field> fields, Set<String> knownTypes) {
+        Map<String, Field> byName = new LinkedHashMap<>();
+        for (Field f : fields) {
+            Field kept = byName.get(f.name());
+            if (kept == null) {
+                byName.put(f.name(), f);
+            } else if ("unknown".equals(mapType(kept.javaType(), knownTypes))
+                    && !"unknown".equals(mapType(f.javaType(), knownTypes))) {
+                byName.put(f.name(), f);
+            }
+        }
+        if (byName.size() < fields.size()) {
+            log.info("[TsTypeGenerator] {}: dropped {} duplicate field declaration(s) from inventory",
+                    typeName, fields.size() - byName.size());
+        }
+        return List.copyOf(byName.values());
     }
 
     // ── Java → TS mapping ─────────────────────────────────────────────────

@@ -1,0 +1,14 @@
+== FILE TO IMPLEMENT ==
+Path: {{filePath}}
+
+== DEPENDENCY FILES (verify your imports and signatures match these exactly) ==
+{{dependencySection}}
+
+{{existingSection}}
+== FEATURE INSTRUCTION (holistic brief for all files in this feature — use for context and inter-file contracts) ==
+{{featureInstruction}}
+
+== YOUR FILE'S ROLE IN THIS FEATURE (implement only this) ==
+{{fileRole}}
+
+Implement ONLY the file described in the role above. Follow the feature instruction for context on how other files in the feature work and what they expect from this file. Do not implement other files' content.

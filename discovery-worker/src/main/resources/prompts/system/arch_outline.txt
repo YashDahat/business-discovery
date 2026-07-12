@@ -76,6 +76,29 @@ pages (Menu, Reservation, Order, Events) are already covered by Step 1 — do no
 Step 2 guarantees coverage of the rest, e.g. Home → HomePage.tsx, About → AboutPage.tsx,
 Contact → ContactPage.tsx.
 
+## Step 2a — Page composition (MANDATORY — applies to every PAGE from Steps 1–3a)
+A Page.tsx is a THIN SHELL: layout, data wiring via its hook, and composition of named
+COMPONENT files. Every distinct UI concern inside a page is its OWN component file entry:
+a form, a table or grid, a list, a dialog, a card, a hero/summary section. Never plan a
+page that implements these inline — a monolithic page is un-updatable (any client change
+regenerates the whole file) and routinely exceeds the LLM output budget.
+
+- Path + naming convention (stable identity — a change request must resolve to the same
+  file every run): frontend/src/components/<domain>/<Concern>.tsx, named domain-first:
+  components/menu/MenuTable.tsx, components/menu/MenuItemForm.tsx,
+  components/reservation/ReservationForm.tsx, components/order/OrderSummaryCard.tsx.
+- The page lists every one of its components in imports_from; each component is a full
+  file entry (layer: COMPONENT) in the files array, in the SAME feature as its page.
+- Components receive data and callbacks via PROPS from the page (which owns the hook
+  call). Sibling components NEVER import each other; shared shapes live in types/<domain>.ts.
+- DECOMPOSITION TRIGGER: any page containing a form, a table, or a dialog MUST be
+  decomposed; any page whose description names 3+ sections MUST have one component per
+  section. Admin pages (table + create/edit form + delete confirmation) are always
+  decomposed — e.g. AdminMenuPage.tsx → components/menu/MenuTable.tsx +
+  MenuItemForm.tsx + DeleteMenuItemDialog.tsx.
+- Only a trivial static page (a Contact page that is one address block and an embedded
+  map) may remain a single file.
+
 ## Step 3 — Baseline infra (ADDITIVE, never a substitute)
 Add to EVERY project in addition to Steps 1–2, never displacing a derived file:
 
@@ -146,7 +169,8 @@ same domain on backend and frontend are SEPARATE features.
 
 ## Feature type rules
 - BACKEND: all Java files for one business domain (model + repo + service + controller + DTOs)
-- FRONTEND: all TypeScript/TSX files for one domain (service.ts + hook + Page.tsx + AdminPage.tsx)
+- FRONTEND: all TypeScript/TSX files for one domain (service.ts + hook + Page.tsx +
+  AdminPage.tsx + every Step 2a component belonging to those pages)
 - INFRA: ALL infra files (CI workflows, nginx.conf if any). Exactly one INFRA feature per
   project, named "infrastructure". No enrichment runs for it.
 - SHARED: cross-cutting backend utilities used by multiple domains: User, Role, JwtUtil,
@@ -154,8 +178,12 @@ same domain on backend and frontend are SEPARATE features.
   UserService, AdminInitializer.
 
 ## Size rule
-4–10 files per feature. If a domain produces more than 10 files, split into sub-features:
-e.g. "order-management-core" (entity, repo, service) and "order-management-api" (controllers, DTOs).
+4–10 files per feature, NOT counting COMPONENT files. If a domain exceeds 10 non-component
+files, split into sub-features: e.g. "order-management-core" (entity, repo, service) and
+"order-management-api" (controllers, DTOs). A page and its Step 2a components are
+INSEPARABLE — they always stay in the same feature (their prop contracts are designed
+together in the per-feature pass), so never move components to a sub-feature to satisfy
+the count.
 
 ## Example feature set for a restaurant with Menu, Reservation, Order, Payment features:
 BACKEND:  authentication, menu-management, reservation-system, order-management, payment-processing, admin-crud
@@ -171,9 +199,11 @@ keys).
 # SELF-CHECK (do not output)
 - Every mustHaveFeature has backend Model + Repository + Service + Controller?
 - Every recommendedPage has a Page.tsx; every data-loading page has service.ts + hook + types file?
+- Every page with a form, table, or dialog decomposed per Step 2a — shell page + one
+  COMPONENT file per concern, components in the SAME feature as their page?
 - Every path in every imports_from list exists as a file_path entry?
 - Every file has feature_name set; every features[*].file_paths entry matches a file_path?
-- No feature has fewer than 4 or more than 10 files (split if needed)?
+- No feature has fewer than 4 or more than 10 non-COMPONENT files (split if needed)?
 - Backend and frontend domains are in SEPARATE features?
 - Exactly one INFRA feature named "infrastructure" present?
 - No Java enum or record planned as a nested type — each has its own file entry?

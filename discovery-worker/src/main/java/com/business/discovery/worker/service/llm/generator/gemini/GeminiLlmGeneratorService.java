@@ -20,6 +20,7 @@ import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.model.googleai.GeminiThinkingConfig;
 import dev.langchain4j.model.googleai.GoogleAiGeminiChatModel;
+import dev.langchain4j.model.output.FinishReason;
 import lombok.extern.slf4j.Slf4j;
 
 import java.time.Duration;
@@ -46,7 +47,12 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
                 .timeout(timeout)
                 .temperature(0.3);
         log.info("[Gemini] model={} thinkingBudget={} maxOutputTokens={}", modelName, thinkingBudget, maxOutputTokens);
-        if (thinkingBudget > 0) {
+        // Apply thinkingConfig whenever the budget is non-negative. Budget 0 EXPLICITLY DISABLES
+        // thinking: Gemini 2.5 Flash defaults to dynamic thinking, and when the config was skipped
+        // (the old `> 0` guard) those thinking tokens silently ate the output-token budget and cut
+        // generated files mid-token (yeti AdminMenuPage truncated at ~31K chars, finishReason
+        // unrecorded, 2026-07-07). A negative budget leaves the model default in place.
+        if (thinkingBudget >= 0) {
             builder.thinkingConfig(
                     GeminiThinkingConfig.builder().thinkingBudget(thinkingBudget).build());
         }
@@ -69,6 +75,7 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
                     SystemMessage.from(systemPrompt),
                     UserMessage.from(userPrompt));
             recordUsage(response);
+            warnIfTruncated("single-turn generate", response);
             return response.aiMessage().text();
         } catch (Exception e) {
             throw wrapException(e);
@@ -107,6 +114,7 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
             }
 
             recordUsage(response);
+            warnIfTruncated("enrichment-tools round " + round, response);
             AiMessage aiMessage = response.aiMessage();
             messages.add(aiMessage);
 
@@ -155,6 +163,7 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
             }
 
             recordUsage(response);
+            warnIfTruncated("fix-agent round " + round, response);
             AiMessage aiMessage = response.aiMessage();
             messages.add(aiMessage);
 
@@ -190,6 +199,28 @@ public class GeminiLlmGeneratorService extends LlmGeneratorService {
             accumulator.record(modelKey,
                     response.tokenUsage().inputTokenCount(),
                     response.tokenUsage().outputTokenCount());
+        }
+    }
+
+    /**
+     * Logs finish reason and token usage, and warns loudly on {@link FinishReason#LENGTH} — the
+     * signal that the output hit the token ceiling and was cut mid-token. Before this, truncation
+     * was invisible: the yeti run truncated AdminMenuPage.tsx twice (~31K and ~21.7K chars) with no
+     * recorded finish reason, so the cause could not be diagnosed. Recovery is owned by the caller's
+     * completeness check (e.g. FrontendGeneratorNode); this only makes the cause observable.
+     */
+    private void warnIfTruncated(String context, ChatResponse response) {
+        FinishReason reason = response.finishReason();
+        Integer out = response.tokenUsage() != null ? response.tokenUsage().outputTokenCount() : null;
+        Integer in  = response.tokenUsage() != null ? response.tokenUsage().inputTokenCount()  : null;
+        if (reason == FinishReason.LENGTH) {
+            log.warn("[Gemini] {} hit the output-token ceiling (finishReason=LENGTH) — response truncated. "
+                    + "model={} inputTokens={} outputTokens={}. If this recurs, raise "
+                    + "worker.llm.gemini.flash-max-tokens or lower the thinking budget.",
+                    context, modelKey, in, out);
+        } else {
+            log.debug("[Gemini] {} finishReason={} model={} inputTokens={} outputTokens={}",
+                    context, reason, modelKey, in, out);
         }
     }
 

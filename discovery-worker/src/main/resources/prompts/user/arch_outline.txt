@@ -115,10 +115,16 @@ Also check types files: every FRONTEND feature that has a service.ts must have a
 companion frontend/src/types/<domain>.ts in the files array, listed in the
 imports_from of that feature's service.ts, hook.ts, and Page.tsx.
 
+Also check page composition (Step 2a): every page with a form, table, or dialog is a
+thin shell whose concerns are separate frontend/src/components/<domain>/<Concern>.tsx
+entries (layer: COMPONENT), each listed in the page's imports_from and grouped in the
+SAME feature as the page.
+
 Also verify feature grouping before returning:
 - Every file in "files" has feature_name set (non-null, non-empty)?
 - Every path in features[*].file_paths matches a file_path in "files"?
-- No feature has fewer than 4 or more than 10 files (split into sub-features if needed)?
+- No feature has fewer than 4 or more than 10 non-COMPONENT files (split into sub-features
+  if needed — but never separate a page from its components)?
 - Backend and frontend versions of the same domain are in SEPARATE features?
 - Exactly one INFRA feature named "infrastructure" is present?
 

@@ -1,0 +1,11 @@
+Business: {{businessName}} ({{category}})
+
+== CLIENT'S REQUESTED CHANGES ==
+{{requestedChanges}}
+
+== PROJECT MANIFEST (features and their files — the complete, closed file list) ==
+{{manifestJson}}
+
+Decide which files must be edited to implement the requested changes. Follow the decision
+rules exactly and return only the JSON object from the output contract — every feature
+present, smallest correct file set marked.

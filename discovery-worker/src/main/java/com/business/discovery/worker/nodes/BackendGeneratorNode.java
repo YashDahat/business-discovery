@@ -19,6 +19,7 @@ import com.business.discovery.worker.util.JavaImportResolver;
 import com.business.discovery.worker.util.JavaImportSanitizer;
 import com.business.discovery.worker.util.JavaPackageSanitizer;
 import com.business.discovery.worker.util.LayerOrderUtil;
+import com.business.discovery.worker.util.TruncationDetector;
 import com.business.discovery.worker.service.GitService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -53,6 +54,9 @@ public class BackendGeneratorNode implements WorkerNode {
 
     // Max concurrent Flash LLM calls per layer — limits Gemini API rate pressure.
     private static final int MAX_PARALLEL_PER_LAYER = 5;
+
+    // Same-attempt regeneration budget for a file that comes back truncated (mid-token).
+    private static final int MAX_GEN_ATTEMPTS = 3;
 
     // Matches any Java class name (UpperCamelCase) in free text — used to auto-resolve
     // class references in featureInstruction/fileRole to actual workspace files.
@@ -142,7 +146,10 @@ public class BackendGeneratorNode implements WorkerNode {
                         FeatureSpec feature = spec != null && spec.getFeatureName() != null
                                 ? featuresByName.get(spec.getFeatureName()) : null;
                         Path filePath = workspace.resolve(entry.path());
-                        String featureInstruction = feature != null ? feature.getFeatureInstruction() : null;
+                        // On update runs this appends the change directive — the request's
+                        // only route into the generation prompt (enrichment doesn't re-run).
+                        String featureInstruction = feature != null
+                                ? feature.effectiveInstruction(requestedChangesMode) : null;
                         String fileRole = spec != null ? spec.getFileRole() : null;
 
                         if (featureInstruction == null || featureInstruction.isBlank()) {
@@ -209,30 +216,29 @@ public class BackendGeneratorNode implements WorkerNode {
         int layerPriority = LayerOrderUtil.backendPriority(entry);
         JavaFileTemplater.TemplateType templateType = JavaFileTemplater.classify(spec, layerPriority);
 
+        // Template output is deterministic and never truncates — only the LLM path needs a
+        // regeneration budget.
         String content;
         if (templateType != JavaFileTemplater.TemplateType.NONE) {
             content = JavaFileTemplater.generate(spec, classRegistry.getBasePackage(), templateType);
             if (content == null) {
                 log.warn("[BackendGeneratorNode] Template returned null for {} — falling back to LLM", entry.path());
-                content = generateWithLlm(workspace, entry, spec, featureInstruction, fileRole,
-                        requestedChangesMode, feature, standaloneClassImports,
-                        existingContent(filePath, requestedChangesMode, feature));
+                content = generateWithLlmRetrying(workspace, entry, spec, featureInstruction, fileRole,
+                        requestedChangesMode, feature, standaloneClassImports, filePath);
             }
         } else {
-            content = generateWithLlm(workspace, entry, spec, featureInstruction, fileRole,
-                    requestedChangesMode, feature, standaloneClassImports,
-                    existingContent(filePath, requestedChangesMode, feature));
+            content = generateWithLlmRetrying(workspace, entry, spec, featureInstruction, fileRole,
+                    requestedChangesMode, feature, standaloneClassImports, filePath);
         }
 
-        content = stripNestedEnums(content, standaloneClassImports, entry.path());
-        content = fixSpringBoot4Imports(content);
-
-        // Truncation guard: unbalanced braces means Flash hit its output token limit.
-        // A patch cannot fix a structurally incomplete file — skip all fix-LLM calls.
-        if (isBraceTruncated(content)) {
-            log.warn("[BackendGeneratorNode] Truncated output for {} — GENERATION_FAILED (saves fix-LLM calls)",
-                    entry.path());
-            Files.writeString(filePath, content);
+        if (content == null) {
+            // Every attempt truncated. Do NOT write the partial — an incomplete file masks errors
+            // and wastes fix-LLM rounds. Discard it and leave the path absent + GENERATION_FAILED so
+            // a later worker attempt regenerates it (shouldSkip does not skip GENERATION_FAILED).
+            // deleteIfExists also clears a partial left behind by an earlier run of the old code.
+            log.warn("[BackendGeneratorNode] {} still truncated after {} attempts — GENERATION_FAILED, "
+                    + "partial discarded (not written)", entry.path(), MAX_GEN_ATTEMPTS);
+            Files.deleteIfExists(filePath);
             archJsonLock.lock();
             try {
                 ArchitectureJsonUtil.updateFileStatus(workspace, entry.path(), "GENERATION_FAILED");
@@ -242,6 +248,9 @@ public class BackendGeneratorNode implements WorkerNode {
             upsertRecord(ctx, entry.path(), GeneratedFile.FileType.BACKEND, GeneratedFile.FileStatus.GENERATION_FAILED);
             return;
         }
+
+        content = stripNestedEnums(content, standaloneClassImports, entry.path());
+        content = fixSpringBoot4Imports(content);
 
         Files.writeString(filePath, content);
         JavaPackageSanitizer.sanitize(filePath);
@@ -256,6 +265,29 @@ public class BackendGeneratorNode implements WorkerNode {
             archJsonLock.unlock();
         }
         upsertRecord(ctx, entry.path(), GeneratedFile.FileType.BACKEND, GeneratedFile.FileStatus.GENERATED);
+    }
+
+    /**
+     * Generates via LLM, regenerating in place when the output comes back cut mid-token.
+     * Returns null when every attempt truncated — the caller must then discard, never write.
+     * The old path wrote the partial and deferred regeneration to the NEXT worker attempt, so the
+     * broken file was committed, masked every other error from the validator, and burned a fix
+     * session first. The root cause is also addressed upstream by disabling Flash thinking
+     * (GeminiLlmGeneratorService), so a retry here almost always succeeds.
+     */
+    private String generateWithLlmRetrying(Path workspace, FileEntry entry, FileSpec spec,
+                                           String featureInstruction, String fileRole,
+                                           boolean requestedChangesMode, FeatureSpec feature,
+                                           Map<String, String> standaloneClassImports, Path filePath) {
+        String existingContent = existingContent(filePath, requestedChangesMode, feature);
+        for (int genAttempt = 1; genAttempt <= MAX_GEN_ATTEMPTS; genAttempt++) {
+            String candidate = generateWithLlm(workspace, entry, spec, featureInstruction, fileRole,
+                    requestedChangesMode, feature, standaloneClassImports, existingContent);
+            if (!TruncationDetector.looksTruncated(candidate)) return candidate;
+            log.warn("[BackendGeneratorNode] Truncated output for {} (attempt {}/{}) — regenerating",
+                    entry.path(), genAttempt, MAX_GEN_ATTEMPTS);
+        }
+        return null;
     }
 
     private String generateWithLlm(Path workspace, FileEntry entry, FileSpec spec,
@@ -278,7 +310,13 @@ public class BackendGeneratorNode implements WorkerNode {
     private boolean shouldSkip(FileSpec spec, FeatureSpec feature, boolean requestedChangesMode,
                                boolean existsOnDisk) {
         if (spec == null) return false;
-        if (requestedChangesMode) return feature == null || !feature.isChangeRequired();
+        if (requestedChangesMode) {
+            if (feature == null || !feature.isChangeRequired()) return true;
+            // File-grain narrowing: within a changed feature, regenerate only the files the
+            // targeting pass marked. A null flag (old spec / file omitted by targeting) falls
+            // back to the feature decision — the pre-file-grain behavior.
+            return spec.getChangeRequired() != null && !spec.getChangeRequired();
+        }
         String status = spec.getStatus();
         // GENERATION_FAILED must NOT be skipped — re-generate on retry runs.
         // GENERATED + present on disk IS skipped: after generation the fix loop owns the
@@ -514,17 +552,6 @@ public class BackendGeneratorNode implements WorkerNode {
 
     private String layerName(FileEntry entry) {
         return LayerOrderUtil.backendLayerName(entry);
-    }
-
-    // Open-brace count > close-brace count means the LLM stopped mid-output (token limit hit).
-    private static boolean isBraceTruncated(String content) {
-        if (content == null || content.isBlank()) return true;
-        int depth = 0;
-        for (char c : content.toCharArray()) {
-            if (c == '{') depth++;
-            else if (c == '}') depth--;
-        }
-        return depth > 0;
     }
 
     // ── Nested type safety net (enums + records) ─────────────────────────────
