@@ -7,6 +7,7 @@ import com.business.discovery.worker.repository.GeneratedFileRepository;
 import com.business.discovery.worker.service.BuildToolService;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.LombokIntegrityGuard;
 import com.business.discovery.worker.util.WorkspaceReader;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -135,6 +136,17 @@ public class ErrorFixAgent {
               PAGE's import to a derived module that exports the needed type. NEVER create
               the missing types/services file.
             - Frontend-only types (UI state, view models) belong in frontend/src/types/local/.
+
+            LOMBOK (backend — read carefully):
+            DTOs and entities are annotated (@Data/@Builder) and Lombok synthesises their
+            getters, setters and builders at compile time. A wall of "cannot find symbol:
+            getX()/setX()" across SEVERAL annotated classes is ONE broken build, not N broken
+            classes — annotation processing is not running. Fix the build (lombok present in
+            backend/pom.xml AND in maven-compiler-plugin <annotationProcessorPaths>), never the
+            classes. Deleting @Data/@Builder and hand-writing accessors DOES make it compile,
+            and it silently corrupts the TypeScript types derived from those DTOs — the harness
+            refuses those edits. To add or retype a FIELD, edit the field list and leave the
+            annotations alone.
 
             RULES:
             - Always fix root causes before symptoms — patch the source file first.
@@ -393,6 +405,9 @@ public class ErrorFixAgent {
         String refusal = derivedFileGuard(target, relativePath);
         if (refusal != null) return refusal;
 
+        refusal = lombokGuard(target, relativePath, content);
+        if (refusal != null) return refusal;
+
         try {
             Files.createDirectories(target.getParent());
             Files.writeString(target, content);
@@ -401,6 +416,25 @@ public class ErrorFixAgent {
             return "OK";
         } catch (IOException e) {
             return "ERROR: " + e.getMessage();
+        }
+    }
+
+    /**
+     * Refuses mutations that strip Lombok off an annotated class or hand-expand the
+     * accessors it generates. Applied to the POST-edit content, so a str_replace that
+     * deletes {@code @Data} is caught the same as a full-file rewrite that omits it.
+     */
+    private String lombokGuard(Path target, String relativePath, String proposed) {
+        if (!Files.exists(target)) return null;
+        try {
+            String refusal = LombokIntegrityGuard.check(
+                    relativePath, Files.readString(target), proposed);
+            if (refusal != null) {
+                log.warn("[ErrorFixAgent] Refused Lombok-stripping mutation on {}", relativePath);
+            }
+            return refusal;
+        } catch (IOException e) {
+            return null; // unreadable — let the normal path handle it
         }
     }
 
@@ -433,7 +467,13 @@ public class ErrorFixAgent {
                 return "ERROR: old_string occurs " + occurrences + " times in " + relativePath
                         + " — include more surrounding context to make it unique.";
             }
-            Files.writeString(target, content.replace(oldString, newString));
+            String patched = content.replace(oldString, newString);
+            String lombokRefusal = LombokIntegrityGuard.check(relativePath, content, patched);
+            if (lombokRefusal != null) {
+                log.warn("[ErrorFixAgent] Refused Lombok-stripping patch on {}", relativePath);
+                return lombokRefusal;
+            }
+            Files.writeString(target, patched);
             updateDbRecord(relativePath, ctx);
             log.info("[ErrorFixAgent] Patched {} ({} -> {} chars)", relativePath,
                     oldString.length(), newString.length());

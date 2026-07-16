@@ -85,6 +85,9 @@ public class DockerContainerService {
     @Value("${app.worker.smoke-enabled:true}")
     private boolean workerSmokeEnabled;
 
+    @Value("${app.worker.smoke-flows-strict:false}")
+    private boolean workerSmokeFlowsStrict;
+
     // ─── Spawn a sub-container for a task ─────────────────
 
     @Transactional
@@ -233,6 +236,7 @@ public class DockerContainerService {
         // the worker maps it to worker.docker.host and sets DOCKER_HOST per-process itself.
         env.add("WORKER_DOCKER_HOST=" + workerDockerHost);
         env.add("WORKER_SMOKE_ENABLED=" + workerSmokeEnabled);
+        env.add("WORKER_SMOKE_FLOWS_STRICT=" + workerSmokeFlowsStrict);
         env.add("DOCKER_NETWORK_NAME=" + networkName);
 
         return env;

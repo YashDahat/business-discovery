@@ -9,8 +9,10 @@ import com.business.discovery.worker.service.BuildToolService.BuildResult;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import com.business.discovery.worker.util.EnvVarScanner;
 import com.business.discovery.worker.util.MavenDependencyInjector;
+import com.business.discovery.worker.util.MissingBeanPatcher;
 import com.business.discovery.worker.util.RepositoryMethodInjector;
 import com.business.discovery.worker.util.JwtCircularDependencyPatcher;
+import com.business.discovery.worker.util.PasswordEncoderExtractor;
 import com.business.discovery.worker.util.RolePrefixPatcher;
 import com.business.discovery.worker.util.SecurityConfigPatcher;
 import lombok.RequiredArgsConstructor;
@@ -40,6 +42,12 @@ public class BackendValidationNode implements WorkerNode {
         // because these defect classes compile clean and only surface at boot/request time.
         RolePrefixPatcher.fix(backendSrcJava);
         JwtCircularDependencyPatcher.fix(backendSrcJava);
+        // the @Lazy patcher above cannot see the PasswordEncoder cycle (it never passes
+        // through JwtAuthFilter) — yeti attempt 4 and circuit-house both shipped it
+        PasswordEncoderExtractor.fix(backendSrcJava);
+        // injected-but-never-declared infrastructure beans (RestTemplate) — circuit-house
+        // attempt 2 compiled clean and then crash-looped on context refresh
+        MissingBeanPatcher.fix(backendSrcJava);
 
         BuildResult initial = buildTool.runMvnCompile(backendDir);
 

@@ -12,6 +12,7 @@ import com.business.discovery.worker.service.llm.FeatureSpec;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
+import com.business.discovery.worker.util.ApiContractCard;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import com.business.discovery.worker.util.EslintCycleParser;
 import com.business.discovery.worker.util.LayerOrderUtil;
@@ -233,6 +234,20 @@ public class FrontendGeneratorNode implements WorkerNode {
             log.info("[FrontendGeneratorNode] UI inventory: {} radix packages, {} shadcn ui files",
                     uiInventory.radixExports().size(), uiInventory.shadcnUiExports().size());
 
+            // Ground-truth API contract: the types + SDK ApiArtifactGeneratorNode derived from
+            // the compiled backend, read back off disk and injected into EVERY generation prompt.
+            // Not routed through the spec's imports_from — the planner left that empty for 31 of
+            // 81 frontend files (circuit-house), including the very component whose job was to
+            // render an order, which then invented three fields OrderDto does not have.
+            this.contractCard = com.business.discovery.worker.util.ApiContractCard.build(workspace);
+            if (contractCard.isEmpty()) {
+                log.warn("[FrontendGeneratorNode] No derived API contract on disk — generation will "
+                        + "run without wire ground truth (did ApiArtifactGeneratorNode extract?)");
+            } else {
+                log.info("[FrontendGeneratorNode] API contract card: {} type file(s), {} route(s)",
+                        contractCard.typeFileCount(), contractCard.routeCount());
+            }
+
             // Group files by layer priority — within a layer, files don't depend on each other
             // and can be generated concurrently. TreeMap gives sorted layer iteration.
             TreeMap<Integer, List<FileEntry>> filesByLayer = frontendFiles.stream()
@@ -370,6 +385,7 @@ public class FrontendGeneratorNode implements WorkerNode {
 
     // Set once per execute() before the parallel generation block; read-only afterwards.
     private volatile com.business.discovery.worker.util.UiComponentInventory uiInventory;
+    private volatile com.business.discovery.worker.util.ApiContractCard contractCard;
 
     private void runGenerateStage(WorkerContext ctx, Path workspace, FileEntry entry,
                                   Path filePath, FileSpec spec, String featureInstruction,
@@ -390,10 +406,14 @@ public class FrontendGeneratorNode implements WorkerNode {
         // committed, masked every other error from the validator (yeti: 7 visible vs 94 real), and
         // burned a 30-round fix session first. The root cause is also addressed upstream by disabling
         // Flash thinking (GeminiLlmGeneratorService), so a retry here almost always succeeds.
+        String contractSection = (contractCard != null && !contractCard.isEmpty())
+                ? ApiContractCard.PROMPT_KEY + "\n" + contractCard.toPromptSection()
+                : null;
+
         String content = null;
         for (int genAttempt = 1; genAttempt <= MAX_GEN_ATTEMPTS; genAttempt++) {
             String candidate = flashLlm.generateFileContent(entry.path(), featureInstruction,
-                    fileRole != null ? fileRole : "", depFiles, existingContent);
+                    fileRole != null ? fileRole : "", depFiles, existingContent, contractSection);
             if (!TruncationDetector.looksTruncated(candidate)) {
                 content = candidate;
                 break;

@@ -277,9 +277,32 @@ public abstract class LlmGeneratorService {
                                       String fileRole,
                                       Map<String, String> dependencyFiles,
                                       String existingContent) {
+        return generateFileContent(filePath, featureInstruction, fileRole,
+                dependencyFiles, existingContent, null);
+    }
+
+    /**
+     * As above, plus {@code sharedContext}: run-constant ground truth (the API contract card)
+     * appended to the SYSTEM prompt rather than the user prompt.
+     *
+     * Placement is deliberate. The user prompt opens with filePath, so the per-call prefix
+     * diverges on its first line — anything appended there is re-billed on every one of the
+     * ~140 generation calls in a run. The system prompt is byte-identical across all of them,
+     * so a suffix on it extends the shared prefix and rides Gemini's implicit prefix cache
+     * instead. Same tokens delivered, a fraction of the cost.
+     */
+    public String generateFileContent(String filePath,
+                                      String featureInstruction,
+                                      String fileRole,
+                                      Map<String, String> dependencyFiles,
+                                      String existingContent,
+                                      String sharedContext) {
         boolean isUpdate = existingContent != null;
 
         String system = PromptLoader.load(isUpdate ? "system/file_update.txt" : "system/file_generate.txt");
+        if (sharedContext != null && !sharedContext.isBlank()) {
+            system = system + "\n\n" + sharedContext;
+        }
 
         String existingSection = isUpdate
                 ? "\n== EXISTING FILE (apply instruction as minimal diff — preserve what the instruction doesn't touch) ==\n"

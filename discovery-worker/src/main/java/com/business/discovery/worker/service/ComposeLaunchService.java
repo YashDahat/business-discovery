@@ -4,6 +4,7 @@ import com.business.discovery.worker.service.llm.ApiEndpoint;
 import com.business.discovery.worker.service.llm.ArchitectureSpec;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.SeededCredentialFinder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -46,6 +47,9 @@ public class ComposeLaunchService {
     private static final Pattern ASSET_JS = Pattern.compile("/assets/[A-Za-z0-9._-]+\\.js");
     private static final Pattern PATH_PARAM = Pattern.compile("\\{[^}]+}");
 
+    /** Ships on the branch (docs/ is not gitignored), so a failing run leaves its worklist behind. */
+    static final String FLOW_REPORT = "docs/SMOKE_REPORT.md";
+
     /** Docker daemon endpoint, e.g. tcp://docker-proxy:2375. Blank = local socket (dev). */
     @Value("${worker.docker.host:}")
     private String dockerHost;
@@ -60,6 +64,15 @@ public class ComposeLaunchService {
 
     @Value("${worker.smoke.boot-timeout-seconds:120}")
     private int bootTimeoutSeconds;
+
+    /**
+     * Whether a broken user journey fails the run. Default false: measure first, enforce
+     * once the deterministic fixes for what it finds are in place — a strict gate today
+     * would burn three regeneration retries on defects the fix loop cannot repair
+     * (a security-matcher typo is not a compile error), and the report is the point.
+     */
+    @Value("${worker.smoke.flows-strict:false}")
+    private boolean flowsStrict;
 
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(5))
@@ -132,7 +145,234 @@ public class ComposeLaunchService {
         if (!frontend.passed()) return new GateReport(results);
 
         results.add(apiDataGate(baseUrl, workspace));
+
+        // Flows run LAST and always run: they are the only probe of the live product, and
+        // their report is worth having even when an earlier gate is already unhappy.
+        results.add(flowsGate(baseUrl, workspace));
         return new GateReport(results);
+    }
+
+    // ── Flows gate ─────────────────────────────────────────────────────────
+
+    /** One probed user journey. */
+    public record FlowResult(String flow, boolean passed, String detail) {}
+
+    /**
+     * Exercises the live product the way a visitor and an owner would: fetches every
+     * public endpoint anonymously, logs in with the credentials the seeder actually
+     * planted, and reads the admin surface with that token.
+     *
+     * Every earlier gate is blind to what this catches. Circuit-house attempt 2 compiled
+     * clean on both sides, booted, served the SPA — and still shipped a 403 on its own
+     * public menu (SecurityConfig permitted /api/v1/menus/**, the controller served
+     * /api/v1/menu/**) and an ordering endpoint that rejected every possible request.
+     * Note the api-data gate cannot catch either: it counts 401/403 as "reachable".
+     *
+     * Writes docs/SMOKE_REPORT.md unconditionally — on a passing run it is the evidence
+     * the site works; on a failing one it is the worklist.
+     *
+     * Enforcement is deliberately separated from measurement via worker.smoke.flows-strict.
+     * While the deterministic fixes for the defects it finds are still being built, a
+     * failing flow should not burn three regeneration retries that cannot possibly fix it;
+     * the run completes, the report ships, and the worklist is harvested. Flip to true to
+     * make broken journeys block the PR.
+     */
+    private GateResult flowsGate(String baseUrl, Path workspace) {
+        List<FlowResult> flows = new ArrayList<>();
+
+        flows.addAll(publicContentFlows(baseUrl, workspace));
+        String token = loginFlow(baseUrl, workspace, flows);
+        if (token != null) flows.addAll(adminReadFlows(baseUrl, workspace, token));
+
+        writeFlowReport(workspace, baseUrl, flows);
+
+        List<FlowResult> broken = flows.stream().filter(f -> !f.passed()).toList();
+        if (broken.isEmpty()) {
+            return new GateResult("flows", true, flows.size() + " journeys passed");
+        }
+
+        String detail = broken.size() + " of " + flows.size() + " journeys broken: "
+                + broken.stream().limit(6)
+                        .map(f -> f.flow() + " (" + f.detail() + ")")
+                        .collect(java.util.stream.Collectors.joining("; "))
+                + " — full list in " + FLOW_REPORT;
+
+        if (!flowsStrict) {
+            log.warn("[ComposeLaunch] FLOWS GATE (advisory — worker.smoke.flows-strict=false): {}", detail);
+            return new GateResult("flows", true, "ADVISORY — " + detail);
+        }
+        return new GateResult("flows", false, detail);
+    }
+
+    /** Public endpoints must serve anonymous visitors. A 401/403 here is a security-matcher defect. */
+    private List<FlowResult> publicContentFlows(String baseUrl, Path workspace) {
+        List<FlowResult> out = new ArrayList<>();
+        for (String path : collectGetEndpoints(workspace)) {
+            if (path.contains("/admin")) continue;
+            String flow = "public GET " + path;
+            try {
+                HttpResponse<String> r = get(baseUrl + path);
+                int sc = r.statusCode();
+                if (sc == 401 || sc == 403) {
+                    out.add(new FlowResult(flow, false, sc
+                            + " — a visitor cannot reach this; the security matcher does not "
+                            + "permit the path the controller actually serves"));
+                } else if (sc >= 500) {
+                    out.add(new FlowResult(flow, false, sc + " server error"));
+                } else if (sc >= 400) {
+                    out.add(new FlowResult(flow, false, String.valueOf(sc)));
+                } else {
+                    out.add(new FlowResult(flow, true, String.valueOf(sc)));
+                }
+            } catch (Exception e) {
+                out.add(new FlowResult(flow, false, "request failed: " + e.getMessage()));
+            }
+        }
+        return out;
+    }
+
+    /** @return bearer token, or null when nobody can log in. */
+    private String loginFlow(String baseUrl, Path workspace, List<FlowResult> flows) {
+        Path backendSrc = workspace.resolve("backend/src/main/java");
+        Path props = workspace.resolve("backend/src/main/resources/application.properties");
+        List<SeededCredentialFinder.Credential> candidates = SeededCredentialFinder.find(backendSrc, props);
+
+        if (candidates.isEmpty()) {
+            flows.add(new FlowResult("admin login", false,
+                    "no seeded credentials found in backend source — nobody can administer this site"));
+            return null;
+        }
+
+        String loginPath = loginPath(workspace);
+        List<String> tried = new ArrayList<>();
+        for (SeededCredentialFinder.Credential c : candidates) {
+            try {
+                HttpResponse<String> r = postJson(baseUrl + loginPath,
+                        "{\"email\":\"%s\",\"password\":\"%s\"}".formatted(c.email(), c.password()));
+                String token = extractToken(r.body());
+                if (r.statusCode() == 200 && token != null) {
+                    flows.add(new FlowResult("admin login", true,
+                            "200 as " + c.email() + " (seeded by " + c.source() + ")"));
+                    return token;
+                }
+                tried.add(c.email() + "/" + c.password() + "→" + r.statusCode());
+            } catch (Exception e) {
+                tried.add(c.email() + "→error");
+            }
+        }
+        flows.add(new FlowResult("admin login", false,
+                "every seeded credential rejected at " + loginPath + ": " + String.join(", ", tried)));
+        return null;
+    }
+
+    /** The owner's surface: admin reads must answer with the token the login just issued. */
+    private List<FlowResult> adminReadFlows(String baseUrl, Path workspace, String token) {
+        List<FlowResult> out = new ArrayList<>();
+        for (String path : collectGetEndpoints(workspace)) {
+            if (!path.contains("/admin")) continue;
+            String flow = "admin GET " + path;
+            try {
+                HttpResponse<String> r = getWithToken(baseUrl + path, token);
+                int sc = r.statusCode();
+                if (sc == 403 || sc == 401) {
+                    out.add(new FlowResult(flow, false, sc
+                            + " — logged-in admin is denied; role authority mismatch or matcher gap"));
+                } else if (sc >= 500) {
+                    out.add(new FlowResult(flow, false, sc + " server error"));
+                } else if (sc >= 400) {
+                    out.add(new FlowResult(flow, false, String.valueOf(sc)));
+                } else {
+                    out.add(new FlowResult(flow, true, String.valueOf(sc)));
+                }
+            } catch (Exception e) {
+                out.add(new FlowResult(flow, false, "request failed: " + e.getMessage()));
+            }
+        }
+        return out;
+    }
+
+    private void writeFlowReport(Path workspace, String baseUrl, List<FlowResult> flows) {
+        long passed = flows.stream().filter(FlowResult::passed).count();
+        StringBuilder sb = new StringBuilder();
+        sb.append("# Smoke Flow Report\n\n")
+          .append("Probed live at `").append(baseUrl).append("` — ")
+          .append(passed).append(" of ").append(flows.size()).append(" journeys working.\n\n")
+          .append("These are runtime journeys, not compilation. Everything below compiled cleanly.\n\n");
+
+        List<FlowResult> broken = flows.stream().filter(f -> !f.passed()).toList();
+        if (!broken.isEmpty()) {
+            sb.append("## Broken (").append(broken.size()).append(")\n\n");
+            broken.forEach(f -> sb.append("- **").append(f.flow()).append("** — ")
+                                  .append(f.detail()).append("\n"));
+            sb.append("\n");
+        }
+        sb.append("## Working (").append(passed).append(")\n\n");
+        flows.stream().filter(FlowResult::passed)
+             .forEach(f -> sb.append("- ").append(f.flow()).append(" — ").append(f.detail()).append("\n"));
+
+        try {
+            Path out = workspace.resolve(FLOW_REPORT);
+            Files.createDirectories(out.getParent());
+            Files.writeString(out, sb.toString());
+            log.info("[ComposeLaunch] Flow report written to {} ({} of {} journeys working)",
+                    FLOW_REPORT, passed, flows.size());
+        } catch (IOException e) {
+            log.warn("[ComposeLaunch] Could not write {}: {}", FLOW_REPORT, e.getMessage());
+        }
+    }
+
+    /** The spec's own auth path, so this is not hardcoded to one project's conventions. */
+    private String loginPath(Path workspace) {
+        try {
+            if (ArchitectureJsonUtil.exists(workspace)) {
+                ArchitectureSpec spec = ArchitectureJsonUtil.read(workspace);
+                if (spec.getFiles() != null) {
+                    for (FileSpec file : spec.getFiles()) {
+                        if (file.getApiEndpoints() == null) continue;
+                        for (ApiEndpoint ep : file.getApiEndpoints()) {
+                            if (ep.getPath() == null || ep.getMethod() == null) continue;
+                            if ("POST".equalsIgnoreCase(ep.getMethod())
+                                    && ep.getPath().toLowerCase().contains("login")) {
+                                return ep.getPath().trim();
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (IOException ignored) {
+            // fall through to the convention
+        }
+        return "/api/v1/auth/login";
+    }
+
+    /** Tolerates token / accessToken / jwt / jwtToken — the field name varies per run. */
+    static String extractToken(String body) {
+        if (body == null) return null;
+        Matcher m = Pattern.compile(
+                "\"(?:token|accessToken|access_token|jwt|jwtToken)\"\\s*:\\s*\"([^\"]+)\"").matcher(body);
+        return m.find() ? m.group(1) : null;
+    }
+
+    private HttpResponse<String> postJson(String url, String json)
+            throws IOException, InterruptedException {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(10))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(json))
+                .build();
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
+    }
+
+    private HttpResponse<String> getWithToken(String url, String token)
+            throws IOException, InterruptedException {
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(10))
+                .header("Authorization", "Bearer " + token)
+                .GET()
+                .build();
+        return http.send(req, HttpResponse.BodyHandlers.ofString());
     }
 
     public String collectLogs(Path workspace, String projectName) {

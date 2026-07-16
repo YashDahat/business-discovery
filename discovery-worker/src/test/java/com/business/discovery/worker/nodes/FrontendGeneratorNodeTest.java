@@ -79,7 +79,7 @@ class FrontendGeneratorNodeTest {
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(1);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
                 .thenReturn("export default function Component() { return null; }");
 
         node.execute(ctx);
@@ -129,7 +129,7 @@ class FrontendGeneratorNodeTest {
         when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
                 .thenThrow(new WorkerException(FailureType.INFRA, "LLM timeout"));
 
         assertThatThrownBy(() -> node.execute(ctx))
@@ -201,7 +201,7 @@ class FrontendGeneratorNodeTest {
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(1);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
                 .thenReturn("export type Placeholder = {};");
 
         node.execute(ctx);
@@ -230,12 +230,12 @@ class FrontendGeneratorNodeTest {
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(2);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), eq("// old")))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), eq("// old"), any()))
                 .thenReturn("// updated");
 
         node.execute(ctx);
 
-        verify(flashLlm).generateFileContent(anyString(), eq("update instruction"), anyString(), anyMap(), eq("// old"));
+        verify(flashLlm).generateFileContent(anyString(), eq("update instruction"), anyString(), anyMap(), eq("// old"), any());
         assertThat(Files.readString(existing)).isEqualTo("// updated");
     }
 
