@@ -70,6 +70,24 @@ NOTE — these types and service files are DERIVED FROM THE BACKEND at build tim
 the manifest paths tell the derivation where to emit. Pages and hooks import from
 them exactly as planned.
 
+## Step 1b — Service Files: ONE per domain, NOTHING else (MANDATORY)
+Plan exactly ONE frontend/src/services/<domain>Service.ts per backend domain, and NO
+other file under frontend/src/services/. NEVER plan admin{Domain}Service.ts, split
+services, or per-page services — any service beyond the derived set is necessarily a
+duplicate of a derived one or a call to an endpoint that does not exist.
+
+WHERE ADMIN CALLS LIVE: the derived <domain>Service.ts contains ONE exported function
+per backend endpoint — public AND admin alike. Functions are named after the backend
+controller handler methods (AdminOrderController.getAllOrders → getAllOrders); when a
+public and an admin handler collide on a name, the admin one gets an 'admin' prefix
+(adminGetAllOrders). Every page, hook, or component that calls the API — admin or
+public — lists the canonical frontend/src/services/<domain>Service.ts in its
+imports_from. There is no other legal service path.
+
+ESCAPE HATCH: a non-API "service" (cart persistence in localStorage, formatting
+helpers) goes in frontend/src/services/local/<name>.ts — the mirror of types/local/.
+Only services/local/ is LLM-writable; everything else under services/ is derived.
+
 ## Step 2 — Page → Files (SECOND)
 Every recommendedPage needs a Page.tsx (a page without one is NOT implemented). Data-driven
 pages (Menu, Reservation, Order, Events) are already covered by Step 1 — do not duplicate.
@@ -109,16 +127,27 @@ Add to EVERY project in addition to Steps 1–2, never displacing a derived file
   Frontend: AuthContext, LoginPage, AdminDashboardPage, ProtectedRoute,
   Layout, Header, Footer, AdminLayout, api/client.ts, App.tsx
 
-App.tsx MUST be included in the files array — it is NOT scaffold. It wraps the app in
-BrowserRouter > QueryClientProvider > AuthProvider > Routes and declares every route
-(/login, /admin + one /admin/{domain} per domain behind ProtectedRoute, plus all
-customer-facing routes).
+App.tsx MUST be included in the files array — it is NOT scaffold. But do NOT design its
+route table: App.tsx and frontend/src/routes.ts are DERIVED from this plan at build time
+(never plan routes.ts). Every route is derived from its page's FILE NAME, so name pages
+so the derived route is the intended one:
+
+  PAGE NAMING → ROUTE convention:
+    HomePage.tsx           → /                (nav "Home")
+    LoginPage.tsx          → /login           (no nav)
+    AdminDashboardPage.tsx → /admin           (admin, nav "Dashboard")
+    Admin<X>Page.tsx       → /admin/<x-kebab> (admin, behind ProtectedRoute, in sidebar)
+    <X>DetailPage.tsx      → /<x-kebab>/:id   (no nav — param route)
+    NotFoundPage.tsx       → *                (no nav)
+    <X>Page.tsx            → /<x-kebab>       (public nav)
 
 ## Step 3a — Admin CRUD (one set per managed domain)
 For each domain entity the owner manages (e.g. MenuItem, Reservation, Order):
   backend/.../controller/Admin{Domain}Controller.java   (CONTROLLER)
-  frontend/src/services/admin{Domain}Service.ts          (SERVICE)
   frontend/src/pages/Admin{Domain}Page.tsx               (PAGE)
+The admin page's hook and components list frontend/src/services/<domain>Service.ts in
+imports_from — admin CRUD functions live in the derived domain SDK (see Step 1b), never
+in a separate admin service file.
 
 # JAVA TYPE RULES (these create file entries — apply while listing files)
 Every Java enum and record MUST be its own top-level .java file — never a nested type.
@@ -207,5 +236,10 @@ keys).
 - Backend and frontend domains are in SEPARATE features?
 - Exactly one INFRA feature named "infrastructure" present?
 - No Java enum or record planned as a nested type — each has its own file entry?
-- App.tsx present with a route for every page?
+- Every page named per the PAGE NAMING → ROUTE convention (Admin* under /admin,
+  *DetailPage for :id routes) — routes are derived from file names, not planned?
+- No file under frontend/src/services/ other than ONE <domain>Service.ts per backend
+  domain or services/local/*? Every API-calling file's imports_from points at a
+  <domain>Service.ts?
+- routes.ts NOT planned (derived); App.tsx present but its routes NOT designed?
 - Strict JSON, no fences, schema-valid?

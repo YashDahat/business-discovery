@@ -358,9 +358,12 @@ public class ErrorFixAgent {
     /** Marker line stamped by TsTypeGenerator/TsSdkGenerator on every derived file. */
     private static final String DERIVED_MARKER = "GENERATED from the backend API contract";
 
+    /** Marker line stamped by RouteManifestGenerator on routes.ts (App.tsx stays editable). */
+    private static final String PLAN_MARKER = "GENERATED from the architecture plan";
+
     /**
-     * Fence around the derived API layer. Observed failure mode: the agent "fixes"
-     * unresolvable imports by hand-writing phantom type/service files or rewriting
+     * Fence around the derived API + navigation layers. Observed failure mode: the agent
+     * "fixes" unresolvable imports by hand-writing phantom type/service files or rewriting
      * derived ones — which the next attempt's re-derivation clobbers (churn loop).
      * Mutations are refused with a redirect to fixing the importing file instead.
      *
@@ -369,16 +372,21 @@ public class ErrorFixAgent {
     private String derivedFileGuard(Path target, String relativePath) {
         String p = relativePath.replace('\\', '/');
         boolean inTypes    = p.startsWith("frontend/src/types/") && !p.startsWith("frontend/src/types/local/");
-        boolean isSdkFile  = p.startsWith("frontend/src/services/") && p.endsWith("Service.ts");
+        // Any .ts under services/ (not just *Service.ts — blocks adminOrderHelpers.ts-style
+        // end-runs), with services/local/ as the model-writable escape hatch.
+        boolean inServices = p.startsWith("frontend/src/services/")
+                && !p.startsWith("frontend/src/services/local/") && p.endsWith(".ts");
+        boolean isRoutes   = p.equals("frontend/src/routes.ts");
 
         if (Files.exists(target)) {
             try {
                 String firstLine = Files.readAllLines(target).stream().findFirst().orElse("");
-                if (firstLine.contains(DERIVED_MARKER)) {
-                    return "REFUSED: " + relativePath + " is DERIVED from the compiled backend contract "
-                            + "and is regenerated on every attempt — edits here are discarded. The types and "
-                            + "paths in it are ground truth. Fix the files that IMPORT it instead: rename the "
-                            + "mismatched field/function in the page/hook to match what this file actually exports.";
+                if (firstLine.contains(DERIVED_MARKER) || firstLine.contains(PLAN_MARKER)) {
+                    return "REFUSED: " + relativePath + " is DERIVED (from the compiled backend contract "
+                            + "or the architecture plan) and is regenerated on every attempt — edits here are "
+                            + "discarded. Its contents are ground truth. Fix the files that IMPORT it instead: "
+                            + "rename the mismatched field/function/route in the page/hook/component to match "
+                            + "what this file actually exports.";
                 }
             } catch (IOException ignored) {
                 // unreadable — fall through to normal handling
@@ -386,12 +394,13 @@ public class ErrorFixAgent {
             return null;
         }
 
-        if (inTypes || isSdkFile) {
-            return "REFUSED: cannot create " + relativePath + " — wire types and API services are "
-                    + "DERIVED from the backend and this module was not derived, so the import path is "
+        if (inTypes || inServices || isRoutes) {
+            return "REFUSED: cannot create " + relativePath + " — wire types, API services and the route "
+                    + "registry are DERIVED and this module was not derived, so the import path is "
                     + "wrong. Fix the importing file to use a module that exists (see the derived files "
-                    + "under frontend/src/types/ and frontend/src/services/). Frontend-only types belong "
-                    + "in frontend/src/types/local/.";
+                    + "under frontend/src/types/, frontend/src/services/ and frontend/src/routes.ts). "
+                    + "Frontend-only types belong in frontend/src/types/local/; non-API service modules "
+                    + "belong in frontend/src/services/local/.";
         }
         return null;
     }

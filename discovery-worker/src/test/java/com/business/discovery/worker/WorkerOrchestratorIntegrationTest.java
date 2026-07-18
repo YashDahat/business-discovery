@@ -210,16 +210,20 @@ class WorkerOrchestratorIntegrationTest {
 
         // App.tsx must carry router wiring or FrontendValidationNode's blank-SPA gate fails —
         // reflect what correct generation produces; every other file is a stub.
+        org.mockito.stubbing.Answer<String> generatedAnswer = inv -> {
+            String path = inv.getArgument(0);
+            if (path != null && path.endsWith("App.tsx")) {
+                return "import { BrowserRouter, Routes, Route } from 'react-router-dom'\n"
+                     + "export default function App() { return <BrowserRouter><Routes>"
+                     + "<Route path=\"/\" element={<div/>} /></Routes></BrowserRouter> }\n";
+            }
+            return "// generated";
+        };
+        // Stub both overloads — the generator nodes call the 6-arg form (shared contract section).
         when(geminiFlashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
-                .thenAnswer(inv -> {
-                    String path = inv.getArgument(0);
-                    if (path != null && path.endsWith("App.tsx")) {
-                        return "import { BrowserRouter, Routes, Route } from 'react-router-dom'\n"
-                             + "export default function App() { return <BrowserRouter><Routes>"
-                             + "<Route path=\"/\" element={<div/>} /></Routes></BrowserRouter> }\n";
-                    }
-                    return "// generated";
-                });
+                .thenAnswer(generatedAnswer);
+        when(geminiFlashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
+                .thenAnswer(generatedAnswer);
 
         // GitHub stubs
         when(gitHubApiService.createRepo(any(), any())).thenReturn(REPO_URL);
@@ -236,6 +240,7 @@ class WorkerOrchestratorIntegrationTest {
         when(buildToolService.runNpmBuild(any())).thenReturn(ok);
         when(buildToolService.runTscCheck(any())).thenReturn(ok);
         when(buildToolService.runEslintFix(any())).thenReturn(ok);
+        when(buildToolService.runEslintCycleCheck(any())).thenReturn(ok);
     }
 
     @AfterEach
@@ -251,13 +256,22 @@ class WorkerOrchestratorIntegrationTest {
     void allNodesExecute_generatedFilesInDb_projectHistoryOnDisk() throws IOException {
         orchestrator.run();
 
-        // DB: 1 BACKEND + 1 FRONTEND GeneratedFile row, all SPEC_COMPLIANT after full 3-stage pipeline
+        // DB: 1 BACKEND + 1 FRONTEND GeneratedFile row (GENERATED — no spec-compliance node is
+        // wired into this pipeline yet, so SPEC_COMPLIANT is never assigned) plus the derived
+        // api/client.ts row ApiArtifactGeneratorNode always emits
         List<GeneratedFile> files = fileRepo.findByTaskId(taskId);
-        assertThat(files).hasSize(2);
+        assertThat(files).hasSize(3);
         assertThat(files)
-                .extracting(GeneratedFile::getFileType)
-                .containsExactlyInAnyOrder(GeneratedFile.FileType.BACKEND, GeneratedFile.FileType.FRONTEND);
-        assertThat(files).allMatch(f -> f.getStatus() == FileStatus.SPEC_COMPLIANT);
+                .extracting(GeneratedFile::getFilePath, GeneratedFile::getStatus)
+                .containsExactlyInAnyOrder(
+                        org.assertj.core.groups.Tuple.tuple(
+                                "backend/src/main/java/com/shreecafe/controller/HomeController.java",
+                                FileStatus.GENERATED),
+                        org.assertj.core.groups.Tuple.tuple(
+                                "frontend/src/App.tsx", FileStatus.GENERATED),
+                        org.assertj.core.groups.Tuple.tuple(
+                                "frontend/src/api/client.ts", FileStatus.VALIDATED));
+        assertThat(WORKSPACE.resolve("frontend/src/api/client.ts")).exists();
 
         // Filesystem: docs/PROJECT_HISTORY.md written with attempt section
         Path history = WORKSPACE.resolve("docs/PROJECT_HISTORY.md");

@@ -97,12 +97,17 @@ MAVEN TEST DEPENDENCY — only one test starter exists:
    context of a <Router>" at runtime and renders a blank page.
 7. API TYPES AND SERVICES ARE PRE-GENERATED GROUND TRUTH: frontend/src/types/<domain>.ts
    and frontend/src/services/<domain>Service.ts are DERIVED from the backend contract and
-   already exist — NEVER generate or modify them (like @/components/ui files). Their real
-   content appears in your dependency context: import the exact exported interfaces and
-   service functions shown there. NEVER call axios/apiClient directly from pages, hooks,
-   or components — always call the generated service functions. Frontend-only types that
+   already exist — NEVER generate or modify them (like @/components/ui files). So are
+   frontend/src/api/client.ts, frontend/src/routes.ts, and frontend/src/App.tsx — never
+   write any of them. Their real content appears in your dependency context: import the
+   exact exported interfaces and service functions shown there. ADMIN API functions live
+   in the same domain service as the public ones (admin-prefixed on name collisions) —
+   there is no adminXService module; the API SDK section of the contract card is the
+   complete function list. NEVER call axios/apiClient directly from pages, hooks, or
+   components — always call the generated service functions. Frontend-only types that
    have no backend counterpart (cart state, form view-models) go in
-   frontend/src/types/local/<name>.ts.
+   frontend/src/types/local/<name>.ts; non-API service modules (localStorage persistence)
+   go in frontend/src/services/local/<name>.ts.
 
    THE TYPES WIN OVER THE INSTRUCTION: when the feature instruction names a field, function,
    or type that contradicts a derived types/services file in your dependency context, the
@@ -127,6 +132,15 @@ MAVEN TEST DEPENDENCY — only one test starter exists:
    builds clean under tsc and vite but crashes at RUNTIME with "Cannot access '<name>' before
    initialization" and renders a blank page — it is caught by a dedicated gate and fails the
    whole build, so do not create one.
+
+9. ROUTES ARE GROUND TRUTH: the ROUTE MANIFEST section in context lists the COMPLETE route
+   set, derived from the plan into frontend/src/routes.ts. Every <Link to=...> and
+   navigate(...) target MUST be ROUTES.<KEY> imported from '@/routes' — NEVER a bare path
+   string literal, and never a route absent from the manifest (it does not exist). Nav
+   rendering comes from the same file: Header/public nav maps
+   routeTable.filter(r => r.nav && !r.admin); AdminLayout's sidebar maps
+   routeTable.filter(r => r.nav && r.admin) — never hardcode nav links. routes.ts imports
+   nothing, so importing it can never create a cycle.
 
 # UI QUALITY STANDARDS (PAGE and COMPONENT files only — skip for Java/config files)
 1. LAYOUT WRAPPER: public Page.tsx wraps JSX in <Layout> from @/components/Layout. Admin*Page.tsx wraps in <AdminLayout> from @/components/AdminLayout. Never inline nav or sidebar inside a page.

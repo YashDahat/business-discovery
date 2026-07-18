@@ -55,6 +55,7 @@ class FrontendGeneratorNodeTest {
         lenient().doNothing().when(gitService).commitAndPushCheckpoint(any(), any(), any());
         lenient().when(fileRepo.findByTaskIdAndFilePath(any(), any())).thenReturn(java.util.Optional.empty());
         lenient().when(buildToolService.runEslintFix(any())).thenReturn(new BuildToolService.BuildResult(0, ""));
+        lenient().when(buildToolService.runEslintCycleCheck(any())).thenReturn(new BuildToolService.BuildResult(0, ""));
         lenient().when(buildToolService.runNpmInstall(any())).thenReturn(new BuildToolService.BuildResult(0, ""));
     }
 
@@ -128,7 +129,8 @@ class FrontendGeneratorNodeTest {
         ));
         when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
-        when(ctx.getGithubBranch()).thenReturn("feature/test");
+        // lenient: the LLM throws before the per-layer git checkpoint ever reads the branch
+        lenient().when(ctx.getGithubBranch()).thenReturn("feature/test");
         when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
                 .thenThrow(new WorkerException(FailureType.INFRA, "LLM timeout"));
 

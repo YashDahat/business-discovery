@@ -9,6 +9,7 @@ import com.business.discovery.worker.repository.GeneratedFileRepository;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.util.ApiInventory;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.ServicePlanPruner;
 import com.business.discovery.worker.util.TsSdkGenerator;
 import com.business.discovery.worker.util.TsTypeGenerator;
 import lombok.extern.slf4j.Slf4j;
@@ -52,10 +53,39 @@ public class ApiArtifactGeneratorNode implements WorkerNode {
         this.fileRepo = fileRepo;
     }
 
+    /**
+     * api/client.ts is infrastructure, not judgment — Flash once wrote it with baseURL: ''
+     * by accident, and next run it might set a prefix and silently break every derived call.
+     * baseURL stays '' DELIBERATELY: the derived SDK carries full /api/v1 paths.
+     */
+    private static final String CANONICAL_API_CLIENT = """
+            // GENERATED from the backend API contract — do not edit by hand.
+            import axios from 'axios';
+
+            const apiClient = axios.create({ baseURL: '' });
+
+            apiClient.interceptors.request.use((config) => {
+              const token = localStorage.getItem('token');
+              if (token) config.headers.Authorization = `Bearer ${token}`;
+              return config;
+            });
+
+            export default apiClient;
+            """;
+
     @Override
     public void execute(WorkerContext ctx) {
         Path workspace = ctx.getWorkspaceDir();
         Path backendSrcJava = workspace.resolve("backend/src/main/java");
+
+        // Emitted even on the parser-gap path below, so the SDK's `import apiClient from
+        // '@/api/client'` always resolves and Flash never gets to invent a baseURL.
+        try {
+            writeAll(ctx, workspace, Map.of("frontend/src/api/client.ts", CANONICAL_API_CLIENT));
+        } catch (IOException e) {
+            throw new WorkerException(FailureType.INFRA,
+                    "Failed writing derived api/client.ts: " + e.getMessage(), e);
+        }
 
         ApiInventory inventory = ApiInventory.extract(backendSrcJava);
         if (inventory.isEmpty()) {
@@ -78,6 +108,18 @@ public class ApiArtifactGeneratorNode implements WorkerNode {
         } catch (IOException e) {
             throw new WorkerException(FailureType.INFRA,
                     "Failed writing derived API artifacts: " + e.getMessage(), e);
+        }
+
+        // Derivation assigns every endpoint to exactly one domain file, so any planned
+        // services/ path it did NOT claim is a duplicate or a phantom — strip it from the
+        // plan and the run's manifest before FrontendGeneratorNode can hand it to Flash.
+        List<String> stripped = ServicePlanPruner.prune(workspace, serviceFiles.keySet());
+        if (!stripped.isEmpty()) {
+            ctx.setFileManifest(ctx.getFileManifest().stream()
+                    .filter(e -> !stripped.contains(e.path()))
+                    .collect(java.util.stream.Collectors.toCollection(java.util.ArrayList::new)));
+            log.info("[ApiArtifactGeneratorNode] Pruned {} unclaimed planned service file(s) "
+                    + "from the manifest: {}", stripped.size(), stripped);
         }
 
         log.info("[ApiArtifactGeneratorNode] Derived {} type + {} service file(s) from {} endpoints / {} types",

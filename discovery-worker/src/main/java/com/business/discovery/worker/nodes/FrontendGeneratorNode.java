@@ -204,7 +204,7 @@ public class FrontendGeneratorNode implements WorkerNode {
         // "not generated yet" (pending) from "will never exist" (bad import).
         Set<String> manifestPaths = frontendFiles.stream()
                 .map(FileEntry::path)
-                .collect(Collectors.toSet());
+                .collect(Collectors.toCollection(java.util.HashSet::new));
 
         // Export registry built incrementally as layers complete — used by TypeScriptImportFixer.
         // Written sequentially (after each layer's parallel block) to avoid concurrent modification.
@@ -248,6 +248,12 @@ public class FrontendGeneratorNode implements WorkerNode {
                         contractCard.typeFileCount(), contractCard.routeCount());
             }
 
+            // Ground-truth navigation contract: routes.ts + App.tsx derived from the plan's
+            // PAGE entries BEFORE any layer generates, so every component is shown the legal
+            // link destinations (circuit-house: Flash-written App.tsx registered 1 admin route
+            // of 7 — six compiled pages were unreachable blank screens).
+            synthesizeRouteRegistry(ctx, workspace, frontendDir, frontendFiles, manifestPaths);
+
             // Group files by layer priority — within a layer, files don't depend on each other
             // and can be generated concurrently. TreeMap gives sorted layer iteration.
             TreeMap<Integer, List<FileEntry>> filesByLayer = frontendFiles.stream()
@@ -267,7 +273,8 @@ public class FrontendGeneratorNode implements WorkerNode {
                     FeatureSpec feature = spec != null && spec.getFeatureName() != null
                             ? featuresByName.get(spec.getFeatureName()) : null;
                     Path filePath = workspace.resolve(entry.path());
-                    if (shouldSkip(spec, feature, requestedChangesMode, Files.exists(filePath))) {
+                    if (isFenced(entry.path(), spec, workspace)
+                            || shouldSkip(spec, feature, requestedChangesMode, Files.exists(filePath))) {
                         if (Files.exists(filePath)) {
                             exportRegistry.register(filePath, Files.readString(filePath));
                         }
@@ -276,6 +283,14 @@ public class FrontendGeneratorNode implements WorkerNode {
 
                 List<FileEntry> toGenerate = layerFiles.stream()
                         .filter(e -> {
+                            // Fence wins over shouldSkip and applies in BOTH modes —
+                            // requestedChangesMode's shouldSkip ignores VALIDATED status, which
+                            // used to let Flash overwrite a derived service on update runs.
+                            if (isFenced(e.path(), specByPath.get(e.path()), workspace)) {
+                                log.warn("[FrontendGeneratorNode] FENCED — refusing to LLM-generate "
+                                        + "derived surface {}", e.path());
+                                return false;
+                            }
                             FileSpec spec = specByPath.get(e.path());
                             FeatureSpec feature = spec != null && spec.getFeatureName() != null
                                     ? featuresByName.get(spec.getFeatureName()) : null;
@@ -386,6 +401,114 @@ public class FrontendGeneratorNode implements WorkerNode {
     // Set once per execute() before the parallel generation block; read-only afterwards.
     private volatile com.business.discovery.worker.util.UiComponentInventory uiInventory;
     private volatile com.business.discovery.worker.util.ApiContractCard contractCard;
+    private volatile String routeCardSection;
+
+    /**
+     * Derives routes.ts + App.tsx from the plan's PAGE entries before any layer generates.
+     * Both are re-derived every attempt (idempotent) and marked VALIDATED so shouldSkip
+     * excludes them from Flash; isFenced covers update runs where status is ignored.
+     */
+    private void synthesizeRouteRegistry(WorkerContext ctx, Path workspace, Path frontendDir,
+                                         List<FileEntry> frontendFiles,
+                                         Set<String> manifestPaths) throws IOException {
+        com.business.discovery.worker.util.RouteManifest manifest =
+                com.business.discovery.worker.util.RouteManifest.fromSpec(frontendFiles);
+        if (manifest.isEmpty()) {
+            log.warn("[FrontendGeneratorNode] No PAGE entries in the plan — route registry skipped");
+            this.routeCardSection = null;
+            return;
+        }
+
+        Path frontendSrc = frontendDir.resolve("src");
+        boolean hasAuth = manifestPaths.contains("frontend/src/context/AuthContext.tsx")
+                || Files.exists(frontendSrc.resolve("context/AuthContext.tsx"));
+        boolean hasProtected = manifestPaths.contains("frontend/src/components/ProtectedRoute.tsx")
+                || Files.exists(frontendSrc.resolve("components/ProtectedRoute.tsx"));
+        boolean hasQuery = manifestPaths.contains("frontend/src/api/client.ts")
+                || Files.exists(frontendSrc.resolve("api/client.ts"));
+        var flags = new com.business.discovery.worker.util.RouteManifestGenerator.Flags(
+                hasAuth, hasProtected, hasQuery);
+
+        Files.createDirectories(frontendSrc);
+        Files.writeString(frontendSrc.resolve("routes.ts"),
+                com.business.discovery.worker.util.RouteManifestGenerator.emitRoutesTs(manifest));
+        Files.writeString(frontendSrc.resolve("App.tsx"),
+                com.business.discovery.worker.util.RouteManifestGenerator.emitAppTsx(manifest, flags));
+        log.info("[FrontendGeneratorNode] Route registry derived — {} routes into routes.ts + App.tsx",
+                manifest.entries().size());
+
+        manifestPaths.add("frontend/src/routes.ts");
+        markDerived(ctx, workspace, "frontend/src/routes.ts", true);
+        markDerived(ctx, workspace, "frontend/src/App.tsx", false);
+
+        this.routeCardSection = com.business.discovery.worker.util.RouteManifest.PROMPT_KEY
+                + "\n" + manifest.toPromptSection();
+    }
+
+    /** VALIDATED in ARCHITECTURE.json (adding an entry if unplanned) + the DB record. */
+    private void markDerived(WorkerContext ctx, Path workspace, String path, boolean addIfMissing) {
+        archJsonLock.lock();
+        try {
+            if (ArchitectureJsonUtil.exists(workspace)) {
+                if (ArchitectureJsonUtil.findByPath(workspace, path).isPresent()) {
+                    ArchitectureJsonUtil.updateFileStatus(workspace, path, "VALIDATED");
+                } else if (addIfMissing) {
+                    ArchitectureJsonUtil.addFile(workspace, FileSpec.builder()
+                            .fileName(path.substring(path.lastIndexOf('/') + 1))
+                            .filePath(path)
+                            .fileType("FRONTEND")
+                            .layer("UTIL")
+                            .status("VALIDATED")
+                            .description("Derived route registry — regenerated every attempt, never LLM-written")
+                            .build());
+                }
+            }
+        } catch (IOException e) {
+            log.warn("[FrontendGeneratorNode] Could not mark {} VALIDATED in spec: {}", path, e.getMessage());
+        } finally {
+            archJsonLock.unlock();
+        }
+        upsertRecord(ctx, path, GeneratedFile.FileType.FRONTEND, GeneratedFile.FileStatus.VALIDATED);
+    }
+
+    // ── Generator fence ───────────────────────────────────────────────────────
+
+    /**
+     * True when Flash must never write this path: the derived-surface fence. Wins over
+     * shouldSkip in BOTH modes — on update runs shouldSkip ignores VALIDATED status, which
+     * used to let a changed feature pull a derived service back into LLM generation.
+     *
+     * Covers: routes.ts + App.tsx (re-derived every attempt), frontend/src/services/**
+     * outside services/local/ unless the spec says VALIDATED came from derivation, and any
+     * on-disk file whose first line carries a generated marker.
+     */
+    private boolean isFenced(String path, FileSpec spec, Path workspace) {
+        String p = path.replace('\\', '/');
+        if (p.equals("frontend/src/routes.ts") || p.equals("frontend/src/App.tsx")) {
+            // Only fenced once the registry exists — an empty-plan run leaves App.tsx to Flash.
+            return routeCardSection != null;
+        }
+        boolean inServices = p.startsWith("frontend/src/services/")
+                && !p.startsWith("frontend/src/services/local/") && p.endsWith(".ts");
+        // Derivation owns services/ — but only once it has actually claimed the file
+        // (VALIDATED or marker on disk). A parser-gap run where ApiArtifactGeneratorNode
+        // extracted nothing deliberately falls back to LLM generation, so an unclaimed,
+        // absent service stays generatable.
+        if (inServices && spec != null && "VALIDATED".equalsIgnoreCase(spec.getStatus())) {
+            return true;
+        }
+        Path onDisk = workspace.resolve(p);
+        if (Files.exists(onDisk)) {
+            try (var lines = Files.lines(onDisk)) {
+                String first = lines.findFirst().orElse("");
+                return first.contains("GENERATED from the backend API contract")
+                        || first.contains("GENERATED from the architecture plan");
+            } catch (IOException ignored) {
+                return false;
+            }
+        }
+        return false;
+    }
 
     private void runGenerateStage(WorkerContext ctx, Path workspace, FileEntry entry,
                                   Path filePath, FileSpec spec, String featureInstruction,
@@ -409,6 +532,12 @@ public class FrontendGeneratorNode implements WorkerNode {
         String contractSection = (contractCard != null && !contractCard.isEmpty())
                 ? ApiContractCard.PROMPT_KEY + "\n" + contractCard.toPromptSection()
                 : null;
+        // Route card rides the same cacheable system-prompt slot — built once per run,
+        // byte-identical across calls, so it prefix-caches exactly like the contract card.
+        if (routeCardSection != null) {
+            contractSection = contractSection == null
+                    ? routeCardSection : contractSection + "\n\n" + routeCardSection;
+        }
 
         String content = null;
         for (int genAttempt = 1; genAttempt <= MAX_GEN_ATTEMPTS; genAttempt++) {
@@ -511,10 +640,14 @@ public class FrontendGeneratorNode implements WorkerNode {
         Files.writeString(srcDir.resolve("vite-env.d.ts"), "/// <reference types=\"vite/client\" />\n");
         log.info("[FrontendGeneratorNode] Wrote src/vite-env.d.ts");
 
-        // App.tsx — clean shell with no Vite demo imports.
+        // App.tsx — clean shell with no Vite demo imports. Write-if-missing ONLY: the route
+        // registry re-derives the real App.tsx right after this, and an unconditional write
+        // would re-blank a synthesized App.tsx on any path that skips synthesis.
         Path appTsx = srcDir.resolve("App.tsx");
-        Files.writeString(appTsx, CANONICAL_APP_TSX);
-        log.info("[FrontendGeneratorNode] Wrote canonical App.tsx");
+        if (!Files.exists(appTsx)) {
+            Files.writeString(appTsx, CANONICAL_APP_TSX);
+            log.info("[FrontendGeneratorNode] Wrote canonical App.tsx (was missing)");
+        }
 
         Path mainTsx = srcDir.resolve("main.tsx");
         Files.writeString(mainTsx, CANONICAL_MAIN_TSX);

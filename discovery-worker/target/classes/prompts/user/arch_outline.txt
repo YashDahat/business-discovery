@@ -75,11 +75,14 @@ Maven dependency notes (affects spring_boot_starters only):
 - io.jsonwebtoken (jjwt) is NOT a starter — the scaffolding adds it to pom.xml
   automatically. Do not list it.
 
-FRONTEND SERVICE LAYER — always include one set per backend domain:
+FRONTEND SERVICE LAYER — always include EXACTLY one set per backend domain:
 - frontend/src/services/<domain>Service.ts (layer: SERVICE)
 - frontend/src/hooks/use<Domain>.ts (layer: HOOK)
 - frontend/src/types/<domain>.ts (layer: UTIL)
 Components and pages call hooks only — never services directly, never fetch/axios directly.
+NEVER plan any other file under frontend/src/services/ (no admin{Domain}Service.ts —
+admin CRUD functions live in the derived <domain>Service.ts; see Step 1b). Non-API
+modules go in frontend/src/services/local/<name>.ts.
 
 ALWAYS include these baseline files regardless of business type:
 - backend/src/main/java/com/{{slug}}/exception/GlobalExceptionHandler.java (EXCEPTION)
@@ -119,6 +122,12 @@ Also check page composition (Step 2a): every page with a form, table, or dialog 
 thin shell whose concerns are separate frontend/src/components/<domain>/<Concern>.tsx
 entries (layer: COMPONENT), each listed in the page's imports_from and grouped in the
 SAME feature as the page.
+
+Also check the service layer: no file under frontend/src/services/ except one
+<domain>Service.ts per backend domain (plus authService.ts) or services/local/*.
+Every file that calls the API lists its <domain>Service.ts in imports_from. Do NOT
+plan frontend/src/routes.ts — it is derived from this plan, as is App.tsx's route
+table; pages must follow the PAGE NAMING → ROUTE convention from Step 3.
 
 Also verify feature grouping before returning:
 - Every file in "files" has feature_name set (non-null, non-empty)?

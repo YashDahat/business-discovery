@@ -31,10 +31,12 @@ public class FrontendValidationNode implements WorkerNode {
         Path frontendDir = ctx.getWorkspaceDir().resolve("frontend");
         Path frontendSrc = frontendDir.resolve("src");
 
-        // Unconditional pre-pass: a blank App.tsx (return <div/>) COMPILES, so it would sail
-        // past the build and only trip the routing assertion at the end. Repair it in place
-        // from the page files + link graph before we build.
-        com.business.discovery.worker.util.AppRouteSynthesizer.fixIfMissingRoutes(frontendSrc);
+        // Unconditional pre-pass: reconcile the route registry against reality — every
+        // manifest route must resolve to a real page (hard fail), every page on disk must be
+        // routed (appended), and App.tsx is re-derived from the reconciled manifest. A blank
+        // or partial App.tsx COMPILES, so without this it would sail past the build and only
+        // trip the routing assertion at the end.
+        com.business.discovery.worker.util.RouteManifestReconciler.reconcile(ctx.getWorkspaceDir());
 
         // Frontend↔backend contract: auto-fix API prefix doubling and report method/path
         // mismatches — runtime bugs the compiler and bundler cannot see.
@@ -58,14 +60,17 @@ public class FrontendValidationNode implements WorkerNode {
         //   2. NpmPackageFixer: installs missing npm packages / rewrites renamed package imports
         //   3. JsxTypeImportFixer: adds `import type { JSX }` where JSX.Element annotations slipped in
         //   4. UiImportRewriter: inventory-driven correction of invented Radix/shadcn imports
+        //   5. ServiceImportRewriter: retargets imports of pruned service modules to the
+        //      derived SDK module that actually exports each symbol
         // All deterministic and fast. Doing them first saves ErrorFixAgent rounds.
         boolean exportsFixed = TsxExportGuard.fix(frontendSrc);
         boolean packagesFixed = NpmPackageFixer.fix(frontendDir, initial.output(), buildTool);
         boolean jsxImportsFixed = com.business.discovery.worker.util.JsxTypeImportFixer.fix(frontendSrc);
         boolean uiImportsFixed = com.business.discovery.worker.util.UiImportRewriter.fix(frontendSrc,
                 com.business.discovery.worker.util.UiComponentInventory.build(frontendDir));
+        boolean svcImportsFixed = com.business.discovery.worker.util.ServiceImportRewriter.fix(frontendSrc);
 
-        if (exportsFixed || packagesFixed || jsxImportsFixed || uiImportsFixed) {
+        if (exportsFixed || packagesFixed || jsxImportsFixed || uiImportsFixed || svcImportsFixed) {
             BuildResult postFix = buildTool.runNpmBuild(frontendDir);
             if (postFix.success()) {
                 log.info("[FrontendValidationNode] npm build passed after mechanical fixes — skipping ErrorFixAgent");
