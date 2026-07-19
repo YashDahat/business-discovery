@@ -26,6 +26,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Launches a generated project's docker-compose stack and asserts it actually works.
@@ -244,20 +245,21 @@ public class ComposeLaunchService {
         }
 
         String loginPath = loginPath(workspace);
+        List<String> idFields = loginIdentifierFields(workspace);
         List<String> tried = new ArrayList<>();
         for (SeededCredentialFinder.Credential c : candidates) {
             try {
                 HttpResponse<String> r = postJson(baseUrl + loginPath,
-                        "{\"email\":\"%s\",\"password\":\"%s\"}".formatted(c.email(), c.password()));
+                        loginBody(idFields, c.identifier(), c.password()));
                 String token = extractToken(r.body());
                 if (r.statusCode() == 200 && token != null) {
                     flows.add(new FlowResult("admin login", true,
-                            "200 as " + c.email() + " (seeded by " + c.source() + ")"));
+                            "200 as " + c.identifier() + " (seeded by " + c.source() + ")"));
                     return token;
                 }
-                tried.add(c.email() + "/" + c.password() + "→" + r.statusCode());
+                tried.add(c.identifier() + "/" + c.password() + "→" + r.statusCode());
             } catch (Exception e) {
-                tried.add(c.email() + "→error");
+                tried.add(c.identifier() + "→error");
             }
         }
         flows.add(new FlowResult("admin login", false,
@@ -343,6 +345,57 @@ public class ComposeLaunchService {
             // fall through to the convention
         }
         return "/api/v1/auth/login";
+    }
+
+    private static final Pattern DTO_STRING_FIELD = Pattern.compile("private\\s+String\\s+(\\w+)");
+    private static final Set<String> PASSWORD_FIELDS =
+            Set.of("password", "pass", "pwd", "passwd", "secret");
+
+    /**
+     * The identifier field(s) the login DTO actually declares — circuit-house's AuthRequest
+     * took {@code username}, but the probe hardcoded {@code {"email": …}} and could never log
+     * in. Reads the login request DTO's String fields (minus the password), so we send the
+     * identifier under the key the backend binds. Falls back to trying both common names.
+     */
+    List<String> loginIdentifierFields(Path workspace) {
+        Path backendSrc = workspace.resolve("backend/src/main/java");
+        if (Files.exists(backendSrc)) {
+            try (Stream<Path> s = Files.walk(backendSrc)) {
+                LinkedHashSet<String> fields = new LinkedHashSet<>();
+                s.filter(p -> p.toString().endsWith(".java"))
+                 .filter(ComposeLaunchService::looksLikeLoginDto)
+                 .forEach(p -> {
+                     try {
+                         Matcher m = DTO_STRING_FIELD.matcher(Files.readString(p));
+                         while (m.find()) {
+                             if (!PASSWORD_FIELDS.contains(m.group(1).toLowerCase())) fields.add(m.group(1));
+                         }
+                     } catch (IOException ignored) {
+                     }
+                 });
+                if (!fields.isEmpty()) return new ArrayList<>(fields);
+            } catch (IOException ignored) {
+                // fall through to the convention
+            }
+        }
+        return List.of("username", "email");
+    }
+
+    private static boolean looksLikeLoginDto(Path p) {
+        String n = p.getFileName().toString().toLowerCase();
+        boolean roleName = n.contains("auth") || n.contains("login")
+                || n.contains("signin") || n.contains("credential");
+        return roleName && (n.contains("request") || n.contains("dto"));
+    }
+
+    /** Sends the identifier under every candidate field, so whichever the DTO binds, wins. */
+    static String loginBody(List<String> idFields, String identifier, String password) {
+        StringBuilder sb = new StringBuilder("{");
+        for (String f : idFields) {
+            sb.append('"').append(f).append("\":\"").append(identifier).append("\",");
+        }
+        sb.append("\"password\":\"").append(password).append("\"}");
+        return sb.toString();
     }
 
     /** Tolerates token / accessToken / jwt / jwtToken — the field name varies per run. */

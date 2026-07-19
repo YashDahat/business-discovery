@@ -64,10 +64,34 @@ class SeededCredentialFinderTest {
         assertThat(creds).extracting(SeededCredentialFinder.Credential::password)
                 .contains("adminpass", "adminpassword");
         assertThat(creds).allSatisfy(c ->
-                assertThat(c.email()).isEqualTo("admin@circuithouse.com"));
+                assertThat(c.identifier()).isEqualTo("admin@circuithouse.com"));
         // both seeders are surfaced so the gate can try each — it cannot know which won the race
         assertThat(creds).extracting(SeededCredentialFinder.Credential::source)
                 .contains("DataSeeder.java", "AdminInitializer.java");
+    }
+
+    @Test
+    void recoversRawConstructorSeeder() throws Exception {
+        // circuit-house 2026-07-17: username identifier, raw password literal, encoding happens
+        // inside createUser — no .encode("...") at the call site, so the old finder saw nothing.
+        write("com/circuithouse/config/AdminInitializer.java", """
+                package com.circuithouse.config;
+
+                public class AdminInitializer {
+                    public void run(String... args) {
+                        if (!userService.existsByUsername("admin")) {
+                            User adminUser = new User("admin", "adminpass", Set.of(Role.ADMIN));
+                            userService.createUser(adminUser);
+                        }
+                    }
+                }
+                """);
+
+        List<SeededCredentialFinder.Credential> creds =
+                SeededCredentialFinder.find(srcDir(), root.resolve("nope.properties"));
+
+        assertThat(creds).extracting(SeededCredentialFinder.Credential::identifier).contains("admin");
+        assertThat(creds).extracting(SeededCredentialFinder.Credential::password).contains("adminpass");
     }
 
     @Test
@@ -82,7 +106,7 @@ class SeededCredentialFinderTest {
         List<SeededCredentialFinder.Credential> creds = SeededCredentialFinder.find(srcDir(), props);
 
         assertThat(creds).hasSize(1);
-        assertThat(creds.get(0).email()).isEqualTo("owner@example.com");
+        assertThat(creds.get(0).identifier()).isEqualTo("owner@example.com");
         assertThat(creds.get(0).password()).isEqualTo("changeme123");
     }
 

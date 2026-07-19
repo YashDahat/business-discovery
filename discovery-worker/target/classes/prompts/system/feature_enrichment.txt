@@ -77,6 +77,35 @@ If this feature is auth-ui, declare the key name explicitly in featureInstructio
 10. SHARED LAYOUT COMPONENTS
 Public pages MUST wrap content in <Layout> from @/components/Layout. Admin pages MUST wrap content in <AdminLayout> from @/components/AdminLayout. The nav/sidebar is NEVER duplicated inside individual page files — it lives only in Layout.tsx / AdminLayout.tsx.
 
+# DEPENDENCY DIRECTION (cross-feature wiring — bean cycles crash the app at BOOT)
+
+Declare in "depends_on_features" the slug of every OTHER feature whose classes or endpoints this
+feature's files inject or call. You already work this out for rule 4 (INTER-FILE WIRING) and rule 5
+(CROSS-FEATURE CONTRACTS) — this just states it as data. List a feature if any file here injects one
+of its @Service/@Component beans, or (FRONTEND) calls one of its endpoints. Do not list this feature
+itself; intra-feature wiring is not a cross-feature dependency. Emit [] when nothing is called.
+
+Cross-feature dependencies must run in ONE direction only. If feature A injects a service from
+feature B, then B must never inject a service from A — Spring cannot construct either bean and the
+app dies at startup with "The dependencies of some of the beans in the application context form a
+cycle". The compiler does not catch this; it surfaces only when the container boots.
+
+Features are enriched one at a time, so when an earlier feature already declared a dependency on
+this one, that constraint is stated explicitly in the user message under DEPENDENCY DIRECTION —
+obey it exactly. Absent that section, still keep dependencies one-directional and prefer depending
+DOWNWARD (controllers → services → repositories; feature-specific → shared).
+
+When this feature's logic must cause an update inside a feature that depends on it, do ONE of:
+  (a) CONTROLLER ORCHESTRATION (preferred) — this feature's service RETURNS the outcome, and the
+      controller owning the HTTP entry point injects both services and calls them in sequence.
+      Example: PaymentController injects PaymentService AND OrderService;
+      paymentService.processPaymentStatus(request) returns OrderStatus; the controller then calls
+      orderService.updateOrderStatus(orderId, status). PaymentService never holds OrderService.
+  (b) SPRING EVENT — this feature's service publishes via ApplicationEventPublisher and the
+      dependent feature consumes with @EventListener. Use only when no shared controller exists.
+Never resolve a cycle with @Lazy, field @Autowired, or setter injection — those hide the cycle
+instead of removing it, and leave the tangled design in place.
+
 # PER-FILE STRUCTURAL DETAIL RULES (the "files" array)
 
 ## Exactness
@@ -120,7 +149,7 @@ files that do.
 ## SecurityConfig authorization model — this exact order, no exceptions:
   .authorizeHttpRequests(auth -> auth
       .requestMatchers("/api/v1/auth/**").permitAll()
-      .requestMatchers("/api/v1/<public-endpoints>/**").permitAll()   // menu, public reservations, etc.
+      .requestMatchers(HttpMethod.GET, <PUBLIC CATALOG GET PATHS>).permitAll()
       .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
       .requestMatchers("/api/**").authenticated()
       .anyRequest().permitAll()                                       // static files + SPA routes
@@ -128,6 +157,45 @@ files that do.
 The LAST rule MUST be anyRequest().permitAll() — NEVER anyRequest().authenticated().
 Spring Security intercepts ALL requests including /index.html and /assets/*.js;
 authenticated() there blocks the entire frontend.
+
+DECIDING THE PUBLIC GET LINE — mandatory, never omit it, never leave a placeholder:
+A first-time visitor must browse the business BEFORE logging in. Classify by WHOSE DATA IT IS —
+this rule is the same for every industry, only the nouns change:
+  PUBLIC — the catalogue the business markets itself with, readable by a stranger.
+      restaurant: menu, dishes, events, gallery, testimonials
+      gym / studio: classes, trainers, schedules, membership plans
+      salon / spa: services, stylists, packages, price list
+      clinic: doctors, specialities, departments, treatments
+      real estate: listings, properties, projects, agents, amenities
+      education / coaching: courses, batches, faculty, curriculum
+      retail: products, collections, brands, categories
+      any business: about, contact, hours, location, branches, FAQ, blog, reviews
+  AUTHENTICATED — one identified customer's OWN data, any method including GET:
+      orders, bookings, reservations, appointments, enrolments, cart, checkout, payments,
+      invoices, loyalty, profile, notifications, addresses, saved/shortlisted items.
+  ADMIN — everything under /api/*/admin/**, for the owner.
+A public WRITE is legitimate where a stranger must submit something without an account —
+contact/enquiry forms, a "request a callback", an unauthenticated table booking. Mark those
+"access": "public" on the POST and permit that method explicitly; never open the whole path.
+Enumerate the ACTUAL public GET paths THIS project serves, one glob per public domain, e.g.
+      .requestMatchers(HttpMethod.GET, "/api/v1/classes/**", "/api/v1/trainers/**",
+                       "/api/v1/plans/**").permitAll()
+Import org.springframework.http.HttpMethod. A missing or placeholder public GET line 403s the
+entire storefront to anonymous visitors — the single most common runtime failure of this
+pipeline. If a project genuinely has no public catalog, say so explicitly; do not silently drop
+the line.
+Set "access" on EVERY entry in api_endpoints to the same classification — that declaration is
+what the build reads to write and to verify these matchers.
+
+## Login failures must be 401, never 500
+authenticationManager.authenticate(...) throws AuthenticationException (a BadCredentialsException
+subclass) on a wrong password. It is thrown from INSIDE the login controller method, so
+@RestControllerAdvice catches it — and a generic @ExceptionHandler(Exception.class) maps it to
+500, which reads as a server crash and derails every debugging pass. GlobalExceptionHandler MUST
+declare, BEFORE the generic handler:
+    @ExceptionHandler(org.springframework.security.core.AuthenticationException.class)
+    -> ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(...)
+A wrong password is a 401, not a 500.
 
 ## ROLE_ authority consistency (mismatch = every admin endpoint 403s)
 hasRole("ADMIN") and @PreAuthorize("hasRole('ADMIN')") match the authority "ROLE_ADMIN".
@@ -211,6 +279,7 @@ EXCEPTION CLASSES — never instruct a service to throw an exception that isn't 
 Return ONLY this JSON object. No markdown fences. No prose. No preamble:
 {
   "feature_instruction": "<complete holistic brief covering all files in this feature>",
+  "depends_on_features": ["<slug of every OTHER feature this feature injects or calls — [] if none>"],
   "change_required": true | false,
   "files": [
     {
@@ -224,7 +293,7 @@ Return ONLY this JSON object. No markdown fences. No prose. No preamble:
         { "name": "<fieldName>", "type": "<Java or TS type>", "description": "<purpose + constraints e.g. not null, max 100>" }
       ],
       "api_endpoints": [
-        { "method": "GET|POST|PUT|DELETE", "path": "/api/...", "request_body": "<JSON shape or null>", "response_body": "<type>", "description": "<...>" }
+        { "method": "GET|POST|PUT|DELETE", "path": "/api/...", "access": "public|authenticated|admin", "request_body": "<JSON shape or null>", "response_body": "<type>", "description": "<...>" }
       ],
       "api_endpoints_consumed": [
         { "method": "GET|POST", "path": "/api/...", "description": "<...>" }
@@ -234,4 +303,5 @@ Return ONLY this JSON object. No markdown fences. No prose. No preamble:
 }
 Include one "files" entry for EVERY file in this feature. Use null for field lists that
 don't apply to a file's layer (per the layer-specific rules). Omit "change_required" if
-no requestedChanges was provided.
+no requestedChanges was provided. Always include "depends_on_features" — [] when this
+feature calls nothing outside itself.

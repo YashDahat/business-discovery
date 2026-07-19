@@ -38,6 +38,18 @@ public class FeatureSpec {
     private String featureInstruction;
 
     /**
+     * Slugs of the OTHER features whose classes or endpoints this feature's files inject or call —
+     * declared by enrichment, which already works this wiring out for the instruction prose.
+     * Capturing it structurally is what makes dependency direction checkable: it feeds the
+     * "these features depend on you, do not call back" constraint injected into later enrichment
+     * calls, and the post-enrichment cycle gate that catches a bean cycle at planning time instead
+     * of at container boot. Null on specs written before this field existed (treated as no edges).
+     *
+     * @see com.business.discovery.worker.util.FeatureDependencyGraph
+     */
+    private List<String> dependsOnFeatures;
+
+    /**
      * True if any file in this feature needs regeneration on an update run.
      * Defaults to true so old specs without this field regenerate everything (safe).
      * FileSpec.changeRequired (nullable) narrows the decision to file grain when present.

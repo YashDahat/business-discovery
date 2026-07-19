@@ -41,6 +41,15 @@ SPRING SECURITY (Security 6.x, no WebSecurityConfigurerAdapter):
   Use .authorizeHttpRequests()              (NOT .authorizeRequests())
   Use .csrf(csrf -> csrf.disable())         (NOT .csrf().disable())
   AuthenticationManager comes from AuthenticationConfiguration.getAuthenticationManager()
+  Authorization order (public catalog reachable by anonymous visitors, personal data locked):
+    .requestMatchers("/api/v1/auth/**").permitAll()
+    .requestMatchers(HttpMethod.GET, "/api/v1/menus/**", "/api/v1/events/**", ...).permitAll()  // the catalog GETs the brief markets — menu, events, testimonials, gallery
+    .requestMatchers("/api/*/admin/**").hasRole("ADMIN")
+    .requestMatchers("/api/**").authenticated()   // orders, reservations, loyalty, profile — a customer's own data
+    .anyRequest().permitAll()                      // static files + SPA routes
+  NEVER omit the public GET line — a locked catalog 403s the whole storefront for anonymous
+  visitors. Import org.springframework.http.HttpMethod. anyRequest() MUST be permitAll(), never
+  authenticated() (that blocks index.html and the JS bundle).
 
 SPRING DATA JPA — every repository method you call MUST be declared in the interface:
   Undeclared methods do NOT auto-generate — findByEmail(), findByRazorpayOrderId(), etc.

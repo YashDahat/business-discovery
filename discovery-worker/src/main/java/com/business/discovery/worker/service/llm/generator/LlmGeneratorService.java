@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -106,6 +107,20 @@ public abstract class LlmGeneratorService {
                                      Map<String, Object> peerApiSummaries,
                                      BriefContext brief,
                                      WorkspaceReader workspace) {
+        return enrichFeature(feature, featureFiles, peerApiSummaries, brief, workspace, Set.of());
+    }
+
+    /**
+     * @param dependentFeatures slugs of features already declaring a dependency on this one —
+     *                          this feature must not wire back into them or the generated app dies
+     *                          at boot on a Spring bean cycle. Empty for the first feature enriched.
+     */
+    public FeatureSpec enrichFeature(FeatureSpec feature,
+                                     List<FileSpec> featureFiles,
+                                     Map<String, Object> peerApiSummaries,
+                                     BriefContext brief,
+                                     WorkspaceReader workspace,
+                                     Set<String> dependentFeatures) {
         String requestedChangesSection = (brief.requestedChanges() != null
                 && !brief.requestedChanges().isBlank())
                 ? "\n== REQUESTED CHANGES ==\n" + brief.requestedChanges() + "\n"
@@ -141,6 +156,7 @@ public abstract class LlmGeneratorService {
                 .with("colorScheme",             brief.colorScheme()     != null ? brief.colorScheme()     : "")
                 .with("tone",                    brief.tone()            != null ? brief.tone()            : "")
                 .with("requestedChangesSection", requestedChangesSection)
+                .with("dependencyDirectionSection", buildDependencyDirectionSection(dependentFeatures))
                 .render();
 
         Exception lastError = null;
@@ -163,6 +179,7 @@ public abstract class LlmGeneratorService {
                 if (!requestedChangesSection.isBlank() && result.has("change_required")) {
                     feature.setChangeRequired(result.path("change_required").asBoolean(true));
                 }
+                feature.setDependsOnFeatures(parseDependsOnFeatures(result, feature, dependentFeatures));
                 mergeFileDetail(feature, featureFiles, result);
                 return feature;
 
@@ -181,6 +198,67 @@ public abstract class LlmGeneratorService {
                 ? we
                 : new WorkerException(FailureType.CODE,
                         "enrichFeature failed after 2 attempts for: " + feature.getFeatureName(), lastError);
+    }
+
+    /**
+     * Hard constraint injected when earlier-enriched features already depend on this one. Without it
+     * the model behaves correctly and still produces a cycle: those features are published in the
+     * peer API contracts with real signatures, and rule 5 instructs it to bind to exactly those.
+     * Nothing else in the prompt conveys that the edge is one-way.
+     */
+    private static String buildDependencyDirectionSection(Set<String> dependentFeatures) {
+        if (dependentFeatures == null || dependentFeatures.isEmpty()) return "";
+        return """
+
+                == DEPENDENCY DIRECTION (HARD CONSTRAINT — overrides the peer contracts above) ==
+                These features already declared a dependency on THIS feature: %s
+
+                This feature MUST NOT inject, autowire, or call any @Service/@Component class owned by
+                them. Doing so forms a Spring bean cycle and the generated app dies at startup with
+                "The dependencies of some of the beans in the application context form a cycle".
+                Their entries in the peer API contracts above are REFERENCE ONLY — do not wire to them,
+                and do not list any of them in depends_on_features.
+
+                When this feature's logic must cause an update inside one of them, use ONE of:
+                  (a) CONTROLLER ORCHESTRATION (preferred) — this feature's service RETURNS the outcome,
+                      and the controller owning the HTTP entry point injects both services and calls
+                      them in sequence.
+                  (b) SPRING EVENT — publish via ApplicationEventPublisher; the dependent feature
+                      consumes it with @EventListener. Use only when no shared controller exists.
+
+                Never resolve this with @Lazy, field @Autowired, or setter injection.
+                """.formatted(String.join(", ", dependentFeatures));
+    }
+
+    /**
+     * Reads the declared cross-feature edges. Declarations that violate the injected constraint are
+     * kept rather than stripped — dropping the edge here would hide the cycle from the
+     * post-enrichment gate while the cyclic wiring stayed in the instruction prose.
+     */
+    private static List<String> parseDependsOnFeatures(JsonNode result,
+                                                       FeatureSpec feature,
+                                                       Set<String> dependentFeatures) {
+        JsonNode declared = result.path("depends_on_features");
+        if (!declared.isArray()) {
+            log.warn("[enrichFeature] No depends_on_features array for '{}' — treating as no cross-feature edges",
+                    feature.getFeatureName());
+            return List.of();
+        }
+
+        List<String> deps = new ArrayList<>();
+        for (JsonNode entry : declared) {
+            String value = entry.asText(null);
+            if (value == null || value.isBlank()) continue;
+            String trimmed = value.trim();
+            if (!deps.contains(trimmed)) deps.add(trimmed);
+        }
+
+        List<String> violations = deps.stream().filter(dependentFeatures::contains).toList();
+        if (!violations.isEmpty()) {
+            log.warn("[enrichFeature] '{}' declared a back-dependency on {} despite the direction constraint"
+                     + " — the cycle gate will reject this spec", feature.getFeatureName(), violations);
+        }
+        return deps;
     }
 
     /**

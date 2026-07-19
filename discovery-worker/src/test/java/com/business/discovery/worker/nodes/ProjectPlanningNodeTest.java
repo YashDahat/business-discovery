@@ -166,7 +166,7 @@ class ProjectPlanningNodeTest {
         when(llm.generateArchitectureSpec(any(BriefContext.class), any())).thenReturn(spec);
 
         List<String> enrichOrder = new java.util.ArrayList<>();
-        org.mockito.Mockito.lenient().when(enrichLlm.enrichFeature(any(), any(), any(), any(), any()))
+        org.mockito.Mockito.lenient().when(enrichLlm.enrichFeature(any(), any(), any(), any(), any(), any()))
                 .thenAnswer(inv -> {
                     com.business.discovery.worker.service.llm.FeatureSpec f = inv.getArgument(0);
                     enrichOrder.add(f.getFeatureName());

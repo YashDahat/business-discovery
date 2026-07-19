@@ -115,4 +115,37 @@ class ComposeLaunchServiceTest {
         Path override = service.writeOverride(workspace, new LaunchSpec("smoke-x", null, null));
         assertThat(Files.readString(override)).doesNotContain("image:");
     }
+
+    // ── Login probe field derivation (fix E) ─────────────────────────────────
+
+    private void writeAuthDto(String rel, String body) throws Exception {
+        Path p = workspace.resolve("backend/src/main/java").resolve(rel);
+        Files.createDirectories(p.getParent());
+        Files.writeString(p, body);
+    }
+
+    @Test
+    void derivesLoginFieldFromAuthRequestDto() throws Exception {
+        // circuit-house's DTO took username, not email
+        writeAuthDto("com/circuithouse/dto/AuthRequest.java", """
+                package com.circuithouse.dto;
+                public class AuthRequest {
+                    private String username;
+                    private String password;
+                }
+                """);
+
+        assertThat(service.loginIdentifierFields(workspace)).containsExactly("username");
+    }
+
+    @Test
+    void loginFieldFallsBackToBothWhenNoDtoFound() {
+        assertThat(service.loginIdentifierFields(workspace)).containsExactlyInAnyOrder("username", "email");
+    }
+
+    @Test
+    void loginBodySendsIdentifierUnderEveryField() {
+        String body = ComposeLaunchService.loginBody(java.util.List.of("username", "email"), "admin", "adminpass");
+        assertThat(body).isEqualTo("{\"username\":\"admin\",\"email\":\"admin\",\"password\":\"adminpass\"}");
+    }
 }

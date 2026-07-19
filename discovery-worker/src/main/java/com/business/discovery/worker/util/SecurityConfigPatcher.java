@@ -1,11 +1,24 @@
 package com.business.discovery.worker.util;
 
+import com.business.discovery.worker.service.llm.ApiEndpoint;
+import com.business.discovery.worker.service.llm.ArchitectureSpec;
+import com.business.discovery.worker.service.llm.FileSpec;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 /**
@@ -18,6 +31,10 @@ import java.util.stream.Stream;
  *  3. AuthenticationManager @Bean via AuthenticationConfiguration — AuthController needs it
  *  4. Static assets + SPA routes permitted — React SPA must load without a session
  *  5. anyRequest().permitAll() — server-side auth is on /api/** only; React handles UI auth
+ *  6. Tiered /api authorization — a blanket .requestMatchers("/api/**").authenticated()
+ *     403s the public catalog to anonymous visitors (circuit-house 2026-07-17: every menu,
+ *     events and testimonials GET returned 403, the storefront was unreachable). We insert a
+ *     public-GET permit derived from the real controllers, classified by {@link ApiAccessPolicy}.
  *
  * Runs before ErrorFixAgent in BackendValidationNode so these structural gaps don't
  * consume agent rounds that should be spent on real business logic errors.
@@ -27,11 +44,19 @@ public final class SecurityConfigPatcher {
 
     private SecurityConfigPatcher() {}
 
+    /** Heuristic-only overload — no plan available to read access declarations from. */
+    public static boolean patch(Path backendSrcDir) {
+        return patch(backendSrcDir, null);
+    }
+
     /**
      * Finds SecurityConfig.java under backendSrcDir and patches it.
-     * Returns true if any changes were made.
+     *
+     * @param workspace project root, used to read the plan's per-endpoint {@code access}
+     *                  declarations from ARCHITECTURE.json; null falls back to the heuristic
+     * @return true if any changes were made
      */
-    public static boolean patch(Path backendSrcDir) {
+    public static boolean patch(Path backendSrcDir, Path workspace) {
         Optional<Path> configFile = findSecurityConfig(backendSrcDir);
         if (configFile.isEmpty()) {
             log.warn("[SecurityConfigPatcher] SecurityConfig.java not found under {} — skipping", backendSrcDir);
@@ -41,7 +66,7 @@ public final class SecurityConfigPatcher {
         Path file = configFile.get();
         try {
             String original = Files.readString(file);
-            String patched = applyPatches(original);
+            String patched = applyPatches(original, derivePublicPatterns(backendSrcDir, workspace));
             if (!patched.equals(original)) {
                 Files.writeString(file, patched);
                 log.info("[SecurityConfigPatcher] Patched SecurityConfig.java at {}", file);
@@ -55,7 +80,18 @@ public final class SecurityConfigPatcher {
         }
     }
 
+    /** Backward-compatible overload — no derived public paths (structural patches only). */
     static String applyPatches(String content) {
+        return applyPatches(content, Map.of());
+    }
+
+    /** Convenience overload for GET-only public patterns. */
+    static String applyPatches(String content, List<String> publicGetPatterns) {
+        return applyPatches(content,
+                publicGetPatterns.isEmpty() ? Map.of() : Map.of("GET", publicGetPatterns));
+    }
+
+    static String applyPatches(String content, Map<String, List<String>> publicByMethod) {
         content = fixImports(content);
         content = fixDaoProviderConstructor(content);
         content = fixPasswordEncoderBean(content);
@@ -63,7 +99,80 @@ public final class SecurityConfigPatcher {
         content = fixAuthenticationProviderBean(content);
         content = fixAuthenticationManagerBean(content);
         content = fixFilterChainPermitRules(content);
+        content = fixApiAuthorizationTiers(content, publicByMethod);
         return content;
+    }
+
+    /**
+     * Public matchers per HTTP method, derived from the controllers on disk and classified by
+     * {@link ApiAccessPolicy} — using the plan's own {@code access} declaration where present,
+     * which is what makes this work for a gym or a clinic and not just a restaurant.
+     *
+     * Reads controller SOURCE (not compiled classes), so it works at pre-compile patch time.
+     * Degrades to empty on any parse failure — the patcher then leaves authorization untouched.
+     *
+     * GET uses the domain glob (a public catalogue is public in whole); every other method
+     * uses the exact path, so a public contact-form POST never opens the rest of its domain.
+     */
+    static Map<String, List<String>> derivePublicPatterns(Path backendSrcDir, Path workspace) {
+        try {
+            Map<String, String> declared = readDeclaredAccess(workspace);
+            Map<String, TreeSet<String>> byMethod = new TreeMap<>();
+
+            for (ApiInventory.Endpoint e : ApiInventory.extract(backendSrcDir).endpoints()) {
+                String access = declared.get(endpointKey(e.httpMethod(), e.path()));
+                if (ApiAccessPolicy.classify(e.httpMethod(), e.path(), access) != ApiAccessPolicy.Tier.PUBLIC) {
+                    continue;
+                }
+                boolean isGet = "GET".equalsIgnoreCase(e.httpMethod());
+                String pattern = isGet
+                        ? ApiAccessPolicy.publicPathPattern(e.path())
+                        : ApiAccessPolicy.exactMatcherPattern(e.path());
+                if (pattern == null || pattern.contains("/auth/")) continue; // already permitted
+                byMethod.computeIfAbsent(e.httpMethod().toUpperCase(), k -> new TreeSet<>()).add(pattern);
+            }
+
+            // GET first — the catalogue line is the one a human reads for.
+            Map<String, List<String>> out = new LinkedHashMap<>();
+            if (byMethod.containsKey("GET")) out.put("GET", List.copyOf(byMethod.remove("GET")));
+            byMethod.forEach((m, p) -> out.put(m, List.copyOf(p)));
+            return out;
+        } catch (Exception e) {
+            log.warn("[SecurityConfigPatcher] Could not derive public endpoints: {}", e.getMessage());
+            return Map.of();
+        }
+    }
+
+    /** "METHOD /normalised/path" → the plan's declared access, for every planned endpoint. */
+    static Map<String, String> readDeclaredAccess(Path workspace) {
+        Map<String, String> out = new HashMap<>();
+        if (workspace == null || !ArchitectureJsonUtil.exists(workspace)) return out;
+        try {
+            ArchitectureSpec spec = ArchitectureJsonUtil.read(workspace);
+            if (spec.getFiles() == null) return out;
+            for (FileSpec f : spec.getFiles()) {
+                if (f.getApiEndpoints() == null) continue;
+                for (ApiEndpoint ep : f.getApiEndpoints()) {
+                    if (ep.getAccess() == null || ep.getPath() == null) continue;
+                    out.put(endpointKey(ep.getMethod(), ep.getPath()), ep.getAccess());
+                }
+            }
+        } catch (IOException e) {
+            log.warn("[SecurityConfigPatcher] Could not read access declarations: {}", e.getMessage());
+        }
+        return out;
+    }
+
+    /** Path-variable-name agnostic key, so {id} and {orderId} match between plan and controller. */
+    static String endpointKey(String method, String path) {
+        String m = method == null ? "" : method.trim().toUpperCase();
+        String p = path == null ? "" : path.trim();
+        int q = p.indexOf('?');
+        if (q >= 0) p = p.substring(0, q);
+        if (!p.startsWith("/")) p = "/" + p;
+        p = p.replaceAll("\\{[^}]*}", "{}");
+        if (p.length() > 1 && p.endsWith("/")) p = p.substring(0, p.length() - 1);
+        return m + " " + p;
     }
 
     // ── 1. Imports ────────────────────────────────────────────────────────────
@@ -75,6 +184,7 @@ public final class SecurityConfigPatcher {
             {"DaoAuthenticationProvider",   "org.springframework.security.authentication.dao.DaoAuthenticationProvider"},
             {"AuthenticationManager",       "org.springframework.security.authentication.AuthenticationManager"},
             {"AuthenticationConfiguration", "org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration"},
+            {"HttpMethod",                  "org.springframework.http.HttpMethod"},
         };
 
         for (String[] pair : needed) {
@@ -218,6 +328,46 @@ public final class SecurityConfigPatcher {
                 }
             }
         }
+        return content;
+    }
+
+    // ── 8. Tiered /api authorization — open the public catalog to anonymous visitors ─
+
+    // The blanket lockdown we insert the public-GET permit in front of. MULTILINE so the
+    // leading indent is captured and reused. Tolerates an optional version segment.
+    private static final Pattern API_CATCHALL_AUTHENTICATED = Pattern.compile(
+            "(?m)^([ \\t]*)\\.requestMatchers\\(\\s*\"/api/(?:v\\d+/)?\\*\\*\"\\s*\\)\\s*\\.authenticated\\(\\)");
+
+    private static String fixApiAuthorizationTiers(String content, Map<String, List<String>> publicByMethod) {
+        if (publicByMethod.isEmpty()) return content;
+        // Idempotent, and respects a config the model already tiered correctly.
+        if (content.contains(".requestMatchers(HttpMethod.")) return content;
+
+        Matcher m = API_CATCHALL_AUTHENTICATED.matcher(content);
+        if (!m.find()) {
+            log.info("[SecurityConfigPatcher] No blanket /api/** authenticated matcher — public tiering skipped");
+            return content;
+        }
+
+        String indent = m.group(1);
+        StringBuilder permitLines = new StringBuilder();
+        publicByMethod.forEach((method, patterns) -> {
+            if (patterns.isEmpty()) return;
+            String quoted = patterns.stream().map(p -> "\"" + p + "\"").collect(Collectors.joining(", "));
+            permitLines.append(indent).append(".requestMatchers(HttpMethod.").append(method)
+                       .append(", ").append(quoted).append(").permitAll()\n");
+        });
+        if (permitLines.isEmpty()) return content;
+
+        // Insert immediately BEFORE the catch-all so the public rules are evaluated first
+        // (Spring authorizes top-down, first match wins).
+        content = content.substring(0, m.start()) + permitLines + content.substring(m.start());
+
+        if (!content.contains("import org.springframework.http.HttpMethod;")) {
+            content = insertImport(content, "org.springframework.http.HttpMethod");
+        }
+        log.info("[SecurityConfigPatcher] Tiered API authorization — public matchers by method: {}",
+                publicByMethod);
         return content;
     }
 

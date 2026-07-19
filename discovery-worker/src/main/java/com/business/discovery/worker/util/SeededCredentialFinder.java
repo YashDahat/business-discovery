@@ -23,6 +23,14 @@ import java.util.stream.Stream;
  * AdminInitializer: "adminpassword" — whichever ran first won). So we read what the code
  * plants rather than what the config claims, and hand back every candidate for the gate
  * to try in turn.
+ *
+ * Two planting shapes are recognised, because circuit-house 2026-07-17 used the second and
+ * this finder saw nothing:
+ *   (a) encoder-at-the-call-site — {@code adminUser.setPassword(encoder.encode("adminpass"))}
+ *       or {@code new User(email, encoder.encode("pw"), roles)}; the plaintext sits in .encode().
+ *   (b) raw-constructor — {@code new User("admin", "adminpass", roles)} then
+ *       {@code createUser(u)} where encoding happens INSIDE the service; the plaintext is a
+ *       bare constructor argument, and the identifier is a username, not an email.
  */
 @Slf4j
 public final class SeededCredentialFinder {
@@ -32,10 +40,17 @@ public final class SeededCredentialFinder {
             Pattern.compile("\\.encode\\(\\s*\"([^\"]{3,})\"\\s*\\)");
     private static final Pattern EMAIL_LITERAL =
             Pattern.compile("\"([\\w.+-]+@[\\w.-]+\\.\\w+)\"");
+    /** First string arg of a User(...) constructor — the login identifier (username or email). */
+    private static final Pattern USER_FIRST_ARG =
+            Pattern.compile("new\\s+\\w*User\\s*\\(\\s*\"([^\"]+)\"");
+    /** Second string arg of a User(...) constructor — a raw (unencoded) password literal. */
+    private static final Pattern USER_SECOND_ARG =
+            Pattern.compile("new\\s+\\w*User\\s*\\(\\s*\"[^\"]+\"\\s*,\\s*\"([^\"]{3,})\"");
     private static final Pattern PROPERTY_DEFAULT =
             Pattern.compile("^admin\\.(email|password)\\s*=\\s*\\$\\{[^:}]+:([^}]*)}", Pattern.MULTILINE);
 
-    public record Credential(String email, String password, String source) {}
+    /** identifier is a username OR an email — whatever the login DTO's field wants. */
+    public record Credential(String identifier, String password, String source) {}
 
     private SeededCredentialFinder() {}
 
@@ -51,29 +66,36 @@ public final class SeededCredentialFinder {
             String content = read(seeder);
             if (content == null) continue;
 
-            Set<String> emails = matches(EMAIL_LITERAL, content);
-            Set<String> passwords = matches(ENCODED_PASSWORD, content);
-            String name = seeder.getFileName().toString();
+            // Identifiers: email literals, plus usernames from User(...) constructor first args.
+            Set<String> identifiers = matches(EMAIL_LITERAL, content);
+            Set<String> usernames = matches(USER_FIRST_ARG, content);
+            usernames.removeIf(u -> u.contains("@")); // emails already captured above
+            identifiers.addAll(usernames);
 
+            // Passwords: encoder-wrapped literals, plus raw User(...) constructor second args.
+            Set<String> passwords = matches(ENCODED_PASSWORD, content);
+            passwords.addAll(matches(USER_SECOND_ARG, content));
+
+            String name = seeder.getFileName().toString();
             // small cross product — a seeder plants a handful of users at most
-            for (String email : emails) {
+            for (String identifier : identifiers) {
                 for (String password : passwords) {
-                    out.add(new Credential(email, password, name));
+                    out.add(new Credential(identifier, password, name));
                 }
             }
         }
 
         String propsContent = read(applicationProperties);
         if (propsContent != null) {
-            String email = null;
+            String identifier = null;
             String password = null;
             Matcher m = PROPERTY_DEFAULT.matcher(propsContent);
             while (m.find()) {
-                if ("email".equals(m.group(1))) email = m.group(2);
+                if ("email".equals(m.group(1))) identifier = m.group(2);
                 else password = m.group(2);
             }
-            if (email != null && password != null && !email.isBlank() && !password.isBlank()) {
-                out.add(new Credential(email, password, "application.properties"));
+            if (identifier != null && password != null && !identifier.isBlank() && !password.isBlank()) {
+                out.add(new Credential(identifier, password, "application.properties"));
             }
         }
 
@@ -82,14 +104,18 @@ public final class SeededCredentialFinder {
         return out;
     }
 
-    /** Files that plant users: anything invoking a password encoder on a literal. */
+    /**
+     * Files that plant users: either encode a literal password, or construct a User with a
+     * literal identifier (the raw-constructor shape, where encoding happens in the service).
+     */
     static List<Path> seederSources(Path backendSrcDir) {
         if (!Files.exists(backendSrcDir)) return List.of();
         try (Stream<Path> s = Files.walk(backendSrcDir)) {
             return s.filter(p -> p.toString().endsWith(".java"))
                     .filter(p -> {
                         String c = read(p);
-                        return c != null && ENCODED_PASSWORD.matcher(c).find();
+                        return c != null
+                                && (ENCODED_PASSWORD.matcher(c).find() || USER_FIRST_ARG.matcher(c).find());
                     })
                     .toList();
         } catch (IOException e) {

@@ -16,6 +16,7 @@ import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.service.GitService;
 import com.business.discovery.worker.service.SpringInitializrClient;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.FeatureDependencyGraph;
 import com.business.discovery.worker.util.SlugUtil;
 import com.business.discovery.worker.util.WorkspaceReader;
 import lombok.extern.slf4j.Slf4j;
@@ -32,6 +33,7 @@ import java.nio.file.StandardCopyOption;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -754,12 +756,22 @@ public class ProjectPlanningNode implements WorkerNode {
             Map<String, Map<String, Object>> allPeerSummaries = buildAllPeerSummaries(features, filesByFeature);
             Map<String, Object> peerSummaries = buildPeerSummariesExcluding(allPeerSummaries, feature.getFeatureName());
 
+            // Features enriched earlier that already depend on this one. They appear in the peer
+            // summaries above with real signatures, and the prompt tells the model to bind to those —
+            // so without an explicit "this edge is one-way" constraint, wiring back to them is the
+            // natural thing to do, and that back edge is a bean cycle that only shows up at boot.
+            Set<String> dependents = FeatureDependencyGraph.dependentsOf(feature.getFeatureName(), features);
+            if (!dependents.isEmpty()) {
+                log.info("[ProjectPlanningNode] {} is depended on by {} — forbidding back-dependencies",
+                        feature.getFeatureName(), dependents);
+            }
+
             log.info("[ProjectPlanningNode] Enriching feature: {} ({} files)",
                     feature.getFeatureName(), featureFiles.size());
 
             // WorkerException (CODE/INFRA) propagates immediately — no catch-and-swallow
             // (enrichFeature mutates `feature` in place; it remains referenced by spec.features)
-            enrichLlm.enrichFeature(feature, featureFiles, peerSummaries, briefCtx, workspaceReader);
+            enrichLlm.enrichFeature(feature, featureFiles, peerSummaries, briefCtx, workspaceReader, dependents);
 
             // Checkpoint after every feature — enables resume on container retry
             try {
@@ -775,7 +787,65 @@ public class ProjectPlanningNode implements WorkerNode {
                 gitService.commitEnrichmentCheckpoint(workspace, feature.getFeatureName(), branch);
             }
         }
+        enforceAcyclicFeatureDependencies(spec, ordered, workspace);
+
         log.info("[ProjectPlanningNode] Feature enrichment complete — {} features processed", features.size());
+    }
+
+    /**
+     * Safety net behind the per-feature direction constraint: if the enriched spec still contains a
+     * dependency cycle, fail HERE — at planning time, before a single Java file is generated —
+     * rather than letting it surface at container boot four stages later (codegen → compile →
+     * image build → smoke), which is what a Spring bean cycle costs when it escapes.
+     *
+     * <p>Before throwing, the back-edge feature's enrichment is cleared and checkpointed so a
+     * container retry re-enriches just that feature. On the retry its dependent is still enriched
+     * and still declares the forward edge, so the direction constraint is now injected into the
+     * prompt that previously had none — the retry gets a genuinely different attempt rather than
+     * replaying the same failure until the task is marked FAILED.
+     */
+    private void enforceAcyclicFeatureDependencies(ArchitectureSpec spec,
+                                                   List<FeatureSpec> ordered,
+                                                   Path workspace) {
+        List<FeatureSpec> features = spec.getFeatures();
+        List<String> cycle = FeatureDependencyGraph.findCycle(features);
+        if (cycle.isEmpty()) return;
+
+        String path = String.join(" → ", cycle);
+
+        Map<String, Integer> enrichmentOrder = new HashMap<>();
+        for (int i = 0; i < ordered.size(); i++) {
+            enrichmentOrder.put(ordered.get(i).getFeatureName(), i);
+        }
+        // The back edge belongs to whichever feature in the cycle was enriched LAST — the earlier
+        // ones could not have seen it to depend on it.
+        String backEdgeOwner = cycle.stream()
+                .distinct()
+                .max(Comparator.comparingInt(name -> enrichmentOrder.getOrDefault(name, -1)))
+                .orElse(null);
+
+        log.error("[ProjectPlanningNode] Feature dependency cycle: {} — back edge owned by '{}'",
+                path, backEdgeOwner);
+
+        for (FeatureSpec f : features) {
+            if (f.getFeatureName() != null && f.getFeatureName().equals(backEdgeOwner)) {
+                f.setFeatureInstruction(null);
+                f.setDependsOnFeatures(null);
+                break;
+            }
+        }
+        try {
+            ArchitectureJsonUtil.write(workspace, spec);
+        } catch (Exception e) {
+            log.warn("[ProjectPlanningNode] Could not checkpoint cleared feature '{}': {}",
+                    backEdgeOwner, e.getMessage());
+        }
+
+        throw new WorkerException(FailureType.CODE,
+                "Feature dependency cycle: " + path + ". '" + backEdgeOwner + "' wires back into a"
+                + " feature that already depends on it, which is a Spring bean cycle that crashes the"
+                + " app at boot. Cleared its enrichment for retry — it must return its result to the"
+                + " shared controller (or publish an event) instead of calling back.");
     }
 
     /** BACKEND and SHARED enrich before FRONTEND so frontend sees real backend API summaries. */

@@ -9,6 +9,7 @@ import com.business.discovery.worker.service.BuildToolService.BuildResult;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import com.business.discovery.worker.util.EnvVarScanner;
 import com.business.discovery.worker.util.MavenDependencyInjector;
+import com.business.discovery.worker.util.AuthExceptionHandlerPatcher;
 import com.business.discovery.worker.util.MissingBeanPatcher;
 import com.business.discovery.worker.util.RepositoryMethodInjector;
 import com.business.discovery.worker.util.JwtCircularDependencyPatcher;
@@ -48,6 +49,14 @@ public class BackendValidationNode implements WorkerNode {
         // injected-but-never-declared infrastructure beans (RestTemplate) — circuit-house
         // attempt 2 compiled clean and then crash-looped on context refresh
         MissingBeanPatcher.fix(backendSrcJava);
+        // SecurityConfig structural beans + the tiered /api authorization that opens the public
+        // catalog to anonymous visitors. Runtime-correctness: a blanket /api/** lockdown compiles
+        // clean and 403s the whole storefront (circuit-house 2026-07-17 attempt 4 compiled first
+        // try and still shipped it), so this MUST run unconditionally, not only on compile failure.
+        SecurityConfigPatcher.patch(backendSrcJava, ctx.getWorkspaceDir());
+        // a wrong password must be 401, not 500 — the advice's generic Exception handler otherwise
+        // maps the BadCredentialsException thrown inside the login controller to a server error.
+        AuthExceptionHandlerPatcher.fix(backendSrcJava);
 
         BuildResult initial = buildTool.runMvnCompile(backendDir);
 
@@ -57,19 +66,17 @@ public class BackendValidationNode implements WorkerNode {
             return;
         }
 
-        // Pre-ErrorFixAgent mechanical fixes:
-        //   1. SecurityConfigPatcher: ensures PasswordEncoder, AuthenticationManager, static asset
-        //      permits and anyRequest().permitAll() are present — structural gaps the LLM misses
-        //   2. MavenDependencyInjector: adds missing classpath jars (ErrorFixAgent can't fix these)
-        //   3. RepositoryMethodInjector: adds missing Spring Data findBy* declarations that the
+        // Pre-ErrorFixAgent mechanical fixes for compile errors (SecurityConfig is already
+        // patched unconditionally above):
+        //   1. MavenDependencyInjector: adds missing classpath jars (ErrorFixAgent can't fix these)
+        //   2. RepositoryMethodInjector: adds missing Spring Data findBy* declarations that the
         //      SERVICE layer called but the REPOSITORY template didn't generate (cross-file gap)
-        boolean securityPatched = SecurityConfigPatcher.patch(backendSrcJava);
         boolean depsInjected = MavenDependencyInjector.injectFromCompileErrors(
                 backendDir.resolve("pom.xml"), initial.output());
         boolean methodsInjected = RepositoryMethodInjector.injectMissingMethods(
                 backendDir, initial.output());
 
-        if (securityPatched || depsInjected || methodsInjected) {
+        if (depsInjected || methodsInjected) {
             BuildResult postInjection = buildTool.runMvnCompile(backendDir);
             if (postInjection.success()) {
                 log.info("[BackendValidationNode] mvn compile passed after mechanical injection — skipping ErrorFixAgent");

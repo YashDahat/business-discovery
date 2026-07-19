@@ -8,6 +8,7 @@ Feature type: {{featureType}}
 
 == OTHER FEATURES' API CONTRACTS (what this feature may call — do not invent signatures absent from here) ==
 {{peerApiSummaries}}
+{{dependencyDirectionSection}}
 
 == BUSINESS CONTEXT ==
 Business: {{businessName}} ({{category}})
@@ -29,5 +30,5 @@ detail ("files" array — one entry per file listed above, matched by exact file
 following all rules in the system prompt. Call read_file(path) for any existing
 workspace file you need to inspect before writing.
 
-Return ONLY the JSON object with "feature_instruction", "files" (and "change_required"
-if requestedChanges was provided). No markdown fences. No prose.
+Return ONLY the JSON object with "feature_instruction", "depends_on_features", "files"
+(and "change_required" if requestedChanges was provided). No markdown fences. No prose.
