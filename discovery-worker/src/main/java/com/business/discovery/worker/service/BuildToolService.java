@@ -4,7 +4,9 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -29,7 +31,11 @@ public class BuildToolService {
     }
 
     public BuildResult runNpmInstallPackage(Path frontendDir, String packageName) {
-        return run(frontendDir, List.of("npm", "install", "--save", packageName, "--silent"));
+        BuildResult result = run(frontendDir, List.of("npm", "install", "--save", packageName, "--silent"));
+        if (!result.success() && result.output().contains("ERESOLVE")) {
+            result = run(frontendDir, List.of("npm", "install", "--save", packageName, "--legacy-peer-deps", "--silent"));
+        }
+        return result;
     }
 
     public BuildResult runNpmInstallDevPackages(Path frontendDir, String... packages) {
@@ -41,7 +47,26 @@ public class BuildToolService {
     public BuildResult runShadcnAdd(Path frontendDir, java.util.Collection<String> components) {
         List<String> cmd = new ArrayList<>(List.of("npx", "--yes", "shadcn@latest", "add", "--yes", "--overwrite"));
         cmd.addAll(components);
-        return run(frontendDir, cmd);
+        BuildResult result = run(frontendDir, cmd);
+        if (!result.success() && result.output().contains("ERESOLVE")) {
+            enableLegacyPeerDeps(frontendDir);
+            result = run(frontendDir, cmd);
+        }
+        return result;
+    }
+
+    private void enableLegacyPeerDeps(Path dir) {
+        try {
+            Path npmrc = dir.resolve(".npmrc");
+            String existing = Files.exists(npmrc) ? Files.readString(npmrc) : "";
+            if (!existing.contains("legacy-peer-deps")) {
+                Files.writeString(npmrc, existing + "\nlegacy-peer-deps=true\n",
+                        StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
+                log.info("[BuildToolService] Wrote legacy-peer-deps=true to {}", npmrc);
+            }
+        } catch (IOException e) {
+            log.warn("[BuildToolService] Could not write .npmrc in {}: {}", dir, e.getMessage());
+        }
     }
 
     /**

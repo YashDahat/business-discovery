@@ -3,6 +3,7 @@ package com.business.discovery.worker.service;
 import com.business.discovery.worker.service.llm.ApiEndpoint;
 import com.business.discovery.worker.service.llm.ArchitectureSpec;
 import com.business.discovery.worker.service.llm.FileSpec;
+import com.business.discovery.worker.util.ApiInventory;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import com.business.discovery.worker.util.SeededCredentialFinder;
 import lombok.extern.slf4j.Slf4j;
@@ -22,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -184,6 +186,7 @@ public class ComposeLaunchService {
         flows.addAll(publicContentFlows(baseUrl, workspace));
         String token = loginFlow(baseUrl, workspace, flows);
         if (token != null) flows.addAll(adminReadFlows(baseUrl, workspace, token));
+        flows.addAll(orderWriteFlows(baseUrl, workspace));
 
         writeFlowReport(workspace, baseUrl, flows);
 
@@ -345,6 +348,132 @@ public class ComposeLaunchService {
             // fall through to the convention
         }
         return "/api/v1/auth/login";
+    }
+
+    // ── Order write journey ────────────────────────────────────────────────
+
+    /**
+     * Probes the storefront's actual WRITE path — the one thing public GETs and admin logins never
+     * touch, and where circuit-house shipped a 500 (OrderItem inserted with a null order_id). Finds a
+     * public POST create endpoint whose request carries a nested collection (the cascade-order shape),
+     * synthesizes a valid body from the request DTO's fields (with a real product id from a public
+     * list), posts it, and FAILS only on 5xx — a 4xx means the endpoint works and merely rejected our
+     * synthetic input, which is not the defect we are catching.
+     */
+    private List<FlowResult> orderWriteFlows(String baseUrl, Path workspace) {
+        List<FlowResult> out = new ArrayList<>();
+        ApiInventory inv;
+        try {
+            inv = ApiInventory.extract(workspace.resolve("backend/src/main/java"));
+        } catch (Exception e) {
+            return out; // no inventory — skip rather than false-fail
+        }
+        Map<String, ApiInventory.TypeDef> types = inv.types();
+        for (ApiInventory.Endpoint ep : inv.endpoints()) {
+            if (!"POST".equalsIgnoreCase(ep.httpMethod())) continue;
+            String path = ep.path();
+            if (path == null || path.contains("/admin") || path.contains("/auth") || path.contains("/payment")) {
+                continue;
+            }
+            ApiInventory.TypeDef def = ep.requestType() == null ? null : types.get(ep.requestType());
+            if (def == null || def.fields() == null) continue;
+            if (def.fields().stream().noneMatch(f -> isCollectionType(f.javaType()))) continue; // cascade shape only
+
+            String realId = firstPublicItemId(baseUrl, workspace);
+            String body = synthesizeJson(def, types, realId, 0);
+            String flow = "place order POST " + path;
+            try {
+                HttpResponse<String> r = postJson(baseUrl + path, body);
+                if (r.statusCode() >= 500) {
+                    out.add(new FlowResult(flow, false, r.statusCode()
+                            + " server error — the write/persist path is broken: " + firstLine(r.body())));
+                } else {
+                    out.add(new FlowResult(flow, true, String.valueOf(r.statusCode())));
+                }
+            } catch (Exception e) {
+                out.add(new FlowResult(flow, false, "request failed: " + e.getMessage()));
+            }
+            break; // one representative write journey is enough
+        }
+        return out;
+    }
+
+    /** First numeric "id" from any public list response — a real product id for the order items. */
+    private String firstPublicItemId(String baseUrl, Path workspace) {
+        Pattern idNum = Pattern.compile("\"id\"\\s*:\\s*(\\d+)");
+        for (String p : collectGetEndpoints(workspace)) {
+            if (p.contains("/admin")) continue;
+            try {
+                Matcher m = idNum.matcher(get(baseUrl + p).body());
+                if (m.find()) return m.group(1);
+            } catch (Exception ignored) {
+                // try the next endpoint
+            }
+        }
+        return null;
+    }
+
+    private String synthesizeJson(ApiInventory.TypeDef def, Map<String, ApiInventory.TypeDef> types,
+                                  String realId, int depth) {
+        if (depth > 4 || def.fields() == null) return "null";
+        StringBuilder sb = new StringBuilder("{");
+        boolean first = true;
+        for (ApiInventory.Field f : def.fields()) {
+            if (!first) sb.append(",");
+            first = false;
+            sb.append("\"").append(f.name()).append("\":").append(fieldValue(f, types, realId, depth));
+        }
+        return sb.append("}").toString();
+    }
+
+    private String fieldValue(ApiInventory.Field f, Map<String, ApiInventory.TypeDef> types,
+                              String realId, int depth) {
+        String type = f.javaType() == null ? "" : f.javaType();
+        if (isCollectionType(type)) {
+            String elem = collectionElement(type);
+            ApiInventory.TypeDef ed = types.get(elem);
+            return "[" + (ed != null ? synthesizeJson(ed, types, realId, depth + 1)
+                                      : scalarValue(elem, "", realId)) + "]";
+        }
+        ApiInventory.TypeDef nested = types.get(type);
+        if (nested != null) {
+            if (nested.isEnum()) {
+                return nested.enumConstants().isEmpty() ? "null" : "\"" + nested.enumConstants().get(0) + "\"";
+            }
+            return synthesizeJson(nested, types, realId, depth + 1);
+        }
+        return scalarValue(type, f.name().toLowerCase(), realId);
+    }
+
+    private String scalarValue(String type, String fieldNameLower, String realId) {
+        String t = type == null ? "" : type.toLowerCase();
+        boolean numeric = t.matches(".*(int|long|short|byte|bigdecimal|double|float|number).*");
+        if (fieldNameLower.endsWith("id") && realId != null) return realId; // real product id (menuItemId, ...)
+        if (t.contains("bool")) return "true";
+        if (numeric) return "1";
+        if (fieldNameLower.contains("email")) return "\"test@example.com\"";
+        if (fieldNameLower.contains("phone")) return "\"1234567890\"";
+        if (t.contains("uuid")) return "\"00000000-0000-0000-0000-000000000001\"";
+        if (t.matches(".*(localdate|localdatetime|instant|date|time).*")) return "\"2030-01-01T10:00:00\"";
+        return "\"Test\"";
+    }
+
+    private static boolean isCollectionType(String t) {
+        if (t == null) return false;
+        return t.startsWith("List<") || t.startsWith("Set<") || t.startsWith("Collection<") || t.endsWith("[]");
+    }
+
+    private static String collectionElement(String t) {
+        int lt = t.indexOf('<'), gt = t.lastIndexOf('>');
+        if (lt >= 0 && gt > lt) return t.substring(lt + 1, gt).trim();
+        if (t.endsWith("[]")) return t.substring(0, t.length() - 2).trim();
+        return "Object";
+    }
+
+    private static String firstLine(String s) {
+        if (s == null) return "";
+        String line = s.lines().findFirst().orElse("");
+        return line.length() > 160 ? line.substring(0, 160) : line;
     }
 
     private static final Pattern DTO_STRING_FIELD = Pattern.compile("private\\s+String\\s+(\\w+)");

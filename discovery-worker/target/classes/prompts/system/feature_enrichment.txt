@@ -21,7 +21,20 @@ For every public method in the feature, specify:
 - Error cases: what exception is thrown and what HTTP status the controller returns
 
 4. INTER-FILE WIRING
-Explicitly describe how the files call each other. Example: "OrderController injects OrderService. OrderService injects OrderRepository and PaymentService (from the payment-processing feature). OrderService.createOrder() calls orderRepository.save() then paymentService.initiatePayment()."
+Explicitly describe how the files call each other. Example: "OrderController injects OrderService. OrderService injects OrderRepository and the pre-scaffolded PaymentService. OrderService.checkout() calls orderRepository.save() then paymentService.createOrder(new CreatePaymentRequest(amount, \"INR\", \"order_\" + id)) and returns the resulting PaymentOrderResponse." NOTE: PaymentService is pre-scaffolded — its only consumer-facing methods are createOrder(CreatePaymentRequest) -> PaymentOrderResponse and verify(VerifyPaymentRequest) -> PaymentVerificationResponse. Never invent other payment methods (no initiatePayment/processPayment/etc.), and never make PaymentService depend on a business service.
+
+4b. CART/COMMERCE FRAMEWORK (frontend storefronts)
+The cart is a PRE-SCAFFOLDED, business-agnostic, HEADLESS FRAMEWORK under src/cart/ — state + logic only, NO UI. You design and build every cart-facing element yourself, calling the framework's methods; EXTEND by config/composition, NEVER modify or re-plan src/cart/. Import from '@/cart'.
+METHODS TO BUILD WITH (FIXED names — never invent others):
+  useCart() -> { cartItems, addItem(item, qty?), removeItem(id, variantKey?), setItemQuantity(id, qty, variantKey?), clearCart(), totals: { subtotal, adjustments, total }, cartCount }
+  useCheckout(steps); CartItem = { id, name, unitPrice, quantity, imageUrl?, variantKey?, metadata? }
+  pricing factories (percentageFee / flatFee / percentageDiscount / waivedOver) + storage (localStorageCart / memoryCart)
+  cartConfig.ts — the ONE editable cart file (pricingRules + persistence)
+HOW TO BUILD IT (your UI, framework's logic): add-to-cart -> render your OWN control on each card (any design) whose handler calls useCart().addItem({ id, name, unitPrice, imageUrl }); quantity -> your own stepper calling setItemQuantity; cart/checkout -> read cartItems + totals, drive steps with useCheckout(steps); pricing -> add rules to cartConfig.ts and read useCart().totals, never hardcode a charge. New item kind -> map to CartItem (+variantKey for variants, metadata for extras). The framework mounts no <Toaster/> — add sonner's <Toaster/> to your layout if you want toast feedback.
+CONTRACT: if this feature renders any product/service card (dish, drink, gym scheme, ticket, product), that card MUST include some control that calls addItem({ id: x.id, name: x.name, unitPrice: x.price, imageUrl: x.imageUrl }) — design it however you like ("Book" for services) — a card with no way to add leaves the cart empty and the store unusable. The checkout renders totals.total and maps cartItems -> the order request (cartItem.id is the product id).
+
+4c. INDIAN BUSINESS CONTEXT
+Every generated site is for a business in India, serving Indian customers — apply Indian conventions throughout. Currency is the most common case: show ALL monetary values (prices, cart lines, totals, order summaries, payment amounts) in Indian Rupees (₹) using the en-IN locale (e.g. amount.toLocaleString('en-IN', { style: 'currency', currency: 'INR' })) — never a dollar sign, USD, or en-US. The same principle applies to any other unit or format a business surfaces (weights/measures, dates, phone numbers, addresses): default to the Indian convention unless the brief explicitly says otherwise. Note this in every file spec that displays such values.
 
 5. CROSS-FEATURE CONTRACTS
 Use the peer API summaries to specify exactly which method signatures and endpoint paths this feature calls from other features. Never invent a signature absent from the peer summaries.
@@ -98,9 +111,12 @@ DOWNWARD (controllers → services → repositories; feature-specific → shared
 When this feature's logic must cause an update inside a feature that depends on it, do ONE of:
   (a) CONTROLLER ORCHESTRATION (preferred) — this feature's service RETURNS the outcome, and the
       controller owning the HTTP entry point injects both services and calls them in sequence.
-      Example: PaymentController injects PaymentService AND OrderService;
-      paymentService.processPaymentStatus(request) returns OrderStatus; the controller then calls
-      orderService.updateOrderStatus(orderId, status). PaymentService never holds OrderService.
+      Example: NotificationController injects NotificationService AND OrderService;
+      notificationService.buildReceipt(request) returns a ReceiptResult; the controller then calls
+      orderService.markNotified(orderId). NotificationService never holds OrderService.
+      (Payment is already solved this way by the pre-scaffolded spine — do NOT re-derive it: a
+      consumer calls paymentService.verify(...) and updates its OWN entity from the result, or
+      listens for the scaffolded PaymentCapturedEvent with @EventListener.)
   (b) SPRING EVENT — this feature's service publishes via ApplicationEventPublisher and the
       dependent feature consumes with @EventListener. Use only when no shared controller exists.
 Never resolve a cycle with @Lazy, field @Autowired, or setter injection — those hide the cycle
@@ -139,6 +155,14 @@ Files under frontend/src/types/ or frontend/src/services/ are DERIVED from the b
 API contract at build time — give them file_role "Generated from the backend API contract —
 <one line on the domain>" and skip their public_functions/api_endpoints_consumed detail.
 
+This binds the featureInstruction prose too, not only the files array. You run BEFORE the SDK
+is derived, so you cannot know how its functions get grouped into modules. Never state which
+service file exports a function, never enumerate a service module's contents, and never write
+"import X from bookingService". Name the capability only — "call the generated service
+function getAllFitnessClasses(): Promise<FitnessClassDto[]>" — and let the build place it; the
+file generator is shown the real modules. A module name invented here becomes an import that
+does not resolve, and the fix agent then hand-writes an HTTP call to a guessed path.
+
 ## Outline owns the file list
 Emit detail ONLY for the file paths listed in this feature's files. Never add, remove,
 or rename files — if the instruction needs a file that doesn't exist, work within the
@@ -146,19 +170,9 @@ files that do.
 
 # SECURITY CONTRACTS (authentication / shared-backend features)
 
-## SecurityConfig authorization model — this exact order, no exceptions:
-  .authorizeHttpRequests(auth -> auth
-      .requestMatchers("/api/v1/auth/**").permitAll()
-      .requestMatchers(HttpMethod.GET, <PUBLIC CATALOG GET PATHS>).permitAll()
-      .requestMatchers("/api/v1/admin/**").hasRole("ADMIN")
-      .requestMatchers("/api/**").authenticated()
-      .anyRequest().permitAll()                                       // static files + SPA routes
-  )
-The LAST rule MUST be anyRequest().permitAll() — NEVER anyRequest().authenticated().
-Spring Security intercepts ALL requests including /index.html and /assets/*.js;
-authenticated() there blocks the entire frontend.
-
-DECIDING THE PUBLIC GET LINE — mandatory, never omit it, never leave a placeholder:
+## Endpoint access classification — mandatory, never leave a placeholder
+The build writes SecurityConfig's matchers itself, from the "access" value you set on every
+api_endpoints entry. Your job is that classification, not the Java.
 A first-time visitor must browse the business BEFORE logging in. Classify by WHOSE DATA IT IS —
 this rule is the same for every industry, only the nouns change:
   PUBLIC — the catalogue the business markets itself with, readable by a stranger.
@@ -177,95 +191,15 @@ this rule is the same for every industry, only the nouns change:
 A public WRITE is legitimate where a stranger must submit something without an account —
 contact/enquiry forms, a "request a callback", an unauthenticated table booking. Mark those
 "access": "public" on the POST and permit that method explicitly; never open the whole path.
-Enumerate the ACTUAL public GET paths THIS project serves, one glob per public domain, e.g.
-      .requestMatchers(HttpMethod.GET, "/api/v1/classes/**", "/api/v1/trainers/**",
-                       "/api/v1/plans/**").permitAll()
-Import org.springframework.http.HttpMethod. A missing or placeholder public GET line 403s the
-entire storefront to anonymous visitors — the single most common runtime failure of this
-pipeline. If a project genuinely has no public catalog, say so explicitly; do not silently drop
-the line.
+Classify the ACTUAL paths THIS project serves — every catalog domain it exposes gets
+"access": "public" on its GET entries. Leaving them unclassified 403s the entire storefront
+to anonymous visitors, the single most common runtime failure of this pipeline. If a project
+genuinely has no public catalog, say so explicitly rather than silently omitting it.
 Set "access" on EVERY entry in api_endpoints to the same classification — that declaration is
 what the build reads to write and to verify these matchers.
 
-## Login failures must be 401, never 500
-authenticationManager.authenticate(...) throws AuthenticationException (a BadCredentialsException
-subclass) on a wrong password. It is thrown from INSIDE the login controller method, so
-@RestControllerAdvice catches it — and a generic @ExceptionHandler(Exception.class) maps it to
-500, which reads as a server crash and derails every debugging pass. GlobalExceptionHandler MUST
-declare, BEFORE the generic handler:
-    @ExceptionHandler(org.springframework.security.core.AuthenticationException.class)
-    -> ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(...)
-A wrong password is a 401, not a 500.
-
-## ROLE_ authority consistency (mismatch = every admin endpoint 403s)
-hasRole("ADMIN") and @PreAuthorize("hasRole('ADMIN')") match the authority "ROLE_ADMIN".
-Wherever authorities are built:
-    return List.of(new SimpleGrantedAuthority("ROLE_" + role.name()));
-NEVER new SimpleGrantedAuthority(role.name()). Use hasRole (not hasAuthority)
-consistently in SecurityConfig and every @PreAuthorize.
-
-## No circular bean dependency (JwtAuthFilter ↔ UserService ↔ SecurityConfig)
-This exact 3-way cycle crashes the app at BOOT (not compile time — the JVM builds fine,
-then Spring refuses to start): SecurityConfig constructs JwtAuthFilter as a bean,
-JwtAuthFilter's constructor takes UserService, and UserService (or its
-AuthenticationManager wiring) ends up needing something SecurityConfig provides.
-Break it with EITHER:
-  (a) JwtAuthFilter takes UserDetailsService, not the concrete UserService type, injected
-      normally — the interface type alone does not remove the cycle if SecurityConfig
-      still directly `new`s or wires JwtAuthFilter with a field from itself; OR
-  (b) JwtAuthFilter's field for UserService/UserDetailsService is @Lazy:
-        public JwtAuthFilter(JwtUtil jwtUtil, @Lazy UserDetailsService userDetailsService)
-  AuthenticationManager MUST come from AuthenticationConfiguration.getAuthenticationManager()
-  as its own @Bean method in SecurityConfig — never constructed inline inside the
-  SecurityFilterChain bean method, and never a parameter SecurityConfig's constructor
-  requires from another security bean.
-State explicitly in the instruction: "JwtAuthFilter's UserDetailsService (or UserService)
-parameter is @Lazy" whenever this feature includes JwtAuthFilter.
-
-## SpaController
-@Controller (not @RestController); single method @GetMapping(value = {"/", "/{path:[^\\.]*}"})
-returning "forward:/index.html"; no other methods. Never add a `/**` suffix — it would
-catch /assets/index.js and defeat the static resource handler.
-
-## JwtUtil
-getSigningKey() calls Decoders.BASE64.decode(jwt.secret); uses io.jsonwebtoken (jjwt).
-generateToken(UserDetails): String; validateToken(String, UserDetails): boolean;
-extractEmail(String): String.
-
-# ADMIN CRUD ZOD CONTRACT (FRONTEND admin features — mismatches cause TS2322 compile errors)
-Admin{Domain}Page.tsx uses react-hook-form + zod. The zod schema fields must produce
-TypeScript types that exactly match the Create{Domain}Request interface fields:
-- Backend @NotBlank String field  → z.string().min(1)    (NOT .optional())
-- Backend String price field      → z.string()           (NOT z.number() — sent as string over the wire)
-- Backend @Positive/@Min int/BigDecimal field → z.coerce.number()
-  (HTML inputs yield strings — plain z.number() makes the resolver type `unknown`)
-- Backend Optional/nullable field → z.string().optional() or z.coerce.number().optional()
-When building the request object in onSubmit(), types must match the interface directly —
-no String() casts or ?? '' patches should be needed if the schema is correct.
-
-# SPRING BOOT 4 / JACKSON 3 CONSTRAINTS (BACKEND features only — skip for FRONTEND/INFRA)
-When writing featureInstruction for BACKEND features, these rules override training data.
-The code generator will follow your instruction literally — if your instruction uses SB2/3
-patterns, the generated code will fail to compile.
-
-JACKSON — groupId changed. In every instruction that involves JSON parsing:
-  Correct imports: tools.jackson.databind.ObjectMapper, tools.jackson.core.JacksonException
-  Wrong imports:   com.fasterxml.jackson.*  (don't instruct or imply these)
-  Correct catch:   catch (JacksonException e)   NOT   catch (JsonProcessingException e)
-
-SPRING SECURITY — if this is the authentication or shared-backend feature:
-  SecurityFilterChain @Bean  (no WebSecurityConfigurerAdapter — it was removed in SB3+)
-  .authorizeHttpRequests()   (not .authorizeRequests())
-  .csrf(csrf -> csrf.disable())   (not .csrf().disable())
-  AuthenticationManager via AuthenticationConfiguration.getAuthenticationManager()
-
-REPOSITORY METHODS — name every non-standard method explicitly in the instruction:
-  Spring Data JPA does NOT auto-generate undeclared methods. If the service calls
-  userRepository.findByEmail(email), your instruction must say:
-  "UserRepository declares: findByEmail(String email): Optional<User>"
-  List all custom finder methods — omitting one causes a guaranteed compile failure.
-
-EXCEPTION CLASSES — never instruct a service to throw an exception that isn't in the manifest:
+# EXCEPTION CLASSES (BACKEND features — the class must exist as its own file)
+Never instruct a service to throw an exception that isn't in the manifest:
   ResourceNotFoundException, PaymentGatewayException, etc. must each have a standalone .java
   file in the .exception package. If this feature's services throw custom exceptions, confirm
   those exception files exist in the architecture spec before naming them in the instruction.

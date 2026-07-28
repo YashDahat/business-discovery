@@ -18,7 +18,7 @@ import java.util.stream.Collectors;
 @Slf4j
 public final class JavaFileTemplater {
 
-    public enum TemplateType { ENUM, REPOSITORY, DTO, JWT_UTIL, NONE }
+    public enum TemplateType { ENUM, REPOSITORY, DTO, JWT_UTIL, SPA_CONTROLLER, NONE }
 
     private JavaFileTemplater() {}
 
@@ -29,6 +29,12 @@ public final class JavaFileTemplater {
             "JwtHelper.java", "JwtProvider.java"
     );
 
+    // SPA forwarding controllers by any common name the LLM might use
+    private static final java.util.Set<String> SPA_CONTROLLER_FILENAMES = java.util.Set.of(
+            "SpaController.java", "SPAController.java", "SpaForwardController.java",
+            "ForwardController.java", "WebController.java", "ClientRoutingController.java"
+    );
+
     public static TemplateType classify(FileSpec spec, int layerPriority) {
         if (spec == null) return TemplateType.NONE;
 
@@ -36,6 +42,14 @@ public final class JavaFileTemplater {
         // Template is pinned to JJWT 0.11.5 which matches ProjectPlanningNode.injectJwtDependencies().
         if (spec.getFileName() != null && JWT_UTIL_FILENAMES.contains(spec.getFileName())) {
             return TemplateType.JWT_UTIL;
+        }
+
+        // SPA_CONTROLLER: always template. The mapping is a one-liner with exactly one correct
+        // shape, and the wrong shapes are silent — a `/**` suffix swallows /assets/index.js so
+        // the page loads blank, and @RestController returns the literal string "forward:/index.html"
+        // instead of forwarding, so every deep link renders that text.
+        if (spec.getFileName() != null && SPA_CONTROLLER_FILENAMES.contains(spec.getFileName())) {
+            return TemplateType.SPA_CONTROLLER;
         }
 
         // ENUM (priority 8): must have declared constants in publicVariables
@@ -66,6 +80,7 @@ public final class JavaFileTemplater {
             case REPOSITORY -> generateRepository(spec, basePackage);
             case DTO        -> generateDto(spec, basePackage);
             case JWT_UTIL   -> generateJwtUtil(spec);
+            case SPA_CONTROLLER -> generateSpaController(spec);
             case NONE       -> null;
         };
     }
@@ -82,10 +97,50 @@ public final class JavaFileTemplater {
      *   - Jwts.builder().setSubject() / .setExpiration() (not .subject() / .expiration())
      *   - signWith(key, SignatureAlgorithm.HS256)
      */
+    /**
+     * Forwards client-side routes to index.html so a deep link (/menu, /admin/orders) reaches
+     * the React router instead of 404ing. The regex excludes any segment containing a dot, which
+     * is what keeps /assets/index.js on the static resource handler.
+     */
+    private static String generateSpaController(FileSpec spec) {
+        String pkg = extractPackage(spec.getFilePath());
+        String className = spec.getFileName().replace(".java", "");
+        log.info("[JavaFileTemplater] Generated SPA_CONTROLLER template for {}", spec.getFileName());
+        return """
+                package %s;
+
+                import org.springframework.stereotype.Controller;
+                import org.springframework.web.bind.annotation.GetMapping;
+
+                @Controller
+                public class %s {
+
+                    // Match the SPA fallback at ANY depth: "/{path}" alone only matches a single
+                    // segment, so deep links like /admin/trainers or /trainers/:id 404 on direct
+                    // load/refresh. The "/**/{path}" variant covers nested routes. The [^\\.] guard
+                    // keeps real static assets (*.js, *.css, *.webp) served by the resource handler,
+                    // and explicit @*Mapping controllers still win over this wildcard (so /api/** is unaffected).
+                    @GetMapping(value = {"/", "/{path:[^\\\\.]*}", "/**/{path:[^\\\\.]*}"})
+                    public String forward() {
+                        return "forward:/index.html";
+                    }
+                }
+                """.formatted(pkg, className);
+    }
+
     private static String generateJwtUtil(FileSpec spec) {
         String pkg = extractPackage(spec.getFilePath());
         String className = spec.getFileName().replace(".java", "");
         log.info("[JavaFileTemplater] Generated JWT_UTIL template for {} (JJWT 0.11.5 API)", spec.getFileName());
+        return jwtUtilSource(pkg, className);
+    }
+
+    /**
+     * Canonical JJWT 0.11.5 JwtUtil source — single source of truth, also used by the auth
+     * scaffold module (AuthScaffoldModule). See generateJwtUtil above for the 0.11.5 vs 0.12.x
+     * API notes that pin this template.
+     */
+    public static String jwtUtilSource(String pkg, String className) {
         return """
                 package %s;
 

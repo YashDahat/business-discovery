@@ -7,8 +7,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -25,10 +27,22 @@ import java.util.stream.Stream;
  * not in adminOrderService; it is in the derived orderService, and the export index knows
  * that.
  *
- * Provably-correct moves only: rewrites NAMED imports whose target module does not resolve
- * on disk, and only symbols the derived (marker-checked) SDK actually exports. Default and
- * namespace imports, unknown symbols, and existing modules are left for tsc + the
- * ErrorFixAgent.
+ * Handles both ways an import can be wrong about where a function lives:
+ *   TS2307 — the module itself does not exist (ServicePlanPruner deleted it).
+ *   TS2305 — the module exists but does not export that symbol. This is the shape enrichment
+ *            produces on its own: it writes the instruction BEFORE the SDK is derived, so it
+ *            guesses the grouping ("bookingService exports getAllFitnessClasses") while
+ *            derivation actually split those functions across classeService/scheduleService.
+ *            vikram-s-fitness-studio: 9 such imports, none of them repairable here, so the
+ *            fix agent hand-wrote apiClient calls against invented paths instead.
+ *
+ * Provably-correct moves only. A symbol is relocated when its current module is missing, OR
+ * when the module IS a derived (marker-carrying) SDK file that demonstrably lacks the symbol —
+ * those files come from TsSdkGenerator in one uniform shape, so a parsed absence is real.
+ * Modules outside the derived set (services/local/, LLM-written strays) are never mined for
+ * absences, since an export form the regex cannot see would look identical to a missing one.
+ * Default and namespace imports, unknown symbols, and non-service modules are left for tsc +
+ * the ErrorFixAgent.
  */
 @Slf4j
 public final class ServiceImportRewriter {
@@ -41,10 +55,15 @@ public final class ServiceImportRewriter {
 
     private ServiceImportRewriter() {}
 
+    /** Which derived module exports each symbol, and the full export set of each module. */
+    record DerivedSdk(Map<String, String> homeOf, Map<String, Set<String>> exportsOf) {
+        boolean isEmpty() { return homeOf.isEmpty(); }
+    }
+
     /** Returns true if any file was modified. */
     public static boolean fix(Path frontendSrc) {
-        Map<String, String> exportIndex = buildDerivedExportIndex(frontendSrc);
-        if (exportIndex.isEmpty()) return false;
+        DerivedSdk sdk = scanDerivedSdk(frontendSrc);
+        if (sdk.isEmpty()) return false;
 
         boolean[] changed = {false};
         try (Stream<Path> files = Files.walk(frontendSrc)) {
@@ -55,7 +74,7 @@ public final class ServiceImportRewriter {
                  .forEach(file -> {
                      try {
                          String original = Files.readString(file);
-                         String rewritten = rewrite(original, file, frontendSrc, exportIndex);
+                         String rewritten = rewrite(original, file, frontendSrc, sdk);
                          if (!rewritten.equals(original)) {
                              Files.writeString(file, rewritten);
                              changed[0] = true;
@@ -75,10 +94,11 @@ public final class ServiceImportRewriter {
      * An LLM-written stray in services/ is not contract and must not attract imports.
      * Collisions resolve to the first stem in sorted order, with a warning.
      */
-    static Map<String, String> buildDerivedExportIndex(Path frontendSrc) {
+    static DerivedSdk scanDerivedSdk(Path frontendSrc) {
         Path servicesDir = frontendSrc.resolve("services");
         Map<String, String> index = new LinkedHashMap<>();
-        if (!Files.isDirectory(servicesDir)) return index;
+        Map<String, Set<String>> exportsOf = new LinkedHashMap<>();
+        if (!Files.isDirectory(servicesDir)) return new DerivedSdk(index, exportsOf);
         Map<String, String> byStem = new TreeMap<>();
         try (Stream<Path> files = Files.list(servicesDir)) {
             files.filter(p -> p.toString().endsWith(".ts")).sorted().forEach(p -> {
@@ -94,19 +114,22 @@ public final class ServiceImportRewriter {
             log.warn("[ServiceImportRewriter] Could not list services/: {}", e.getMessage());
         }
         byStem.forEach((stem, content) -> {
+            Set<String> exports = new LinkedHashSet<>();
             Matcher m = EXPORTED_NAME.matcher(content);
             while (m.find()) {
+                exports.add(m.group(1));
                 String prev = index.putIfAbsent(m.group(1), stem);
                 if (prev != null && !prev.equals(stem)) {
                     log.warn("[ServiceImportRewriter] {} exported by both {} and {} — using {}",
                             m.group(1), prev, stem, prev);
                 }
             }
+            exportsOf.put(stem, exports);
         });
-        return index;
+        return new DerivedSdk(index, exportsOf);
     }
 
-    static String rewrite(String content, Path file, Path frontendSrc, Map<String, String> exportIndex) {
+    static String rewrite(String content, Path file, Path frontendSrc, DerivedSdk sdk) {
         Matcher m = NAMED_IMPORT.matcher(content);
         StringBuilder sb = new StringBuilder();
         Map<String, List<String>> toAdd = new LinkedHashMap<>(); // target stem → symbols
@@ -115,31 +138,48 @@ public final class ServiceImportRewriter {
         while (m.find()) {
             String typePrefix = m.group(1) == null ? "" : m.group(1);
             String spec = m.group(3);
-            if (moduleResolves(spec, file, frontendSrc)) {
+
+            boolean moduleMissing = !moduleResolves(spec, file, frontendSrc);
+            String stem = derivedStem(spec, file, frontendSrc);
+            // Present symbols of the target, but ONLY when it is a derived file — for anything
+            // else an unparsed export form is indistinguishable from a real absence.
+            Set<String> present = (!moduleMissing && stem != null && sdk.exportsOf().containsKey(stem))
+                    ? sdk.exportsOf().get(stem)
+                    : null;
+
+            if (!moduleMissing && present == null) {
                 m.appendReplacement(sb, Matcher.quoteReplacement(m.group()));
                 continue;
             }
+
             List<String> keep = new ArrayList<>();
             List<String> movedNotes = new ArrayList<>();
             for (String rawSym : m.group(2).split(",")) {
                 String sym = rawSym.trim();
                 if (sym.isEmpty()) continue;
                 String exportedName = sym.split("\\s+as\\s+")[0].trim();
-                String home = exportIndex.get(exportedName);
-                if (home != null) {
+
+                if (present != null && present.contains(exportedName)) {
+                    keep.add(sym);           // already imported from the module that exports it
+                    continue;
+                }
+                String home = sdk.homeOf().get(exportedName);
+                if (home != null && !home.equals(stem)) {
                     toAdd.computeIfAbsent(home, k -> new ArrayList<>()).add(sym);
                     movedNotes.add(exportedName + " -> " + home);
                 } else {
                     keep.add(sym);
-                    log.warn("[ServiceImportRewriter] {}: '{}' from missing module '{}' is exported "
-                            + "by no derived service — left for the fix agent", fileLabel, exportedName, spec);
+                    log.warn("[ServiceImportRewriter] {}: '{}' from '{}' is exported by no derived "
+                            + "service — left for the fix agent", fileLabel, exportedName, spec);
                 }
             }
             if (movedNotes.isEmpty()) {
                 m.appendReplacement(sb, Matcher.quoteReplacement(m.group()));
             } else {
-                log.info("[ServiceImportRewriter] {}: module '{}' does not exist — relocated ({})",
-                        fileLabel, spec, String.join(", ", movedNotes));
+                log.info("[ServiceImportRewriter] {}: module '{}' {} — relocated ({})",
+                        fileLabel, spec,
+                        moduleMissing ? "does not exist" : "does not export those symbols",
+                        String.join(", ", movedNotes));
                 String replacement = keep.isEmpty() ? ""
                         : "import " + typePrefix + "{ " + String.join(", ", keep) + " } from '" + spec + "';";
                 m.appendReplacement(sb, Matcher.quoteReplacement(replacement));
@@ -152,6 +192,29 @@ public final class ServiceImportRewriter {
             result = mergeServiceImport(result, add.getKey(), add.getValue());
         }
         return result;
+    }
+
+    /**
+     * The services/ stem this import targets, or null when it points anywhere else. Resolved
+     * against the filesystem rather than matched on the string, so '@/api/orderService' cannot
+     * masquerade as the derived 'orderService', and services/local/ stays excluded.
+     */
+    private static String derivedStem(String spec, Path importingFile, Path frontendSrc) {
+        Path base;
+        String rel;
+        if (spec.startsWith("@/")) {
+            base = frontendSrc;
+            rel = spec.substring(2);
+        } else if (spec.startsWith(".")) {
+            base = importingFile.getParent();
+            rel = spec;
+        } else {
+            return null;
+        }
+        Path resolved = base.resolve(rel).normalize();
+        Path parent = resolved.getParent();
+        if (parent == null || !parent.equals(frontendSrc.resolve("services"))) return null;
+        return resolved.getFileName().toString().replaceAll("\\.ts$", "");
     }
 
     private static boolean moduleResolves(String spec, Path importingFile, Path frontendSrc) {

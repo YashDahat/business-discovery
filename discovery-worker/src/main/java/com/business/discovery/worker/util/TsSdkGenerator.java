@@ -167,8 +167,28 @@ public final class TsSdkGenerator {
         return "api";
     }
 
+    /**
+     * Plural → singular for a path segment; covers the noun shapes API domains actually use.
+     *
+     * The naive "strip a trailing s" this replaces turned /api/v1/classes into the domain
+     * "classe", so derivation emitted classeService.ts — a filename no planner and no model
+     * would ever guess. On vikram-s-fitness-studio the plan put those functions in
+     * bookingService, derivation put them in classeService, and the hook importing from the
+     * former hit nine TS2305s that ended with the fix agent inventing endpoint paths.
+     * Landing on "class" lets the planned and derived names agree.
+     */
     private static String singular(String s) {
-        return s.endsWith("s") && s.length() > 1 ? s.substring(0, s.length() - 1) : s;
+        if (s.length() < 3 || !s.endsWith("s")) return s;
+        // Already singular despite the trailing s: class, address, status, analysis
+        if (s.endsWith("ss") || s.endsWith("us") || s.endsWith("is")) return s;
+        // categories → category, properties → property, amenities → amenity
+        if (s.endsWith("ies")) return s.substring(0, s.length() - 3) + "y";
+        // classes → class, dishes → dish, branches → branch, boxes → box
+        if (s.endsWith("sses") || s.endsWith("shes") || s.endsWith("ches")
+                || s.endsWith("xes") || s.endsWith("zes")) {
+            return s.substring(0, s.length() - 2);
+        }
+        return s.substring(0, s.length() - 1);
     }
 
     private static String capitalize(String s) {

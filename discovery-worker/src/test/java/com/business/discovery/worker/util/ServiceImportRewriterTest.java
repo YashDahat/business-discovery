@@ -153,6 +153,71 @@ class ServiceImportRewriterTest {
                 .contains("from '@/services/orderService';");
     }
 
+    // ── TS2305: module exists but does not export the symbol ────────────────
+
+    @Test
+    void splitsImportWhenExistingModuleLacksTheSymbol() throws Exception {
+        // The vikram-s-fitness-studio shape: enrichment promised bookingService would export
+        // everything; derivation put getMenu in menuService. bookingService/orderService DOES
+        // resolve, so the old module-missing check skipped this and the fix agent invented paths.
+        Path hook = write("hooks/useBookings.ts", """
+                import { getAllOrders, getMenu } from '@/services/orderService';
+                export const useBookings = () => getAllOrders();
+                """);
+
+        boolean changed = ServiceImportRewriter.fix(src);
+
+        assertThat(changed).isTrue();
+        String out = Files.readString(hook);
+        assertThat(out).contains("import { getMenu } from '@/services/menuService';");
+        assertThat(out).contains("import { getAllOrders } from '@/services/orderService';");
+    }
+
+    @Test
+    void leavesImportAloneWhenTheModuleReallyExportsEverything() throws Exception {
+        Path hook = write("hooks/useOrders.ts", """
+                import { getAllOrders, updateOrderStatus } from '@/services/orderService';
+                export const useOrders = () => getAllOrders();
+                """);
+        String before = Files.readString(hook);
+
+        boolean changed = ServiceImportRewriter.fix(src);
+
+        assertThat(changed).isFalse();
+        assertThat(Files.readString(hook)).isEqualTo(before);
+    }
+
+    @Test
+    void doesNotMineAbsencesFromNonDerivedModules() throws Exception {
+        // services/local/ is the model-writable escape hatch. Its export forms are not
+        // guaranteed parseable, so a symbol we cannot see must NOT be treated as absent.
+        Files.createDirectories(src.resolve("services/local"));
+        Files.writeString(src.resolve("services/local/cartService.ts"),
+                "const impl = {}; export { impl as getMenu };\n");
+        Path comp = write("components/CartView.tsx", """
+                import { getMenu } from '@/services/local/cartService';
+                export default function CartView() { return null }
+                """);
+
+        ServiceImportRewriter.fix(src);
+
+        assertThat(Files.readString(comp))
+                .contains("from '@/services/local/cartService';")
+                .doesNotContain("menuService");
+    }
+
+    @Test
+    void leavesSymbolNoDerivedServiceExportsForTheFixAgent() throws Exception {
+        Path hook = write("hooks/useThings.ts", """
+                import { getAllOrders, getSomethingNobodyExports } from '@/services/orderService';
+                export const useThings = () => getAllOrders();
+                """);
+
+        ServiceImportRewriter.fix(src);
+
+        assertThat(Files.readString(hook)).contains("getSomethingNobodyExports");
+    }
+
     private Path write(String rel, String content) throws Exception {
         Path file = src.resolve(rel);
         Files.createDirectories(file.getParent());

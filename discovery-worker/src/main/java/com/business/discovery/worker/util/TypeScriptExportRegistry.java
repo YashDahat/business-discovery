@@ -6,6 +6,8 @@ import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -59,5 +61,43 @@ public class TypeScriptExportRegistry {
 
     public boolean knows(String symbol) {
         return symbolToPath.containsKey(symbol);
+    }
+
+    /** True when nothing has been registered yet (e.g. before the first layer generates). */
+    public boolean isEmpty() {
+        return symbolToPath.isEmpty();
+    }
+
+    /**
+     * Renders every registered export as a closed-world import catalog for injection into the
+     * generation prompt: one line per module, its symbols grouped under the {@code @/} alias the
+     * model must import by. Lets Flash import existing components/hooks/types/services by their real
+     * names and paths instead of inventing modules the post-hoc fixer then has to repair.
+     *
+     * <p>Output is deterministic (modules and symbols sorted). Meant to be read during the
+     * read-only generation phase — register() must not run concurrently, matching how
+     * resolveSpecifier/knows are already used.
+     *
+     * @return the catalog block, or "" when nothing is registered yet
+     */
+    public String toImportCatalog() {
+        if (symbolToPath.isEmpty()) return "";
+
+        Map<String, TreeSet<String>> byModule = new TreeMap<>();
+        for (Map.Entry<String, String> e : symbolToPath.entrySet()) {
+            byModule.computeIfAbsent(toAlias(e.getValue()), k -> new TreeSet<>()).add(e.getKey());
+        }
+
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, TreeSet<String>> e : byModule.entrySet()) {
+            sb.append(e.getKey()).append(" -> ").append(String.join(", ", e.getValue())).append('\n');
+        }
+        return sb.toString().stripTrailing();
+    }
+
+    /** frontend/src/foo/Bar -> @/foo/Bar (the import form the tsconfig {@code @/*} alias resolves). */
+    private static String toAlias(String relNoExt) {
+        String p = relNoExt.replace('\\', '/');
+        return p.startsWith("frontend/src/") ? "@/" + p.substring("frontend/src/".length()) : p;
     }
 }

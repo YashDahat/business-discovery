@@ -86,7 +86,7 @@ class RouteManifestGeneratorTest {
     void appTsxWiresProvidersRoutesAndProtection() {
         RouteManifest m = manifest("HomePage", "AdminOrdersPage");
         String app = RouteManifestGenerator.emitAppTsx(m,
-                new RouteManifestGenerator.Flags(true, true, true));
+                new RouteManifestGenerator.Flags(true, true, true, java.util.List.of()));
 
         assertThat(app).startsWith(RouteManifestGenerator.APP_HEADER);
         // nesting: BrowserRouter outermost, then query, then auth
@@ -106,12 +106,45 @@ class RouteManifestGeneratorTest {
     @Test
     void appTsxOmitsProvidersWhenAbsent() {
         String app = RouteManifestGenerator.emitAppTsx(manifest("HomePage", "AdminOrdersPage"),
-                new RouteManifestGenerator.Flags(false, false, false));
+                new RouteManifestGenerator.Flags(false, false, false, java.util.List.of()));
 
         assertThat(app).doesNotContain("QueryClientProvider")
                 .doesNotContain("AuthProvider")
                 .doesNotContain("ProtectedRoute")
                 .contains("<Route path=\"/admin/orders\" element={<AdminOrdersPage />} />");
+    }
+
+    @Test
+    void appTsxMountsDiscoveredContextProviders() {
+        RouteManifest m = manifest("HomePage", "OrderPage");
+        var providers = java.util.List.of(
+                new RouteManifestGenerator.ProviderRef("CartProvider", "./context/CartContext"));
+        String app = RouteManifestGenerator.emitAppTsx(m,
+                new RouteManifestGenerator.Flags(true, false, true, providers));
+
+        assertThat(app).contains("import { CartProvider } from './context/CartContext'");
+        // mounted inside AuthProvider, still wrapping <Routes> — so useCart() never throws
+        int auth = app.indexOf("<AuthProvider>");
+        int cartOpen = app.indexOf("<CartProvider>");
+        int routes = app.indexOf("<Routes>");
+        int cartClose = app.indexOf("</CartProvider>");
+        assertThat(auth).isLessThan(cartOpen);
+        assertThat(cartOpen).isLessThan(routes);
+        assertThat(routes).isLessThan(cartClose);
+    }
+
+    @Test
+    void discoverContextProviders_findsExportedProviders_excludesAuth(@org.junit.jupiter.api.io.TempDir java.nio.file.Path src) throws Exception {
+        java.nio.file.Files.createDirectories(src.resolve("context"));
+        java.nio.file.Files.writeString(src.resolve("context/CartContext.tsx"),
+                "export const CartProvider = ({ children }) => children;\nexport const useCart = () => {};\n");
+        java.nio.file.Files.writeString(src.resolve("context/AuthContext.tsx"),
+                "export const AuthProvider = ({ children }) => children;\n");
+
+        var found = RouteManifestGenerator.discoverContextProviders(src);
+
+        assertThat(found).extracting(RouteManifestGenerator.ProviderRef::name).containsExactly("CartProvider");
+        assertThat(found.get(0).importPath()).isEqualTo("./context/CartContext");
     }
 
     // ── helpers ───────────────────────────────────────────────────────────

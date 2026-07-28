@@ -13,6 +13,7 @@ import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.ProjectDependencies;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
+import com.business.discovery.worker.scaffold.ScaffoldModule;
 import com.business.discovery.worker.service.GitService;
 import com.business.discovery.worker.service.SpringInitializrClient;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
@@ -41,6 +42,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -62,8 +64,13 @@ public class ProjectPlanningNode implements WorkerNode {
     // @hookform/resolvers v5 Resolver generic — an unfixable-by-prompt error class that sank
     // the yeti-himalayan-kitchen frontend build (2026-07-07). Prompt guidance in file_generate.txt
     // and feature_enrichment.txt did not prevent it; the version pin is the real defense.
+    // lucide-react, date-fns, @hookform/resolvers and sonner arrive transitively via the shadcn
+    // base-set install (with shadcn-managed versions), so they are intentionally NOT pinned here —
+    // pinning risks a hallucinated range (e.g. lucide-react ^1.x, which does not exist). Only
+    // react-helmet-async has no shadcn provider and caused missing-module churn, so it is explicit.
     private static final List<String> DEFAULT_NPM_PACKAGES =
-            List.of("@tanstack/react-query", "react-hook-form", "zod@^3", "axios", "react-router-dom");
+            List.of("@tanstack/react-query", "react-hook-form", "zod@^3", "axios", "react-router-dom",
+                    "react-helmet-async");
 
     // The platform stack is fixed — briefs describe the business, never the technology.
     // A brief-supplied stack (e.g. "Next.js frontend") once reached the planning prompt and
@@ -82,15 +89,20 @@ public class ProjectPlanningNode implements WorkerNode {
     private final LlmGeneratorService enrichLlm;  // Flash — used for per-feature enrichment
     private final SpringInitializrClient initializrClient;
     private final GitService gitService;
+    // Deterministic, business-agnostic backend slices written at scaffold time (auth spine, ...).
+    // Their files are stripped from the LLM manifest so the generator never shadows them.
+    private final List<ScaffoldModule> scaffoldModules;
 
     public ProjectPlanningNode(@Qualifier("geminiPro") LlmGeneratorService llm,
                                @Qualifier("geminiFlash") LlmGeneratorService enrichLlm,
                                SpringInitializrClient initializrClient,
-                               GitService gitService) {
+                               GitService gitService,
+                               List<ScaffoldModule> scaffoldModules) {
         this.llm = llm;
         this.enrichLlm = enrichLlm;
         this.initializrClient = initializrClient;
         this.gitService = gitService;
+        this.scaffoldModules = scaffoldModules;
     }
 
     @Override
@@ -175,6 +187,10 @@ public class ProjectPlanningNode implements WorkerNode {
 
         // ── Merge: preserve VALIDATED status from prior run ───────────────────
         spec = mergeWithExisting(spec, workspace);
+
+        // ── Strip scaffold-owned files (auth spine, ...) so the generator never shadows the
+        //    pre-written scaffold. Runs on every attempt; idempotent. ──
+        stripScaffoldOwnedFiles(spec);
 
         ctx.setFileManifest(toManifest(spec));
 
@@ -266,6 +282,11 @@ public class ProjectPlanningNode implements WorkerNode {
         // Inject JWT library deps — not available via Spring Initializr, added directly to pom.xml
         injectJwtDependencies(workspace.resolve("backend/pom.xml"));
 
+        // Inject Razorpay for the payment spine. The keyword-based pre-injection in
+        // BackendGeneratorNode scans the manifest, but the payment scaffold is stripped from it, so
+        // its dependency must be added deterministically here — same reason JWT is.
+        injectRazorpayDependency(workspace.resolve("backend/pom.xml"));
+
         // Inject any extra Maven deps declared by the planning LLM in the spec
         if (specDeclaredDeps != null && !specDeclaredDeps.isEmpty()) {
             injectSpecDeclaredDeps(workspace.resolve("backend/pom.xml"), specDeclaredDeps);
@@ -286,8 +307,11 @@ public class ProjectPlanningNode implements WorkerNode {
                 management.endpoints.web.exposure.include=health,info
                 jwt.secret=${JWT_SECRET:ZGVtby1vbmx5LXNlY3JldC1rZXktZm9yLWxvY2FsLXRlc3RpbmctY2hhbmdlLWluLXByb2R1Y3Rpb24tZW52aXJvbm1lbnQ=}
                 jwt.expiration-ms=${JWT_EXPIRATION_MS:86400000}
-                admin.email=${ADMIN_EMAIL:admin@example.com}
-                admin.password=${ADMIN_PASSWORD:admin123}
+                admin.email=${ADMIN_EMAIL:owner@yourbusiness.com}
+                admin.password=${ADMIN_PASSWORD:changeme123}
+                razorpay.key.id=${RAZORPAY_KEY_ID:}
+                razorpay.key.secret=${RAZORPAY_KEY_SECRET:}
+                razorpay.webhook.secret=${RAZORPAY_WEBHOOK_SECRET:}
                 spring.mail.host=${SMTP_HOST:localhost}
                 spring.mail.port=${SMTP_PORT:587}
                 spring.mail.username=${SMTP_USERNAME:}
@@ -320,7 +344,45 @@ public class ProjectPlanningNode implements WorkerNode {
                 }
                 """.formatted(slug));
 
+        // Pre-generate the universal, business-agnostic backend slices (auth spine, ...) so the LLM
+        // never has to — and can never mis-generate them. Each module's files are stripped from the
+        // manifest in stripScaffoldOwnedFiles, so BackendGeneratorNode won't regenerate over them.
+        Path backendJavaRoot = workspace.resolve("backend/src/main/java");
+        String basePackage = "com." + slug;
+        for (ScaffoldModule module : scaffoldModules) {
+            module.write(backendJavaRoot, basePackage);
+            log.info("[ProjectPlanningNode] Scaffold module '{}' wrote its files under {}", module.name(), basePackage);
+        }
+
         log.info("[ProjectPlanningNode] Spring Boot scaffold extracted with starters: {}", starters);
+    }
+
+    /**
+     * Removes files owned by any {@link ScaffoldModule} from the spec, so the manifest handed to
+     * BackendGeneratorNode and the persisted ARCHITECTURE.json never include them — the generator
+     * therefore cannot regenerate over the pre-written scaffold. Matches a module's patterns against
+     * each file's name and path; patterns are anchored to {@code .java} so frontend files are safe.
+     */
+    private void stripScaffoldOwnedFiles(ArchitectureSpec spec) {
+        if (spec == null || spec.getFiles() == null || scaffoldModules.isEmpty()) return;
+        List<Pattern> owned = scaffoldModules.stream()
+                .flatMap(m -> m.ownedFilePatterns().stream())
+                .toList();
+        List<FileSpec> kept = spec.getFiles().stream()
+                .filter(f -> !isScaffoldOwned(f, owned))
+                .collect(Collectors.toCollection(ArrayList::new));
+        int removed = spec.getFiles().size() - kept.size();
+        if (removed > 0) {
+            spec.setFiles(kept);
+            log.info("[ProjectPlanningNode] Stripped {} scaffold-owned file(s) from the manifest "
+                    + "(pre-generated on disk by a ScaffoldModule)", removed);
+        }
+    }
+
+    private static boolean isScaffoldOwned(FileSpec f, List<Pattern> owned) {
+        String name = f.getFileName() != null ? f.getFileName() : "";
+        String path = f.getFilePath() != null ? f.getFilePath() : "";
+        return owned.stream().anyMatch(p -> p.matcher(name).find() || p.matcher(path).find());
     }
 
     // ── React scaffold via Vite CLI ───────────────────────────────────────
@@ -482,6 +544,33 @@ public class ProjectPlanningNode implements WorkerNode {
         String patched = pom.replace("</dependencies>", jwtDeps + "\t</dependencies>");
         Files.writeString(pomPath, patched);
         log.info("[ProjectPlanningNode] JWT dependencies injected into pom.xml");
+    }
+
+    // ── Razorpay pom injection (payment spine) ─────────────────────────────
+
+    private void injectRazorpayDependency(Path pomPath) throws IOException {
+        if (!Files.exists(pomPath)) {
+            log.warn("[ProjectPlanningNode] pom.xml not found at {} — skipping Razorpay injection", pomPath);
+            return;
+        }
+
+        String pom = Files.readString(pomPath);
+        if (pom.contains("razorpay-java")) {
+            log.info("[ProjectPlanningNode] Razorpay dep already present in pom.xml");
+            return;
+        }
+
+        String razorpayDep = """
+                \t\t<dependency>
+                \t\t\t<groupId>com.razorpay</groupId>
+                \t\t\t<artifactId>razorpay-java</artifactId>
+                \t\t\t<version>1.4.3</version>
+                \t\t</dependency>
+                """;
+
+        String patched = pom.replace("</dependencies>", razorpayDep + "\t</dependencies>");
+        Files.writeString(pomPath, patched);
+        log.info("[ProjectPlanningNode] Razorpay dependency injected into pom.xml");
     }
 
     private void injectSpecDeclaredDeps(Path pomPath,

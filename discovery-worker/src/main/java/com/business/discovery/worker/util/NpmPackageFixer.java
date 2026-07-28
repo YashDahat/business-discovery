@@ -44,6 +44,18 @@ public final class NpmPackageFixer {
         RENAMED_PACKAGES.put("react-query",              "@tanstack/react-query");
         RENAMED_PACKAGES.put("react-router",             "react-router-dom");
 
+        // Hallucinated @radix-ui/* primitives that don't exist — these are shadcn-only components.
+        // The LLM reaches for a Radix package name when it wants the shadcn wrapper; rewrite the
+        // import to the local shadcn component, which the scaffold installs under @/components/ui.
+        RENAMED_PACKAGES.put("@radix-ui/react-input",    "@/components/ui/input");
+        RENAMED_PACKAGES.put("@radix-ui/react-button",   "@/components/ui/button");
+        RENAMED_PACKAGES.put("@radix-ui/react-textarea", "@/components/ui/textarea");
+        RENAMED_PACKAGES.put("@radix-ui/react-card",     "@/components/ui/card");
+        RENAMED_PACKAGES.put("@radix-ui/react-badge",    "@/components/ui/badge");
+        RENAMED_PACKAGES.put("@radix-ui/react-table",    "@/components/ui/table");
+        RENAMED_PACKAGES.put("@radix-ui/react-skeleton", "@/components/ui/skeleton");
+        RENAMED_PACKAGES.put("@radix-ui/react-form",     "@/components/ui/form");
+
         // Packages the LLM frequently imports but aren't scaffolded by default
         INSTALLABLE_PACKAGES.add("react-toastify");
         INSTALLABLE_PACKAGES.add("react-hot-toast");
@@ -72,6 +84,9 @@ public final class NpmPackageFixer {
         boolean anyFixed = false;
 
         for (String pkg : missing) {
+            // A subpath import ('react-icons/fa', '@scope/name/sub') is satisfied by installing
+            // its base package — the subpath is an export of that same package.
+            String base = basePackage(pkg);
             if (RENAMED_PACKAGES.containsKey(pkg)) {
                 String correct = RENAMED_PACKAGES.get(pkg);
                 boolean rewritten = rewriteImports(frontendDir.resolve("src"), pkg, correct);
@@ -79,13 +94,13 @@ public final class NpmPackageFixer {
                     log.info("[NpmPackageFixer] Rewrote '{}' → '{}' in source files", pkg, correct);
                     anyFixed = true;
                 }
-            } else if (INSTALLABLE_PACKAGES.contains(pkg)) {
-                BuildToolService.BuildResult result = buildTool.runNpmInstallPackage(frontendDir, pkg);
+            } else if (INSTALLABLE_PACKAGES.contains(pkg) || INSTALLABLE_PACKAGES.contains(base)) {
+                BuildToolService.BuildResult result = buildTool.runNpmInstallPackage(frontendDir, base);
                 if (result.success()) {
-                    log.info("[NpmPackageFixer] Installed missing package: {}", pkg);
+                    log.info("[NpmPackageFixer] Installed missing package: {}", base);
                     anyFixed = true;
                 } else {
-                    log.warn("[NpmPackageFixer] Failed to install {} (exit={})", pkg, result.exitCode());
+                    log.warn("[NpmPackageFixer] Failed to install {} (exit={})", base, result.exitCode());
                 }
             } else {
                 log.warn("[NpmPackageFixer] Unknown package '{}' — cannot fix mechanically", pkg);
@@ -93,6 +108,18 @@ public final class NpmPackageFixer {
         }
 
         return anyFixed;
+    }
+
+    /** '@scope/name/sub' → '@scope/name'; 'name/sub' → 'name'; bare names pass through. */
+    private static String basePackage(String module) {
+        if (module.startsWith("@")) {
+            int firstSlash = module.indexOf('/');
+            if (firstSlash < 0) return module;
+            int secondSlash = module.indexOf('/', firstSlash + 1);
+            return secondSlash < 0 ? module : module.substring(0, secondSlash);
+        }
+        int slash = module.indexOf('/');
+        return slash < 0 ? module : module.substring(0, slash);
     }
 
     private static Set<String> extractMissingModules(String output) {

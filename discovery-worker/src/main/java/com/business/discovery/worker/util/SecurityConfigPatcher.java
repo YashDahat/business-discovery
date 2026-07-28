@@ -100,6 +100,10 @@ public final class SecurityConfigPatcher {
         content = fixAuthenticationManagerBean(content);
         content = fixFilterChainPermitRules(content);
         content = fixApiAuthorizationTiers(content, publicByMethod);
+        // Re-run import resolution last: the field/bean injections above may introduce symbols
+        // (e.g. @Autowired) that weren't present on the first pass. Idempotent — skips anything
+        // already imported.
+        content = fixImports(content);
         return content;
     }
 
@@ -185,6 +189,7 @@ public final class SecurityConfigPatcher {
             {"AuthenticationManager",       "org.springframework.security.authentication.AuthenticationManager"},
             {"AuthenticationConfiguration", "org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration"},
             {"HttpMethod",                  "org.springframework.http.HttpMethod"},
+            {"@Autowired",                  "org.springframework.beans.factory.annotation.Autowired"},
         };
 
         for (String[] pair : needed) {
@@ -253,6 +258,12 @@ public final class SecurityConfigPatcher {
         // Only inject if DaoAuthenticationProvider is present but UserDetailsService field is missing
         if (!content.contains("DaoAuthenticationProvider")) return content;
         if (content.contains("UserDetailsService") || content.contains("userDetailsService")) return content;
+        // A complete config (e.g. the deterministic auth scaffold) already defines its own
+        // authenticationProvider() bean and feeds it a constructor-injected service. This field
+        // exists only to back a bean we would otherwise inject in fixAuthenticationProviderBean —
+        // if that bean is already present, injecting the field is redundant and needlessly drags
+        // in an @Autowired. Skip it.
+        if (content.contains("authenticationProvider()")) return content;
 
         // Find package name to derive a reasonable import
         String pkg = extractPackage(content);

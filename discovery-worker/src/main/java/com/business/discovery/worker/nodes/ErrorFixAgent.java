@@ -20,6 +20,8 @@ import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.nio.file.Files;
+import com.business.discovery.worker.util.ApiContractCard;
+
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -172,6 +174,40 @@ public class ErrorFixAgent {
     }
 
     /**
+     * The derived wire contract, for FRONTEND fixes only.
+     *
+     * Without it the agent is blind to the real SDK: on vikram-s-fitness-studio it hit nine
+     * TS2305 "no exported member" errors on bookingService, could not see that classeService
+     * and scheduleService exported those functions with the correct paths, and so replaced
+     * every call with a hand-written apiClient request against a path it invented from the DTO
+     * name (FitnessClassDto -> /api/v1/admin/fitness-classes, which the backend never served).
+     * The card was already on disk the whole time — it was simply never handed over.
+     */
+    private String buildContractSection(FileType fileType, Path workspace) {
+        if (fileType != FileType.FRONTEND) return "";
+
+        ApiContractCard card = ApiContractCard.build(workspace);
+        if (card.isEmpty()) {
+            log.warn("[ErrorFixAgent] No derived API contract on disk — fixing without wire ground truth");
+            return "";
+        }
+        log.info("[ErrorFixAgent] Seeded contract card: {} type file(s), {} route(s)",
+                card.typeFileCount(), card.routeCount());
+
+        return """
+
+                %s
+                %s
+                When an import fails because a module does not export a symbol, find the module
+                above that DOES export it and re-point the import — splitting one import across
+                several modules if that is where the functions live. NEVER replace the call with a
+                hand-written apiClient/axios request, and NEVER infer an endpoint path from a type
+                name. The routes above are the only ones the backend serves; a path absent from
+                them 404s at runtime even though it compiles.
+                """.formatted(ApiContractCard.PROMPT_KEY, card.toPromptSection());
+    }
+
+    /**
      * Runs the agentic fix loop for the given file type (BACKEND or FRONTEND).
      * Returns true if compilation passes after the loop, false otherwise.
      */
@@ -198,10 +234,11 @@ public class ErrorFixAgent {
                 Fix the %s compilation. Current compiler errors:
 
                 %s
-
+                %s
                 Group these by root cause, investigate the minimum necessary, and patch with
                 str_replace. The harness auto-compiles after each of your changes.
-                """.formatted(fileType == FileType.BACKEND ? "backend (Java)" : "frontend (TypeScript)", errors);
+                """.formatted(fileType == FileType.BACKEND ? "backend (Java)" : "frontend (TypeScript)",
+                              errors, buildContractSection(fileType, workspace));
 
         log.info("[ErrorFixAgent] Starting fix loop for {} — max {} tool rounds", fileType, MAX_TOOL_ROUNDS);
 

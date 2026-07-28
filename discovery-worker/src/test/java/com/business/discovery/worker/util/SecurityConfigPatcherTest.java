@@ -40,7 +40,91 @@ class SecurityConfigPatcherTest {
             }
             """;
 
+    /**
+     * The deterministic auth-scaffold shape: constructor injection, its own DaoAuthenticationProvider
+     * wired from a constructor field, and a complete authenticationProvider() bean. Regression guard for
+     * the circuit-house defect where the patcher injected a redundant "@Autowired userDetailsService"
+     * field (no Autowired import) → "cannot find symbol: class Autowired" on every run.
+     */
+    private static final String SCAFFOLDED_CONFIG = """
+            package com.circuithouse.config;
+
+            import com.circuithouse.security.JwtAuthFilter;
+            import com.circuithouse.service.UserService;
+            import org.springframework.context.annotation.Bean;
+            import org.springframework.context.annotation.Configuration;
+            import org.springframework.security.authentication.AuthenticationManager;
+            import org.springframework.security.authentication.AuthenticationProvider;
+            import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
+            import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
+            import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+            import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
+            import org.springframework.security.config.http.SessionCreationPolicy;
+            import org.springframework.security.crypto.password.PasswordEncoder;
+            import org.springframework.security.web.SecurityFilterChain;
+            import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+
+            @Configuration
+            @EnableWebSecurity
+            public class SecurityConfig {
+                private final JwtAuthFilter jwtAuthFilter;
+                private final UserService userService;
+                private final PasswordEncoder passwordEncoder;
+
+                public SecurityConfig(JwtAuthFilter jwtAuthFilter, UserService userService, PasswordEncoder passwordEncoder) {
+                    this.jwtAuthFilter = jwtAuthFilter;
+                    this.userService = userService;
+                    this.passwordEncoder = passwordEncoder;
+                }
+
+                @Bean
+                public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+                    http
+                            .csrf(csrf -> csrf.disable())
+                            .authorizeHttpRequests(authorize -> authorize
+                                    .requestMatchers("/api/v1/auth/**").permitAll()
+                                    .requestMatchers("/api/v1/admin/**").hasAuthority("ADMIN")
+                                    .anyRequest().permitAll()
+                            )
+                            .sessionManagement(session -> session
+                                    .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+                            )
+                            .authenticationProvider(authenticationProvider())
+                            .addFilterBefore(jwtAuthFilter, UsernamePasswordAuthenticationFilter.class);
+                    return http.build();
+                }
+
+                @Bean
+                public AuthenticationProvider authenticationProvider() {
+                    DaoAuthenticationProvider authenticationProvider = new DaoAuthenticationProvider(userService);
+                    authenticationProvider.setPasswordEncoder(passwordEncoder);
+                    return authenticationProvider;
+                }
+
+                @Bean
+                public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
+                    return config.getAuthenticationManager();
+                }
+            }
+            """;
+
     private static final List<String> PUBLIC = List.of("/api/v1/menus/**", "/api/v1/events/**");
+
+    @Test
+    void doesNotInjectRedundantAutowiredFieldIntoCompleteScaffoldedConfig() {
+        String out = SecurityConfigPatcher.applyPatches(SCAFFOLDED_CONFIG, PUBLIC);
+        // the redundant field must not appear
+        assertThat(out).doesNotContain("private UserService userDetailsService;");
+    }
+
+    @Test
+    void neverLeavesAnAutowiredAnnotationWithoutItsImport() {
+        String out = SecurityConfigPatcher.applyPatches(SCAFFOLDED_CONFIG, PUBLIC);
+        // whatever the patcher does, a dangling @Autowired (no import) is the compile-breaking bug
+        if (out.contains("@Autowired")) {
+            assertThat(out).contains("import org.springframework.beans.factory.annotation.Autowired;");
+        }
+    }
 
     @Test
     void insertsPublicGetPermitBeforeTheApiCatchAll() {

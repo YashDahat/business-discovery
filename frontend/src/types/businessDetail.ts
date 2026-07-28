@@ -76,6 +76,19 @@ export interface BusinessEntity {
   revenueEstimate: string | null
   timezone: string | null
   createdAt: string
+  // Scraper metadata
+  runId: string | null
+  scraperJobId: string | null
+  status: string | null
+  // Google identifiers
+  googleCid: string | null
+  googlePlaceId: string | null
+  googleDataId: string | null
+  // Scoring & targeting
+  websiteScopeScore: number | null
+  isTargeted: boolean | null
+  // Popular times (hourly busyness by day)
+  popularTimes: Record<string, unknown> | null
 }
 
 export interface BusinessDetailResponse {

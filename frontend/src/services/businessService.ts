@@ -18,8 +18,18 @@ export const generateBrief = (businessId: string) =>
 export const getTasksForBrief = (briefId: string) =>
   apiClient.get<ContainerTask[]>(`/api/v3/coder/brief/${briefId}/tasks`).then(r => r.data)
 
-export const submitChanges = (briefId: string, requestedChanges: string) =>
-  apiClient.post(`/api/v3/coder/brief/${briefId}/changes`, { requestedChanges }).then(r => r.data)
+export interface ChatMessageView {
+  role: 'user' | 'ai' | 'system'
+  content: string
+}
+
+export const getBriefChat = (briefId: string) =>
+  apiClient.get<ChatMessageView[]>(`/api/v3/coder/brief/${briefId}/chat`).then(r => r.data)
+
+export interface ChatSendResult { sessionId: number; reply: string; taskId: string }
+
+export const sendBriefChatMessage = (briefId: string, message: string) =>
+  apiClient.post<ChatSendResult>(`/api/v3/coder/brief/${briefId}/chat`, { message }).then(r => r.data)
 
 export type BriefGenerationStatus = 'GENERATING' | 'COMPLETED' | 'FAILED' | 'NOT_STARTED'
 export interface BriefStatusResponse { status: BriefGenerationStatus; businessId: string; error?: string }

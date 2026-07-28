@@ -12,10 +12,13 @@ import com.business.discovery.worker.util.MavenDependencyInjector;
 import com.business.discovery.worker.util.AuthExceptionHandlerPatcher;
 import com.business.discovery.worker.util.MissingBeanPatcher;
 import com.business.discovery.worker.util.RepositoryMethodInjector;
+import com.business.discovery.worker.util.JpaBidirectionalSavePatcher;
+import com.business.discovery.worker.util.JpaBinaryColumnPatcher;
 import com.business.discovery.worker.util.JwtCircularDependencyPatcher;
 import com.business.discovery.worker.util.PasswordEncoderExtractor;
 import com.business.discovery.worker.util.RolePrefixPatcher;
 import com.business.discovery.worker.util.SecurityConfigPatcher;
+import com.business.discovery.worker.util.UserDetailsServicePatcher;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.annotation.Order;
@@ -43,12 +46,24 @@ public class BackendValidationNode implements WorkerNode {
         // because these defect classes compile clean and only surface at boot/request time.
         RolePrefixPatcher.fix(backendSrcJava);
         JwtCircularDependencyPatcher.fix(backendSrcJava);
+        // parent.setChildren(list) + repo.save(parent) without setting the child @ManyToOne back-ref —
+        // cascade inserts children with a null FK and the write path 500s (circuit-house order_items)
+        JpaBidirectionalSavePatcher.fix(backendSrcJava);
+        // MySQL columnDefinition="BINARY(16)" on UUID columns — Postgres has no BINARY type, so
+        // ddl-auto fails at boot ('type "binary" does not exist'), the table is never created and the
+        // app never goes healthy (MultiFit Aundh smoke-boot death 2026-07-26)
+        JpaBinaryColumnPatcher.fix(backendSrcJava);
         // the @Lazy patcher above cannot see the PasswordEncoder cycle (it never passes
         // through JwtAuthFilter) — yeti attempt 4 and circuit-house both shipped it
         PasswordEncoderExtractor.fix(backendSrcJava);
         // injected-but-never-declared infrastructure beans (RestTemplate) — circuit-house
         // attempt 2 compiled clean and then crash-looped on context refresh
         MissingBeanPatcher.fix(backendSrcJava);
+        // UserDetailsService injected by SecurityConfig/JwtAuthFilter but never implemented —
+        // Vikram's Fitness Studio compiled clean and crash-looped on context refresh; unlike
+        // RestTemplate there's no safe no-arg default, so this is wired to the real
+        // UserRepository/User/Role shape the project actually generated
+        UserDetailsServicePatcher.fix(backendSrcJava);
         // SecurityConfig structural beans + the tiered /api authorization that opens the public
         // catalog to anonymous visitors. Runtime-correctness: a blanket /api/** lockdown compiles
         // clean and 403s the whole storefront (circuit-house 2026-07-17 attempt 4 compiled first

@@ -49,7 +49,7 @@ class ProjectPlanningNodeTest {
         org.mockito.Mockito.lenient().when(initializrClient.getDefaultBootVersion())
                 .thenReturn("3.4.5");
 
-        ProjectPlanningNode node = new ProjectPlanningNode(llm, enrichLlm, initializrClient, gitService);
+        ProjectPlanningNode node = new ProjectPlanningNode(llm, enrichLlm, initializrClient, gitService, List.of());
 
         ArchitectBrief brief = ArchitectBrief.builder()
                 .id(UUID.randomUUID())
@@ -127,7 +127,7 @@ class ProjectPlanningNodeTest {
         org.mockito.Mockito.lenient().when(initializrClient.getDefaultBootVersion())
                 .thenReturn("3.4.5");
 
-        ProjectPlanningNode node = new ProjectPlanningNode(llm, enrichLlm, initializrClient, gitService);
+        ProjectPlanningNode node = new ProjectPlanningNode(llm, enrichLlm, initializrClient, gitService, List.of());
 
         ArchitectBrief brief = ArchitectBrief.builder()
                 .id(UUID.randomUUID()).businessCategory("Gym").location("Pune")

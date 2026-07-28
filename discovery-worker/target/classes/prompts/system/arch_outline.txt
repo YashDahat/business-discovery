@@ -49,8 +49,8 @@ Service + Controller is NOT implemented.
 - Ordering/Delivery → Order, OrderItem, OrderStatus, OrderRepository, OrderItemRepository,
   CreateOrderRequest, OrderItemRequest, OrderResponse, OrderService, OrderController,
   AdminOrderController + types/order.ts + orderService.ts + useOrders.ts + OrderPage.tsx + CartContext.tsx
-- Payment/Razorpay → PaymentService (order creation + signature verification),
-  PaymentController (webhook). ALWAYS paired with the Ordering set — never alone.
+- Payment/Razorpay → PRE-SCAFFOLDED, DO NOT PLAN (see the PAYMENT SPINE note below). The
+  ordering feature injects the scaffolded PaymentService directly; emit NO payment files or feature.
 - Events/Gallery → Event, EventRepository, EventDto, EventService, EventController,
   AdminEventController + types/event.ts + eventService.ts + useEvents.ts + EventsPage.tsx
 
@@ -120,12 +120,94 @@ regenerates the whole file) and routinely exceeds the LLM output budget.
 ## Step 3 — Baseline infra (ADDITIVE, never a substitute)
 Add to EVERY project in addition to Steps 1–2, never displacing a derived file:
 
-  Backend: User, Role, JwtUtil, JwtAuthFilter, SecurityConfig, SpaController, AuthController,
-  AdminInitializer (+ supporting repos/DTOs: UserRepository, UserService, AuthRequest,
-  AuthResponse, GlobalExceptionHandler, ErrorResponse), DataSeeder
+  Backend (PLAN THESE): SpaController, GlobalExceptionHandler, ErrorResponse.
+
+  Backend AUTH SPINE — PRE-SCAFFOLDED, DO NOT PLAN. These files are written to disk
+  deterministically by the build BEFORE you run and are NOT part of your manifest. Do NOT
+  emit a FileSpec for any of them, nor for any renamed variant (JwtService / JwtTokenProvider
+  for JwtUtil, UserDetailsServiceImpl for UserService, SecurityConfiguration for SecurityConfig,
+  etc.). Emitting one is a defect — it is stripped from the manifest and wastes a slot.
+    <base>.model.User, <base>.model.Role            (Role has exactly ADMIN, USER)
+    <base>.repository.UserRepository                (findByEmail)
+    <base>.service.UserService                      (implements UserDetailsService; loadUserByUsername -> findByEmail)
+    <base>.util.JwtUtil                             (generateToken(UserDetails), extractUsername, validateToken)
+    <base>.security.JwtAuthFilter
+    <base>.config.SecurityConfig, <base>.config.PasswordEncoderConfig
+    <base>.controller.AuthController                (POST /api/v1/auth/login, body {username,password} -> {token})
+    <base>.config.AdminInitializer                  (seeds the single ADMIN user)
+  You MAY list these in another file's imports_from — they exist on disk. Build ON TOP of these
+  facts; never contradict them:
+    - Authorities are the BARE role name ("ADMIN"), checked by hasAuthority("ADMIN") — NEVER
+      ROLE_-prefixed, anywhere.
+    - SecurityConfig permits /api/v1/auth/** and static assets, requires authority "ADMIN" for
+      /api/v1/admin/**, and leaves everything else public. So route EVERY owner-managed endpoint
+      under /api/v1/admin/** (via Admin{Domain}Controller) to protect it; public submit endpoints
+      (reservation / order / contact) live under any other path.
+
+  Backend PAYMENT SPINE — PRE-SCAFFOLDED, DO NOT PLAN. A self-contained payment gateway (Razorpay,
+  behind a PaymentGateway strategy) is written to disk before you run and is NOT part of your
+  manifest. Do NOT emit a FileSpec for any of these, nor a renamed variant (PaymentGatewayService
+  for PaymentService, RazorpayConfiguration for PaymentGatewayConfig, ...), and do NOT plan a
+  payment-processing / payment feature at all:
+    <base>.service.PaymentService                   (createOrder(CreatePaymentRequest) -> PaymentOrderResponse; verify(VerifyPaymentRequest) -> PaymentVerificationResponse)
+    <base>.gateway.PaymentGateway                   (provider abstraction) + RazorpayPaymentGateway, DemoPaymentGateway, GatewayWebhookEvent
+    <base>.config.PaymentGatewayConfig              (selects the live gateway; demo fallback when no keys)
+    <base>.model.Payment, <base>.model.PaymentStatus, <base>.repository.PaymentRepository
+    <base>.controller.PaymentController             (POST /api/v1/payments/create-order, /verify, /webhook — the webhook reconciles the payment)
+    <base>.exception.PaymentGatewayException
+    <base>.event.PaymentCapturedEvent               (published on capture, from BOTH the sync verify and the async webhook — idempotent)
+    <base>.dto.CreatePaymentRequest, PaymentOrderResponse, VerifyPaymentRequest, PaymentVerificationResponse
+  The DTO fields are provider-neutral: PaymentOrderResponse has {gatewayOrderId, gatewayKeyId,
+  amount, currency, paymentRecordId}; VerifyPaymentRequest has {gatewayOrderId, gatewayPaymentId,
+  signature}. The frontend checkout maps these to the Razorpay widget (gatewayKeyId -> key,
+  gatewayOrderId -> order_id, and razorpay_payment_id -> gatewayPaymentId on the verify call).
+  How the ordering feature uses it — this is the ONLY correct wiring, and it is what prevents a
+  dependency cycle: OrderService INJECTS PaymentService and calls it, then updates its OWN Order
+  entity from the returned result. PaymentService NEVER depends on any business service, and no
+  feature may declare a dependency that points INTO payment and back out. If a service must react
+  to an async webhook, it adds an @EventListener for PaymentCapturedEvent (payment → consumer only).
+  The frontend payment-checkout UI is still yours to plan (it calls POST /api/v1/payments/*).
+
+  DataSeeder — OPTIONAL; if planned it seeds ONLY domain content (menu items, events, ...). It
+  MUST NOT create users: the ADMIN user is seeded by the pre-scaffolded AdminInitializer, and a
+  second user-seeding component collides on the unique email and crash-loops the app at boot.
 
   Frontend: AuthContext, LoginPage, AdminDashboardPage, ProtectedRoute,
   Layout, Header, Footer, AdminLayout, api/client.ts, App.tsx
+
+  Frontend CART/COMMERCE FRAMEWORK — PRE-SCAFFOLDED (HEADLESS), DO NOT PLAN its files. A configurable,
+  business-agnostic cart framework lives under frontend/src/cart/ (state + logic only, fenced +
+  auto-mounted). It ships NO UI — YOU design and build every cart-facing element (the add control,
+  quantity control, cart drawer/summary, checkout screens) with full creative freedom, calling the
+  framework's methods. Import from '@/cart'; EXTEND by config/composition, NEVER modify src/cart/, and
+  do NOT emit a FileSpec for anything under src/cart/.
+
+  METHODS TO BUILD THE FEATURE WITH (names are FIXED — never invent others):
+    useCart() -> { cartItems, addItem(item, qty?), removeItem(id, variantKey?),
+                   setItemQuantity(id, qty, variantKey?), clearCart(),
+                   totals: { subtotal, adjustments: {id,label,amount}[], total }, cartCount }
+    useCheckout(steps) -> { current, index, isFirst, isLast, next(), back(), goTo(id), progress, error }
+    CartItem = { id, name, unitPrice, quantity, imageUrl?, variantKey?, metadata? }
+    pricing factories (cart/pricing.ts): percentageFee, flatFee, percentageDiscount, waivedOver
+    storage strategies (cart/storage.ts): localStorageCart, memoryCart
+    src/cart/cartConfig.ts — pricingRules + persistence; the ONE cart file you MAY edit
+
+  HOW TO BUILD IT (your UI, the framework's logic):
+    - Add to cart: on every product/service card, render YOUR OWN control — any design you like
+      (button, icon, "Add"/"Buy"/"Book", with or without a quantity picker) — whose handler calls
+      useCart().addItem({ id: x.id, name: x.name, unitPrice: x.price, imageUrl: x.imageUrl }). This is a
+      CONTRACT, not a fixed component: every product/service card MUST have some control that calls
+      addItem — a card with no way to add leaves the cart empty and the store unusable. (The framework
+      renders nothing itself, and no <Toaster/> is mounted — if you want toast feedback, add sonner's
+      <Toaster/> to your layout yourself.)
+    - Quantity: build your own stepper/select and call setItemQuantity(id, qty, variantKey).
+    - Cart view + checkout: read cartItems + totals; drive the confirm flow with useCheckout(steps),
+      passing as many steps as the business needs (restaurant: delivery→payment→confirm; gym: schedule
+      →member→payment; wholesale: shipping→review→payment). Map cartItems to the order request
+      (cartItem.id is the product id; it is string | number, so coerce, e.g. Number(cartItem.id)); render totals.total.
+    - Item kinds: food/drink/gym scheme/ticket/product all map to CartItem (variantKey for variants,
+      metadata for extras). Pricing (GST/delivery/discount): add rules to cartConfig.ts, read useCart().totals —
+      NEVER hardcode a charge inside a component.
 
 App.tsx MUST be included in the files array — it is NOT scaffold. But do NOT design its
 route table: App.tsx and frontend/src/routes.ts are DERIVED from this plan at build time
@@ -202,9 +284,10 @@ same domain on backend and frontend are SEPARATE features.
   AdminPage.tsx + every Step 2a component belonging to those pages)
 - INFRA: ALL infra files (CI workflows, nginx.conf if any). Exactly one INFRA feature per
   project, named "infrastructure". No enrichment runs for it.
-- SHARED: cross-cutting backend utilities used by multiple domains: User, Role, JwtUtil,
-  JwtAuthFilter, SecurityConfig, SpaController, AuthController, its DTOs, UserRepository,
-  UserService, AdminInitializer.
+- SHARED: cross-cutting backend utilities that are NOT pre-scaffolded — SpaController,
+  GlobalExceptionHandler, ErrorResponse. (The auth spine — User, Role, SecurityConfig,
+  PasswordEncoderConfig, JwtUtil, JwtAuthFilter, AuthController, Auth DTOs, UserRepository,
+  UserService, AdminInitializer — is pre-scaffolded per Step 3; never place it in a feature.)
 
 ## Size rule
 4–10 files per feature, NOT counting COMPONENT files. If a domain exceeds 10 non-component
@@ -215,7 +298,9 @@ together in the per-feature pass), so never move components to a sub-feature to 
 the count.
 
 ## Example feature set for a restaurant with Menu, Reservation, Order, Payment features:
-BACKEND:  authentication, menu-management, reservation-system, order-management, payment-processing, admin-crud
+## (payment is NOT a backend feature — the payment spine is pre-scaffolded; order-management
+##  injects PaymentService. Only the payment-checkout FRONTEND feature is yours to plan.)
+BACKEND:  menu-management, reservation-system, order-management, admin-crud
 FRONTEND: auth-ui, menu-display, reservation-booking, order-flow, payment-checkout, admin-portal
 INFRA:    infrastructure
 SHARED:   shared-backend

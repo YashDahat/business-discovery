@@ -1,7 +1,14 @@
 package com.business.discovery.worker.util;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.TreeMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Emits the two files derived from the {@link RouteManifest} — sibling of
@@ -24,18 +31,69 @@ public final class RouteManifestGenerator {
     public static final String APP_HEADER =
             "// Assembled from routes.ts by the route registry — re-derived every attempt.";
 
+    /**
+     * A React context provider the LLM authored under src/context (or src/providers) that App.tsx must
+     * mount, or any component calling its hook throws "useX must be used within a XProvider" at runtime.
+     * AuthProvider is handled by {@link Flags#hasAuth} and is intentionally excluded from this list.
+     */
+    public record ProviderRef(String name, String importPath) {}
+
     /** Provider wiring flags — from the plan on first emit, from disk on reconciliation. */
-    public record Flags(boolean hasAuth, boolean hasProtected, boolean hasQuery) {
+    public record Flags(boolean hasAuth, boolean hasProtected, boolean hasQuery,
+                        List<ProviderRef> contextProviders) {
 
         public static Flags fromDisk(Path frontendSrc) {
             boolean auth = Files.exists(frontendSrc.resolve("context/AuthContext.tsx"));
             boolean prot = Files.exists(frontendSrc.resolve("components/ProtectedRoute.tsx"));
             boolean query = Files.exists(frontendSrc.resolve("api/client.ts"));
-            return new Flags(auth, prot, query);
+            return new Flags(auth, prot, query, discoverContextProviders(frontendSrc));
         }
     }
 
     private RouteManifestGenerator() {}
+
+    // ── Context provider discovery ─────────────────────────────────────────
+
+    /** Matches an exported provider component: `export const XProvider`, `export function XProvider`. */
+    private static final Pattern EXPORTED_PROVIDER =
+            Pattern.compile("export\\s+(?:const|function)\\s+([A-Z]\\w*Provider)\\b");
+
+    /**
+     * Scans src/context and src/providers for every exported {@code *Provider} the LLM wrote, so
+     * App.tsx can mount each one. This is what keeps a new provider (Cart, Theme, Toast, ...) from
+     * shipping unmounted: App.tsx is worker-derived and the LLM cannot edit it, so discovery — not
+     * a hardcoded whitelist — is the only thing that connects an LLM-authored provider to the tree.
+     * AuthProvider is excluded (mounted via {@link Flags#hasAuth}); results are sorted for a stable emit.
+     */
+    public static List<ProviderRef> discoverContextProviders(Path frontendSrc) {
+        TreeMap<String, ProviderRef> found = new TreeMap<>(); // sorted + de-duped by provider name
+        for (String dir : List.of("context", "providers", "cart")) {
+            Path base = frontendSrc.resolve(dir);
+            if (!Files.isDirectory(base)) continue;
+            try (Stream<Path> files = Files.list(base)) {
+                files.filter(p -> p.toString().endsWith(".tsx") || p.toString().endsWith(".ts"))
+                     .forEach(p -> collectProviders(p, dir, found));
+            } catch (IOException ignored) {
+                // a missing/unreadable context dir simply yields no extra providers
+            }
+        }
+        found.remove("AuthProvider"); // already wired via Flags.hasAuth — never mount it twice
+        return new ArrayList<>(found.values());
+    }
+
+    private static void collectProviders(Path file, String dir, TreeMap<String, ProviderRef> out) {
+        String fileName = file.getFileName().toString();
+        String moduleName = fileName.replaceFirst("\\.tsx?$", "");
+        try {
+            Matcher m = EXPORTED_PROVIDER.matcher(Files.readString(file));
+            while (m.find()) {
+                String name = m.group(1);
+                out.putIfAbsent(name, new ProviderRef(name, "./" + dir + "/" + moduleName));
+            }
+        } catch (IOException ignored) {
+            // unreadable file → contributes no providers
+        }
+    }
 
     // ── routes.ts ─────────────────────────────────────────────────────────
 
@@ -94,6 +152,9 @@ public final class RouteManifestGenerator {
         }
         if (flags.hasAuth()) sb.append("import { AuthProvider } from './context/AuthContext'\n");
         if (flags.hasProtected()) sb.append("import ProtectedRoute from './components/ProtectedRoute'\n");
+        for (ProviderRef p : flags.contextProviders()) {
+            sb.append("import { ").append(p.name()).append(" } from '").append(p.importPath()).append("'\n");
+        }
         sb.append('\n');
         for (RouteManifest.Entry e : manifest.entries()) {
             sb.append("import ").append(e.page()).append(" from '").append(e.importPath()).append("';\n");
@@ -110,6 +171,12 @@ public final class RouteManifestGenerator {
             close.add(0, "</QueryClientProvider>");
         }
         if (flags.hasAuth()) { open.add("<AuthProvider>"); close.add(0, "</AuthProvider>"); }
+        // Discovered providers sit innermost (inside auth/query/router, outside Routes) so they may
+        // use those hooks; every page therefore renders within each provider the LLM authored.
+        for (ProviderRef p : flags.contextProviders()) {
+            open.add("<" + p.name() + ">");
+            close.add(0, "</" + p.name() + ">");
+        }
 
         String indent = "    ";
         for (int k = 0; k < open.size(); k++) {

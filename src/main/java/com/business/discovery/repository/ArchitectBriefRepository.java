@@ -28,4 +28,9 @@ public interface ArchitectBriefRepository extends JpaRepository<ArchitectBrief, 
     @Transactional
     @Query("UPDATE ArchitectBrief b SET b.requestedChanges = :changes WHERE b.id = :id")
     void updateRequestedChanges(@Param("id") UUID id, @Param("changes") String changes);
+
+    @Modifying
+    @Transactional
+    @Query("UPDATE ArchitectBrief b SET b.chatSessionId = :sessionId WHERE b.id = :id")
+    void updateChatSessionId(@Param("id") UUID id, @Param("sessionId") Long sessionId);
 }

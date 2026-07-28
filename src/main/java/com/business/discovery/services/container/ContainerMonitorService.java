@@ -9,6 +9,7 @@ import com.business.discovery.repository.ArchitectBriefRepository;
 import com.business.discovery.repository.ContainerTaskRepository;
 import com.business.discovery.repository.MasterAgentHeartbeatRepository;
 import com.business.discovery.services.agent.AgentEventService;
+import com.business.discovery.services.chat.ChatService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.UUID;
 
 @Slf4j
 @Service
@@ -30,6 +32,7 @@ public class ContainerMonitorService {
     private final ContainerPoolManager poolManager;
     private final AgentEventService agentEventService;
     private final ArchitectBriefRepository architectBriefRepository;
+    private final ChatService chatService;
 
     @Value("${docker.container.max-lifetime-minutes:60}")
     private int maxLifetimeMinutes;
@@ -136,6 +139,12 @@ public class ContainerMonitorService {
         task.setCompletedAt(LocalDateTime.now());
         containerTaskRepository.save(task);
 
+        // Note the applied change in the chat thread before clearing requested_changes
+        // below — the null check here is how we know this was a change cycle at all.
+        notifyChatIfChangeCycle(task.getBriefId(), task.getGithubPrUrl() != null
+                ? "Changes applied — PR opened: " + task.getGithubPrUrl()
+                : "Changes applied — new commit pushed");
+
         // Clear requested_changes — change cycle is done; null = no cycle in flight
         architectBriefRepository.updateRequestedChanges(task.getBriefId(), null);
 
@@ -177,6 +186,8 @@ public class ContainerMonitorService {
 
                 log.error("[FAILURE] Config/Auth error for task {} — alerting",
                         task.getId());
+                notifyChatIfChangeCycle(task.getBriefId(),
+                        "Failed to apply changes — configuration error, manual review needed");
                 alertHuman(task, errorContext);
             }
 
@@ -218,7 +229,21 @@ public class ContainerMonitorService {
         containerTaskRepository.save(task);
 
         log.error("[FAILED] Max retries exhausted for task: {}", task.getId());
+        notifyChatIfChangeCycle(task.getBriefId(),
+                "Failed to apply changes after " + task.getMaxAttempts() + " attempts — manual review needed");
         alertHuman(task, "Max retries exhausted — manual review needed");
+    }
+
+    // Posts a status note into the brief's Request Changes thread, but only
+    // when a change cycle is actually in flight (chat session exists and
+    // requested_changes is still set) — the initial, non-change generation
+    // run has neither, so it stays silent.
+    private void notifyChatIfChangeCycle(UUID briefId, String note) {
+        architectBriefRepository.findById(briefId).ifPresent(brief -> {
+            if (brief.getChatSessionId() != null && brief.getRequestedChanges() != null) {
+                chatService.appendSystemNote(brief.getChatSessionId(), note);
+            }
+        });
     }
 
     // ─── Failure classification ───────────────────────────

@@ -18,7 +18,7 @@ export function Sidebar() {
   const { data: pool } = useContainerPool()
 
   return (
-    <aside className="w-[220px] shrink-0 h-full border-r border-[#1e1e1e] bg-[#0a0a0a] flex flex-col">
+    <aside className="w-[360px] shrink-0 h-full border-r border-[#1e1e1e] bg-[#0a0a0a] flex flex-col">
       <div className="px-4 py-5 border-b border-[#1e1e1e]">
         <span className="text-sm font-semibold text-white tracking-tight">Discovery</span>
         <span className="ml-1 text-sm font-semibold text-[#00ff88]">Ops</span>

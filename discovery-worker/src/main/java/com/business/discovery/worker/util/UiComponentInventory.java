@@ -150,14 +150,15 @@ public final class UiComponentInventory {
     /** Compact prompt section — the only permitted UI imports, from reality. */
     public String toPromptSection() {
         StringBuilder sb = new StringBuilder();
-        sb.append("These are the ONLY importable names, enumerated from the installed packages.\n")
+        sb.append("These are the ONLY importable UI names, enumerated from the installed packages.\n")
           .append("Any UI import not listed here DOES NOT EXIST and will fail to compile.\n\n");
-        radixExports.forEach((pkg, exports) ->
-                sb.append(pkg).append(": ").append(String.join(", ", exports)).append("\n"));
-        sb.append("\n");
+        sb.append("PREFERRED — shadcn wrappers (import these; paths are lowercase):\n");
         shadcnUiExports.forEach((stem, exports) ->
                 sb.append("@/components/ui/").append(stem).append(": ")
                   .append(String.join(", ", exports)).append("\n"));
+        sb.append("\nFALLBACK — raw @radix-ui/* (use ONLY when no shadcn wrapper above covers the need):\n");
+        radixExports.forEach((pkg, exports) ->
+                sb.append(pkg).append(": ").append(String.join(", ", exports)).append("\n"));
         return sb.toString();
     }
 

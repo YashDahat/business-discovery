@@ -107,11 +107,16 @@ public class ArchitectBrief {
     @Column(name = "raw_llm_output", columnDefinition = "TEXT")
     private String rawLlmOutput;
 
-    // Client-requested changes — set by POST /api/v3/coder/brief/{id}/changes,
+    // Client-requested changes — set by POST /api/v3/coder/brief/{id}/chat,
     // cleared by ContainerMonitorService after successful worker exit.
     // Non-null means a change cycle is in flight.
     @Column(name = "requested_changes", columnDefinition = "TEXT")
     private String requestedChanges;
+
+    // chat_memory.memory_id for this brief's Request Changes thread.
+    // Null until the first chat message is sent; created lazily.
+    @Column(name = "chat_session_id")
+    private Long chatSessionId;
 
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)

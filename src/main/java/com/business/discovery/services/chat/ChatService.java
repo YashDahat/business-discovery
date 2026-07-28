@@ -4,7 +4,9 @@ import com.business.discovery.model.ChatMemoryEntity;
 import com.business.discovery.repository.ChatMemoryRepository;
 import com.business.discovery.services.chatMemory.PostgresChatMemoryStore;
 import com.business.discovery.tools.GoogleMapsScraperTool;
+import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.data.message.ChatMessageType;
 import dev.langchain4j.memory.chat.ChatMemoryProvider;
 import dev.langchain4j.memory.chat.MessageWindowChatMemory;
 import dev.langchain4j.model.chat.ChatModel;
@@ -15,11 +17,16 @@ import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Slf4j
 @Service
 public class ChatService {
+
+    // Marks a deterministic pipeline note (queued/applied/failed) so getHistory()
+    // can render it as a system message instead of a genuine LLM reply.
+    private static final String SYSTEM_NOTE_PREFIX = "[SYSTEM] ";
 
     private final ChatModel chatModel;
     private final PostgresChatMemoryStore memoryStore;
@@ -28,7 +35,7 @@ public class ChatService {
 
     // AiServices-based assistant — handles tool calls automatically
     interface ArchitectAssistant {
-        String chat(@MemoryId Long memoryId, @UserMessage List<ChatMessage> messages);
+        String chat(@MemoryId Long memoryId, @UserMessage String message);
     }
 
     private ArchitectAssistant architectAssistant;
@@ -65,31 +72,57 @@ public class ChatService {
 
     public record ChatResult(Long sessionId, String reply) {}
 
+    public record ChatMessageView(String role, String content) {}
+
+    public Long createSession() {
+        var entity = repository.save(new ChatMemoryEntity("[]"));
+        Long sessionId = entity.getMemoryId();
+        log.info("New session created — ID: {}", sessionId);
+        return sessionId;
+    }
+
     public ChatResult chat(Long sessionId, List<ChatMessage> newMessages) {
-        // If new conversation, pre-save to get DB-generated ID
-        if (sessionId == -1L) {
-            var entity = repository.save(
-                    new com.business.discovery.model.ChatMemoryEntity("[]")
-            );
-            sessionId = entity.getMemoryId();
-            log.info("New session created — ID: {}", sessionId);
-        }
+        Long resolvedId = sessionId == -1L ? createSession() : sessionId;
 
-        Long resolvedId = sessionId;
+        String userText = newMessages.stream()
+                .filter(m -> m.type() == ChatMessageType.USER)
+                .map(m -> ((dev.langchain4j.data.message.UserMessage) m).singleText())
+                .reduce((first, second) -> second)
+                .orElseThrow(() -> new IllegalArgumentException("No user message provided"));
 
-        // Build memory and add all incoming messages
-        MessageWindowChatMemory memory = MessageWindowChatMemory.builder()
-                .id(resolvedId)
-                .maxMessages(20)
-                .chatMemoryStore(memoryStore)
-                .build();
+        log.info("Chat request — sessionId: {}, message: {}", resolvedId, userText);
 
-        newMessages.forEach(memory::add);
-
-        log.info("Chat request — sessionId: {}, message: {}", resolvedId, memory.messages());
-
-        String reply = architectAssistant.chat(resolvedId, memory.messages());
+        String reply = architectAssistant.chat(resolvedId, userText);
 
         return new ChatResult(resolvedId, reply);
+    }
+
+    // Appends a message straight to the store without invoking the LLM — used
+    // for deterministic pipeline status notes (queued / applied / failed).
+    public void appendSystemNote(Long sessionId, String content) {
+        List<ChatMessage> updated = new ArrayList<>(memoryStore.getMessages(sessionId));
+        updated.add(AiMessage.from(SYSTEM_NOTE_PREFIX + content));
+        memoryStore.updateMessages(sessionId, updated);
+    }
+
+    public List<ChatMessageView> getHistory(Long sessionId) {
+        return memoryStore.getMessages(sessionId).stream()
+                .map(ChatService::toView)
+                .toList();
+    }
+
+    private static ChatMessageView toView(ChatMessage message) {
+        if (message.type() == ChatMessageType.USER) {
+            String text = ((dev.langchain4j.data.message.UserMessage) message).singleText();
+            return new ChatMessageView("user", text);
+        }
+        if (message.type() == ChatMessageType.AI) {
+            String text = ((AiMessage) message).text();
+            if (text != null && text.startsWith(SYSTEM_NOTE_PREFIX)) {
+                return new ChatMessageView("system", text.substring(SYSTEM_NOTE_PREFIX.length()));
+            }
+            return new ChatMessageView("ai", text != null ? text : "");
+        }
+        return new ChatMessageView("system", message.toString());
     }
 }

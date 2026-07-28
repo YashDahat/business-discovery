@@ -18,7 +18,7 @@ public class ScraperContainerService {
     @Value("${scraper.container.name:scraper}")
     private String containerName;
 
-    @Value("${scraper.container.image:gosom/google-maps-scraper:latest}")
+    @Value("${scraper.container.image:gosom/google-maps-scraper:v1.17.1}")
     private String containerImage;
 
     @Value("${docker.network.name:shared-network}")

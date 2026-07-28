@@ -92,6 +92,36 @@ class FrontendGeneratorNodeTest {
     }
 
     @Test
+    void preinstallsShadcnBaseSet_whenPackageJsonPresent() throws Exception {
+        // With a real npm project present, the pre-install fires shadcn add for the base set
+        // (button/select/form/sonner/... ) before generation — not the reactive post-gen path.
+        Files.writeString(tempDir.resolve("frontend/package.json"), "{\"name\":\"t\",\"dependencies\":{}}");
+        lenient().when(buildToolService.runShadcnAdd(any(), any()))
+                .thenReturn(new BuildToolService.BuildResult(0, ""));
+        lenient().when(buildToolService.runNpmInstallPackage(any(), any()))
+                .thenReturn(new BuildToolService.BuildResult(0, ""));
+        lenient().when(buildToolService.runNpmInstallDevPackages(any(), any(String[].class)))
+                .thenReturn(new BuildToolService.BuildResult(0, ""));
+
+        String appPath = "frontend/src/App.tsx";
+        writeSpec(tempDir, specEntry(appPath, "FRONTEND", "PLANNED", "instruction App"));
+        when(ctx.getFileManifest()).thenReturn(List.of(new FileEntry(appPath, FileType.FRONTEND, "Root")));
+        when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
+        when(ctx.getWorkspaceDir()).thenReturn(tempDir);
+        when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
+        when(ctx.getAttemptNumber()).thenReturn(1);
+        when(ctx.getGithubBranch()).thenReturn("feature/test");
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
+                .thenReturn("export default function C() { return null; }");
+
+        node.execute(ctx);
+
+        verify(buildToolService, atLeastOnce()).runShadcnAdd(any(),
+                argThat(c -> c.contains("select") && c.contains("form")
+                        && c.contains("sonner") && c.contains("button")));
+    }
+
+    @Test
     void noFrontendFiles_doesNothing() {
         when(ctx.getFileManifest()).thenReturn(List.of(
                 new FileEntry("backend/src/main/java/com/test/model/Order.java", FileType.BACKEND, "Order entity")

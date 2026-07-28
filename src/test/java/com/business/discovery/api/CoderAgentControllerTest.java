@@ -6,6 +6,7 @@ import com.business.discovery.model.ContainerTask;
 import com.business.discovery.model.ContainerTask.ContainerTaskStatus;
 import com.business.discovery.repository.ArchitectBriefRepository;
 import com.business.discovery.repository.ContainerTaskRepository;
+import com.business.discovery.services.chat.ChatService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
@@ -31,6 +32,7 @@ class CoderAgentControllerTest {
     @Mock CoderAgentGraph coderAgentGraph;
     @Mock ContainerTaskRepository containerTaskRepository;
     @Mock ArchitectBriefRepository architectBriefRepository;
+    @Mock ChatService chatService;
 
     @InjectMocks CoderAgentController controller;
 
@@ -80,62 +82,127 @@ class CoderAgentControllerTest {
         assertThat(response.getBody().get(0).getStatus()).isEqualTo(ContainerTaskStatus.COMPLETED);
     }
 
-    // ── POST /api/v3/coder/brief/{briefId}/changes ────────────────────────
+    // ── POST /api/v3/coder/brief/{briefId}/chat ────────────────────────────
 
     @Test
-    void submitChanges_briefAndTaskExist_returns202() {
+    void sendChatMessage_newSession_createsSessionAndQueuesTask() {
         when(architectBriefRepository.findById(BRIEF_ID))
                 .thenReturn(Optional.of(ArchitectBrief.builder()
                         .runId(UUID.randomUUID())
                         .businessCategory("Restaurant")
-                        .build()));
-        doNothing().when(architectBriefRepository).updateRequestedChanges(eq(BRIEF_ID), any());
+                        .build())); // chatSessionId is null
         ContainerTask task = completedTask();
         when(containerTaskRepository.findTopByBriefIdOrderByCreatedAtDesc(BRIEF_ID))
                 .thenReturn(Optional.of(task));
         when(containerTaskRepository.save(any())).thenReturn(task);
+        when(chatService.createSession()).thenReturn(42L);
+        when(chatService.chat(eq(42L), any()))
+                .thenReturn(new ChatService.ChatResult(42L, "Got it — queuing the update."));
 
-        var request = new CoderAgentController.ChangesRequest("Add WhatsApp contact form");
-        ResponseEntity<Map<String, Object>> response = controller.submitChanges(BRIEF_ID, request);
+        var request = new CoderAgentController.ChatSendRequest("Add WhatsApp contact form");
+        ResponseEntity<Map<String, Object>> response = controller.sendChatMessage(BRIEF_ID, request);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
-        assertThat(response.getBody()).containsEntry("status", "CHANGES_SUBMITTED");
-        assertThat(response.getBody().get("briefId")).isEqualTo(BRIEF_ID.toString());
+        assertThat(response.getBody()).containsEntry("reply", "Got it — queuing the update.");
+        assertThat(response.getBody()).containsEntry("sessionId", 42L);
+        assertThat(response.getBody()).containsEntry("taskId", TASK_ID.toString());
 
+        verify(architectBriefRepository).updateChatSessionId(BRIEF_ID, 42L);
         verify(architectBriefRepository).updateRequestedChanges(BRIEF_ID, "Add WhatsApp contact form");
-        verify(containerTaskRepository).save(argThat(t ->
-                t.getStatus() == ContainerTaskStatus.PENDING));
+        verify(containerTaskRepository).save(argThat(t -> t.getStatus() == ContainerTaskStatus.PENDING));
+        verify(chatService).appendSystemNote(42L, "Queued — will regenerate on next cycle");
     }
 
     @Test
-    void submitChanges_briefNotFound_throwsIllegalArgument() {
-        when(architectBriefRepository.findById(BRIEF_ID)).thenReturn(Optional.empty());
-        var request = new CoderAgentController.ChangesRequest("Add gallery");
+    void sendChatMessage_existingSession_reusesSessionId() {
+        when(architectBriefRepository.findById(BRIEF_ID))
+                .thenReturn(Optional.of(ArchitectBrief.builder()
+                        .runId(UUID.randomUUID())
+                        .businessCategory("Restaurant")
+                        .chatSessionId(7L)
+                        .build()));
+        ContainerTask task = completedTask();
+        when(containerTaskRepository.findTopByBriefIdOrderByCreatedAtDesc(BRIEF_ID))
+                .thenReturn(Optional.of(task));
+        when(containerTaskRepository.save(any())).thenReturn(task);
+        when(chatService.chat(eq(7L), any()))
+                .thenReturn(new ChatService.ChatResult(7L, "Sure thing."));
 
-        assertThatThrownBy(() -> controller.submitChanges(BRIEF_ID, request))
+        var request = new CoderAgentController.ChatSendRequest("Now make the header blue");
+        controller.sendChatMessage(BRIEF_ID, request);
+
+        verify(chatService, never()).createSession();
+        verify(architectBriefRepository, never()).updateChatSessionId(any(), any());
+        verify(chatService).appendSystemNote(7L, "Queued — will regenerate on next cycle");
+    }
+
+    @Test
+    void sendChatMessage_briefNotFound_throwsIllegalArgument() {
+        when(architectBriefRepository.findById(BRIEF_ID)).thenReturn(Optional.empty());
+        var request = new CoderAgentController.ChatSendRequest("Add gallery");
+
+        assertThatThrownBy(() -> controller.sendChatMessage(BRIEF_ID, request))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining(BRIEF_ID.toString());
 
         verify(containerTaskRepository, never()).save(any());
+        verifyNoInteractions(chatService);
     }
 
     @Test
-    void submitChanges_taskNotFound_throwsIllegalArgument() {
+    void sendChatMessage_taskNotFound_throwsIllegalArgument() {
         when(architectBriefRepository.findById(BRIEF_ID))
                 .thenReturn(Optional.of(ArchitectBrief.builder()
                         .runId(UUID.randomUUID())
                         .businessCategory("Restaurant")
                         .build()));
-        doNothing().when(architectBriefRepository).updateRequestedChanges(eq(BRIEF_ID), any());
         when(containerTaskRepository.findTopByBriefIdOrderByCreatedAtDesc(BRIEF_ID))
                 .thenReturn(Optional.empty());
 
-        var request = new CoderAgentController.ChangesRequest("Change color scheme");
+        var request = new CoderAgentController.ChatSendRequest("Change color scheme");
 
-        assertThatThrownBy(() -> controller.submitChanges(BRIEF_ID, request))
+        assertThatThrownBy(() -> controller.sendChatMessage(BRIEF_ID, request))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining(BRIEF_ID.toString());
 
         verify(containerTaskRepository, never()).save(any());
+        verify(architectBriefRepository, never()).updateRequestedChanges(any(), any());
+        verifyNoInteractions(chatService);
+    }
+
+    // ── GET /api/v3/coder/brief/{briefId}/chat ─────────────────────────────
+
+    @Test
+    void getChat_noSession_returnsEmptyListWithoutTouchingChatService() {
+        when(architectBriefRepository.findById(BRIEF_ID))
+                .thenReturn(Optional.of(ArchitectBrief.builder()
+                        .runId(UUID.randomUUID())
+                        .businessCategory("Restaurant")
+                        .build())); // chatSessionId is null
+
+        ResponseEntity<List<ChatService.ChatMessageView>> response = controller.getChat(BRIEF_ID);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).isEmpty();
+        verifyNoInteractions(chatService);
+    }
+
+    @Test
+    void getChat_existingSession_returnsHistory() {
+        when(architectBriefRepository.findById(BRIEF_ID))
+                .thenReturn(Optional.of(ArchitectBrief.builder()
+                        .runId(UUID.randomUUID())
+                        .businessCategory("Restaurant")
+                        .chatSessionId(7L)
+                        .build()));
+        List<ChatService.ChatMessageView> history = List.of(
+                new ChatService.ChatMessageView("user", "Add WhatsApp contact form"),
+                new ChatService.ChatMessageView("system", "Queued — will regenerate on next cycle"));
+        when(chatService.getHistory(7L)).thenReturn(history);
+
+        ResponseEntity<List<ChatService.ChatMessageView>> response = controller.getChat(BRIEF_ID);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getBody()).isEqualTo(history);
     }
 }

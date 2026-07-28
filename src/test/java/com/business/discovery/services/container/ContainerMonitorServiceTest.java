@@ -1,5 +1,6 @@
 package com.business.discovery.services.container;
 
+import com.business.discovery.model.ArchitectBrief;
 import com.business.discovery.model.ContainerTask;
 import com.business.discovery.model.ContainerTask.ContainerFailureType;
 import com.business.discovery.model.ContainerTask.ContainerTaskStatus;
@@ -8,6 +9,7 @@ import com.business.discovery.repository.ArchitectBriefRepository;
 import com.business.discovery.repository.ContainerTaskRepository;
 import com.business.discovery.repository.MasterAgentHeartbeatRepository;
 import com.business.discovery.services.agent.AgentEventService;
+import com.business.discovery.services.chat.ChatService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -37,6 +39,7 @@ class ContainerMonitorServiceTest {
     @Mock ContainerPoolManager poolManager;
     @Mock AgentEventService agentEventService;
     @Mock ArchitectBriefRepository architectBriefRepository;
+    @Mock ChatService chatService;
 
     @InjectMocks ContainerMonitorService monitor;
 
@@ -86,6 +89,57 @@ class ContainerMonitorServiceTest {
         verify(architectBriefRepository).updateRequestedChanges(BRIEF_ID, null);
         verify(poolManager).releaseSlot();
         verify(dockerContainerService).removeContainer(CONTAINER_ID);
+        // No brief.requestedChanges stubbed (Optional.empty() default) — not a change cycle
+        verifyNoInteractions(chatService);
+    }
+
+    @Test
+    void monitorContainers_successAfterChangeRequest_appendsAppliedNoteToChatThread() {
+        ContainerTask task = runningTask();
+        task.setGithubPrUrl("https://github.com/org/repo/pull/7");
+        when(containerTaskRepository.findByStatus(ContainerTaskStatus.RUNNING))
+                .thenReturn(List.of(task));
+        when(dockerContainerService.isContainerRunning(CONTAINER_ID)).thenReturn(false);
+        when(dockerContainerService.getExitCode(CONTAINER_ID)).thenReturn(0);
+        when(containerTaskRepository.save(any())).thenReturn(task);
+        when(architectBriefRepository.findById(BRIEF_ID)).thenReturn(Optional.of(ArchitectBrief.builder()
+                .runId(RUN_ID)
+                .chatSessionId(7L)
+                .requestedChanges("Add WhatsApp contact form")
+                .build()));
+        doNothing().when(architectBriefRepository).updateRequestedChanges(any(), any());
+        doNothing().when(agentEventService).log(any(), any(), any(), any(), any(), any());
+
+        monitor.monitorContainers();
+
+        verify(chatService).appendSystemNote(7L, "Changes applied — PR opened: https://github.com/org/repo/pull/7");
+    }
+
+    @Test
+    void monitorContainers_maxRetriesExhausted_appendsFailedNoteWhenChangeCycleInFlight() {
+        ContainerTask task = runningTask();
+        task.setAttemptCount(3); // == maxAttempts(3) — canRetry() is false
+        when(containerTaskRepository.findByStatus(ContainerTaskStatus.RUNNING))
+                .thenReturn(List.of(task));
+        when(dockerContainerService.isContainerRunning(CONTAINER_ID)).thenReturn(false);
+        when(dockerContainerService.getExitCode(CONTAINER_ID)).thenReturn(1);
+        when(dockerContainerService.getContainerLogs(CONTAINER_ID))
+                .thenReturn("BUILD FAILED\ncompilation failed: cannot find symbol");
+        when(containerTaskRepository.save(any())).thenReturn(task);
+        when(architectBriefRepository.findById(BRIEF_ID)).thenReturn(Optional.of(ArchitectBrief.builder()
+                .runId(RUN_ID)
+                .chatSessionId(7L)
+                .requestedChanges("Add WhatsApp contact form")
+                .build()));
+        doNothing().when(agentEventService).log(any(), any(), any(), any(), any(), any());
+
+        monitor.monitorContainers();
+
+        ArgumentCaptor<ContainerTask> saved = ArgumentCaptor.forClass(ContainerTask.class);
+        verify(containerTaskRepository).save(saved.capture());
+        assertThat(saved.getValue().getStatus()).isEqualTo(ContainerTaskStatus.FAILED);
+        verify(chatService).appendSystemNote(7L,
+                "Failed to apply changes after 3 attempts — manual review needed");
     }
 
     // ── Still running ─────────────────────────────────────────────────────

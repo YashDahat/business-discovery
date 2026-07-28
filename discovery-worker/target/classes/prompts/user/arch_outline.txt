@@ -89,10 +89,16 @@ ALWAYS include these baseline files regardless of business type:
 - backend/src/main/java/com/{{slug}}/dto/ErrorResponse.java (DTO)
 - backend/src/main/java/com/{{slug}}/model/User.java (MODEL) and model/Role.java (MODEL, enum: ADMIN, CUSTOMER)
 - backend/src/main/java/com/{{slug}}/repository/UserRepository.java (REPOSITORY)
-- backend/src/main/java/com/{{slug}}/service/UserService.java (SERVICE)
+- backend/src/main/java/com/{{slug}}/service/UserService.java (SERVICE) — MUST implement
+  UserDetailsService: loadUserByUsername queries UserRepository by the login identifier and
+  maps User's roles to "ROLE_"-prefixed GrantedAuthority. SecurityConfig and JwtAuthFilter
+  constructor-inject UserDetailsService for DaoAuthenticationProvider — this compiles clean
+  but crash-loops the whole app at boot if nothing implements the interface.
 - backend/src/main/java/com/{{slug}}/util/JwtUtil.java (UTIL)
 - backend/src/main/java/com/{{slug}}/security/JwtAuthFilter.java (CONFIG)
-- backend/src/main/java/com/{{slug}}/config/SecurityConfig.java (CONFIG)
+- backend/src/main/java/com/{{slug}}/config/SecurityConfig.java (CONFIG) — passwordEncoder()
+  MUST carry @Bean (never a plain helper method) — a missing @Bean fails the same way for
+  anything that injects PasswordEncoder
 - backend/src/main/java/com/{{slug}}/config/AdminInitializer.java (CONFIG)
 - backend/src/main/java/com/{{slug}}/config/DataSeeder.java (CONFIG)
 - backend/src/main/java/com/{{slug}}/controller/AuthController.java (CONTROLLER)
