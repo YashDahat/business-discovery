@@ -60,6 +60,14 @@ PRINCIPAL IS NOT AN ID — @AuthenticationPrincipal UserDetails.getUsername() is
   or otherwise parse it as an entity id. Resolve the user through the repository
   (userRepository.findByEmail(userDetails.getUsername())) and use that entity's id.
 
+CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-built in @/cart):
+  CartItem: { id: string|number; name: string; unitPrice: number; quantity: number; imageUrl?: string|null; variantKey?: string; metadata?: Record<string,unknown> }
+  addItem(item: CartItem): void  — import useCart from '@/cart/CartContext' or '@/context/CartContext'
+  CartTotals: { subtotal: number; adjustments: AdjustmentLine[]; total: number }
+  AdjustmentLine: { id: string; label: string; amount: number }
+  Access totals as: const { cartItems, addItem, totals, cartCount } = useCart()
+  totals.adjustments.map(adj => adj.label / adj.amount) — never adj.index or adj.name
+
 8. UI COMPONENTS — shadcn-first. Follow this priority order for frontend files:
    (a) PREFER shadcn: for any element shadcn provides — Button, Input, Textarea, Label, Select,
        Checkbox, RadioGroup, Switch, Form, Dialog, AlertDialog, DropdownMenu, Popover, Tooltip,

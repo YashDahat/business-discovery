@@ -388,6 +388,13 @@ public class ProjectPlanningNode implements WorkerNode {
         // mvnw must be executable for BackendValidationNode
         workspace.resolve("backend/mvnw").toFile().setExecutable(true);
 
+        // ── Fence foundation frontend files so FrontendGeneratorNode never overwrites them ──
+        // Without the fence marker, the LLM treats AuthContext, api/client, lib/utils, and
+        // context shims as fair game and regenerates them with degraded typing — then
+        // ErrorFixAgent burns rounds re-fixing files the foundation already had correct.
+        // The marker is the first-line comment isFenced() checks before attempting LLM generation.
+        fenceFoundationFrontendFiles(workspace.resolve("frontend/src"));
+
         // ── npm ci — restore node_modules from the committed lock file ─────────
         // Much faster than npm install (~5s vs ~60s) because all versions are locked.
         Path frontend = workspace.resolve("frontend");
@@ -430,6 +437,46 @@ public class ProjectPlanningNode implements WorkerNode {
         }
         if (toAdd.isEmpty()) return;
         Files.writeString(pomPath, pom.replace("</dependencies>", toAdd + "\t</dependencies>"));
+    }
+
+    /**
+     * Prepends the foundation fence marker to every TypeScript/TSX file in the foundation's
+     * {@code frontend/src} tree that is NOT a business-specific generated file. This prevents
+     * {@code FrontendGeneratorNode.isFenced()} from letting the LLM overwrite foundation files
+     * like {@code AuthContext.tsx}, {@code api/client.ts}, {@code lib/utils.ts}, and cart/context
+     * shims with degraded LLM versions, which previously burned ErrorFixAgent rounds re-fixing
+     * files that the foundation already had correct.
+     *
+     * <p>Only foundation-owned paths are fenced — specifically {@code src/context/},
+     * {@code src/api/}, {@code src/lib/}, and {@code src/cart/}. Generated app files
+     * ({@code src/pages/}, {@code src/components/}, {@code src/hooks/}, etc.) are NOT touched
+     * so the LLM can still generate them freely.
+     */
+    private void fenceFoundationFrontendFiles(Path frontendSrc) {
+        String marker = "// " + com.business.discovery.worker.nodes.FrontendGeneratorNode.FOUNDATION_FENCE_MARKER
+                + " — do not edit by hand.\n";
+        // Exactly the foundation-owned directories — nothing else
+        List<String> foundationDirs = List.of("context", "api", "lib", "cart");
+        for (String dir : foundationDirs) {
+            Path dirPath = frontendSrc.resolve(dir);
+            if (!Files.isDirectory(dirPath)) continue;
+            try (var walk = Files.walk(dirPath)) {
+                walk.filter(p -> p.toString().endsWith(".tsx") || p.toString().endsWith(".ts"))
+                    .forEach(p -> {
+                        try {
+                            String content = Files.readString(p);
+                            // Idempotent — skip if already fenced
+                            if (content.startsWith("// GENERATED")) return;
+                            Files.writeString(p, marker + content);
+                        } catch (IOException e) {
+                            log.warn("[ProjectPlanningNode] Could not fence {}: {}", p, e.getMessage());
+                        }
+                    });
+            } catch (IOException e) {
+                log.warn("[ProjectPlanningNode] Could not walk {} for fencing: {}", dirPath, e.getMessage());
+            }
+        }
+        log.info("[ProjectPlanningNode] Foundation frontend files fenced in: {}", foundationDirs);
     }
 
     /** Recursively deletes a path tree (used to remove the nested .git after clone). */

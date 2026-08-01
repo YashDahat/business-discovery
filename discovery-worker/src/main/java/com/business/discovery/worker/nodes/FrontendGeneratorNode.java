@@ -53,6 +53,11 @@ public class FrontendGeneratorNode implements WorkerNode {
     // Max concurrent Flash LLM calls per layer — limits Gemini API rate pressure.
     private static final int MAX_PARALLEL_PER_LAYER = 5;
 
+    // Marker written as the first-line comment in every foundation frontend file so isFenced()
+    // protects them from LLM overwrite. The LLM must never regenerate AuthContext, api/client,
+    // lib/utils, or context shims — these are part of the deterministic foundation scaffold.
+    public static final String FOUNDATION_FENCE_MARKER = "GENERATED foundation scaffold";
+
     // Same-attempt regeneration budget for a file that comes back truncated (mid-token).
     private static final int MAX_GEN_ATTEMPTS = 3;
 
@@ -523,7 +528,8 @@ public class FrontendGeneratorNode implements WorkerNode {
                 String first = lines.findFirst().orElse("");
                 return first.contains("GENERATED from the backend API contract")
                         || first.contains("GENERATED from the architecture plan")
-                        || first.contains(com.business.discovery.worker.util.CartSpineScaffold.FENCE_MARKER);
+                        || first.contains(com.business.discovery.worker.util.CartSpineScaffold.FENCE_MARKER)
+                        || first.contains(FOUNDATION_FENCE_MARKER);
             } catch (IOException ignored) {
                 return false;
             }
