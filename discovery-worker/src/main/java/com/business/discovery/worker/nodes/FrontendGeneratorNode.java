@@ -169,6 +169,13 @@ public class FrontendGeneratorNode implements WorkerNode {
     // Guards concurrent writes to ARCHITECTURE.json from parallel Flash LLM threads within a layer.
     private final ReentrantLock archJsonLock = new ReentrantLock();
 
+    // Playwright e2e scaffold — config + dev dep only (spec SCRIPTS are authored later by
+    // PlaywrightSpecGenerator). Skipped entirely when e2e is disabled.
+    @org.springframework.beans.factory.annotation.Value("${worker.e2e.enabled:true}")
+    private boolean e2eEnabled;
+    @org.springframework.beans.factory.annotation.Value("${worker.e2e.playwright-version:1.48.0}")
+    private String playwrightVersion;
+
     public FrontendGeneratorNode(@Qualifier("geminiFlash") LlmGeneratorService flashLlm,
                                  BuildToolService buildToolService,
                                  GeneratedFileRepository fileRepo,
@@ -231,6 +238,12 @@ public class FrontendGeneratorNode implements WorkerNode {
             // button/sonner deps resolve, before generation so consumers see it; fenced from
             // regeneration and auto-mounted by App.tsx provider discovery.
             com.business.discovery.worker.util.CartSpineScaffold.write(frontendDir.resolve("src"));
+
+            // Seed the export registry from ALL foundation files already on disk before generation
+            // starts. Without this, TypeScriptImportFixer cannot resolve imports from foundation
+            // files that are not in the spec (e.g. AuthContext, context shims, api/client) because
+            // the registry only learns about files as they are generated or skipped during this run.
+            seedExportRegistryFromDisk(frontendDir.resolve("src"), workspace, exportRegistry);
 
             // Ground-truth UI inventory: what @radix-ui packages and shadcn ui files ACTUALLY
             // export, enumerated from the installed workspace. Injected into every generation
@@ -629,8 +642,40 @@ public class FrontendGeneratorNode implements WorkerNode {
             "use-toast", "sonner"
     );
 
+    /**
+     * Pre-seeds the export registry from every .ts/.tsx file already on disk in the frontend/src
+     * tree before generation starts. This covers foundation files that are not in the spec and
+     * therefore never go through the normal skipped-file registration path:
+     * AuthContext, context shims (CartContext re-export, CheckoutContext), api/client, etc.
+     * Without this, TypeScriptImportFixer cannot resolve imports like
+     * {@code import { useAuth } from '@/context/AuthContext'} because the registry is empty
+     * at the start of generation and only learns about files as they are processed.
+     * Idempotent — a file registered twice simply overwrites its entry with the same data.
+     */
+    private void seedExportRegistryFromDisk(Path frontendSrc, Path workspace,
+                                            TypeScriptExportRegistry exportRegistry) {
+        if (!Files.isDirectory(frontendSrc)) return;
+        int seeded = 0;
+        try (var walk = Files.walk(frontendSrc)) {
+            for (Path p : (Iterable<Path>) walk.filter(f ->
+                    f.toString().endsWith(".tsx") || f.toString().endsWith(".ts"))
+                    .filter(f -> !f.toString().contains("node_modules"))
+                    .filter(f -> !f.toString().contains("/components/ui/")) // shadcn handled by UiInventory
+                    ::iterator) {
+                try {
+                    exportRegistry.register(p, Files.readString(p));
+                    seeded++;
+                } catch (IOException ignored) {}
+            }
+        } catch (IOException e) {
+            log.warn("[FrontendGeneratorNode] Could not seed export registry from disk: {}", e.getMessage());
+        }
+        if (seeded > 0) log.info("[FrontendGeneratorNode] Seeded export registry from {} pre-existing files", seeded);
+    }
+
     private void ensureFrontendWorkspace(Path frontendDir, Path workspace) throws IOException {
         writeCanonicalConfigs(frontendDir);
+        ensurePlaywrightScaffold(frontendDir);
         ensureTailwind(frontendDir);
         ensureHookformResolvers(frontendDir);
         ensureRadixUiPackages(frontendDir);
@@ -638,6 +683,52 @@ public class FrontendGeneratorNode implements WorkerNode {
         ensureShadcnComponents(frontendDir, workspace);
         ensureEslintSetup(frontendDir);
         runEslintPass(frontendDir);
+    }
+
+    // Canonical playwright.config.ts — deterministic scaffold (never LLM-authored). The e2e spec
+    // SCRIPTS under frontend/e2e/ are generated separately by PlaywrightSpecGenerator; this writes
+    // only config + the dev dependency, exactly like CANONICAL_VITE_CONFIG / tsconfig above.
+    private static final String CANONICAL_PLAYWRIGHT_CONFIG = """
+            import { defineConfig, devices } from '@playwright/test'
+
+            // Scaffolded — do not edit. Feature e2e specs live in ./e2e (one per feature).
+            // baseURL is injected by the pipeline runner via the BASE_URL env var.
+            export default defineConfig({
+              testDir: './e2e',
+              timeout: 30_000,
+              expect: { timeout: 7_000 },
+              fullyParallel: false,
+              retries: 0,
+              reporter: [['list'], ['json', { outputFile: 'e2e-results.json' }]],
+              use: {
+                baseURL: process.env.BASE_URL || 'http://localhost:8080',
+                trace: 'off',
+                screenshot: 'only-on-failure',
+              },
+              projects: [
+                { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+              ],
+            })
+            """;
+
+    /**
+     * Deterministic Playwright setup: writes the canonical config + the e2e/ dir and adds
+     * {@code @playwright/test} as a dev dependency. No test content — that is authored later.
+     * Guarded by worker.e2e.enabled so a disabled pipeline ships no Playwright footprint.
+     */
+    private void ensurePlaywrightScaffold(Path frontendDir) throws IOException {
+        if (!e2eEnabled) return;
+        Files.writeString(frontendDir.resolve("playwright.config.ts"), CANONICAL_PLAYWRIGHT_CONFIG);
+        Files.createDirectories(frontendDir.resolve("e2e"));
+        log.info("[FrontendGeneratorNode] Wrote canonical playwright.config.ts");
+
+        Path pkgPath = frontendDir.resolve("package.json");
+        if (Files.exists(pkgPath) && !Files.readString(pkgPath).contains("@playwright/test")) {
+            BuildToolService.BuildResult r = buildToolService.runNpmInstallDevPackages(
+                    frontendDir, "@playwright/test@" + playwrightVersion);
+            if (r.success()) log.info("[FrontendGeneratorNode] Installed @playwright/test@{} (dev)", playwrightVersion);
+            else log.warn("[FrontendGeneratorNode] @playwright/test install failed: {}", r.output());
+        }
     }
 
     private void writeCanonicalConfigs(Path frontendDir) throws IOException {

@@ -43,6 +43,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git config --global user.email "worker@discovery.local" \
     && git config --global user.name "Discovery Worker"
 
+# Playwright Chromium + its OS deps, for the in-process e2e test runner (E2eTestNode /
+# PlaywrightRunnerService). Verified installable on this jammy base at planning time. Keep the
+# version in sync with worker.e2e.playwright-version (the @playwright/test dev dep the frontend
+# scaffold pins) so the cached browser revision matches the runner.
+RUN npx --yes playwright@1.48.0 install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /app/target/*.jar app.jar
 
 ENTRYPOINT ["java", "-jar", "app.jar"]

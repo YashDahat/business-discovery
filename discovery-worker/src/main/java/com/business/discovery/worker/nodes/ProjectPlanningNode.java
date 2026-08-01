@@ -93,6 +93,12 @@ public class ProjectPlanningNode implements WorkerNode {
     // Their files are stripped from the LLM manifest so the generator never shadows them.
     private final List<ScaffoldModule> scaffoldModules;
 
+    // Foundation repo cloned instead of running Spring Initializr + npm create vite.
+    // Contains auth/payment/cart spine + shadcn base set + all canonical configs pre-committed.
+    // Set WEBAPP_FOUNDATION_REPO to override the default (useful for forks or local testing).
+    @org.springframework.beans.factory.annotation.Value("${worker.foundation.repo:https://github.com/YashDahat/webapp-foundation.git}")
+    private String foundationRepo;
+
     public ProjectPlanningNode(@Qualifier("geminiPro") LlmGeneratorService llm,
                                @Qualifier("geminiFlash") LlmGeneratorService enrichLlm,
                                SpringInitializrClient initializrClient,
@@ -195,14 +201,17 @@ public class ProjectPlanningNode implements WorkerNode {
         ctx.setFileManifest(toManifest(spec));
 
         try {
-            // Scaffold only on first run — on retry the cloned repo already has these
+            // Scaffold only on first run — on retry the cloned foundation already has these
             if (!Files.exists(workspace.resolve("backend/pom.xml"))) {
                 ProjectDependencies deps = resolveDependencies(spec);
-                scaffoldSpringBoot(workspace, slug, business.getTitle(), deps.getSpringBootStarters(),
-                        deps.getMavenDependencies());
-                scaffoldVite(workspace, deps.getNpmPackages());
+                // Extra starters = what the planning LLM requested minus the foundation baseline
+                List<String> extraStarters = deps.getSpringBootStarters().stream()
+                        .filter(s -> !DEFAULT_SPRING_STARTERS.contains(s))
+                        .toList();
+                cloneFoundation(workspace, slug, business.getTitle(),
+                        ctx.getGithubToken(), extraStarters, deps.getMavenDependencies());
                 writeDockerArtifacts(workspace, slug);
-                log.info("[ProjectPlanningNode] CLI scaffold complete for '{}'", business.getTitle());
+                log.info("[ProjectPlanningNode] Foundation scaffold complete for '{}'", business.getTitle());
             } else {
                 // Scaffold was already done on a prior attempt. Remove any Application.java
                 // that landed in a wrong sub-package (happens when packageName param was missing).
@@ -231,6 +240,205 @@ public class ProjectPlanningNode implements WorkerNode {
         } catch (IOException | InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new WorkerException(FailureType.INFRA, "Scaffold failed: " + e.getMessage(), e);
+        }
+    }
+
+    // ── Foundation clone (replaces Spring Initializr + Vite + scaffold modules) ──────
+
+    /**
+     * Clones the webapp-foundation repo into the workspace and adapts it for this business:
+     * renames the {@code com.webappfoundation} placeholder package, updates pom.xml/app name,
+     * and runs {@code npm ci} (fast — package-lock.json is committed) to restore node_modules.
+     *
+     * <p>What this replaces vs the old flow:
+     * <ul>
+     *   <li>Spring Initializr download — foundation already has a working pom.xml</li>
+     *   <li>JWT + Razorpay pom injection — already in foundation pom.xml</li>
+     *   <li>AuthScaffoldModule (12 files) + PaymentScaffoldModule (16 files) — already committed</li>
+     *   <li>npm create vite + npm install (~60s) — already committed with package-lock.json</li>
+     *   <li>shadcn base set install (25 components) — already committed</li>
+     *   <li>Playwright scaffold + @playwright/test install — already committed</li>
+     *   <li>CartSpineScaffold (7 files) + context shims — already committed</li>
+     * </ul>
+     *
+     * <p>What still runs after this method:
+     * <ul>
+     *   <li>{@code injectSpecDeclaredDeps} — adds any extra Maven deps the planning LLM declared</li>
+     *   <li>{@code writeDockerArtifacts} — Dockerfile/compose/env are business-specific</li>
+     *   <li>{@code FrontendGeneratorNode.ensurePlaywrightScaffold} — no-ops (already present)</li>
+     *   <li>All generation nodes — run unchanged against the renamed package tree</li>
+     * </ul>
+     */
+    private void cloneFoundation(Path workspace, String slug, String businessName,
+                                 String githubToken,
+                                 List<String> extraStarters,
+                                 List<com.business.discovery.worker.service.llm.MavenCoordinate> specDeclaredDeps)
+            throws IOException, InterruptedException {
+
+        // Build authenticated clone URL
+        String authedUrl = foundationRepo;
+        if (githubToken != null && !githubToken.isBlank() && foundationRepo.startsWith("https://")) {
+            authedUrl = foundationRepo.replace("https://", "https://" + githubToken + "@");
+        }
+
+        // Clone to a TEMP directory — NOT to workspace directly.
+        // By the time this runs, GitWorkspaceNode has already done:
+        //   git init /workspace + git remote add origin <business-repo> + git fetch + git checkout
+        // So /workspace is already a live git repo pointing to the business's GitHub repo.
+        // Cloning the foundation INTO /workspace would fail (git refuses to clone into a
+        // non-empty dir) or, worse, overwrite the business repo's .git with the foundation's.
+        // Instead: clone to a sibling temp dir → copy files across → delete temp.
+        Path tempDir = workspace.resolveSibling("foundation-tmp");
+        try {
+            log.info("[ProjectPlanningNode] Cloning foundation from {} to temp dir", foundationRepo);
+            gitService.clone(authedUrl, tempDir);
+
+            // Copy every file from the foundation (excluding its .git) into the business workspace.
+            // The workspace .git is untouched — it still points to the business repo.
+            try (var walk = Files.walk(tempDir)) {
+                walk.filter(p -> !p.startsWith(tempDir.resolve(".git")))
+                    .filter(p -> !p.equals(tempDir))
+                    .forEach(src -> {
+                        Path dest = workspace.resolve(tempDir.relativize(src));
+                        try {
+                            if (Files.isDirectory(src)) {
+                                Files.createDirectories(dest);
+                            } else {
+                                Files.createDirectories(dest.getParent());
+                                Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING);
+                            }
+                        } catch (IOException e) {
+                            log.warn("[ProjectPlanningNode] Could not copy {} → {}: {}", src, dest, e.getMessage());
+                        }
+                    });
+            }
+            log.info("[ProjectPlanningNode] Foundation files copied into workspace");
+        } finally {
+            deleteRecursive(tempDir);
+        }
+
+        // ── Package rename: com.webappfoundation → com.<slug> ────────────────
+        String oldPkg  = "com.webappfoundation";
+        String newPkg  = "com." + slug;
+        String oldCls  = "WebAppFoundationApplication";
+        String newCls  = SlugUtil.toClassName(businessName) + "Application";
+
+        Path javaRoot = workspace.resolve("backend/src/main/java");
+        if (Files.isDirectory(javaRoot)) {
+            // 1. Rename the package directory itself
+            Path oldPkgDir = javaRoot.resolve("com/webappfoundation");
+            Path newPkgDir = javaRoot.resolve("com/" + slug);
+            if (Files.exists(oldPkgDir)) {
+                Files.createDirectories(newPkgDir.getParent());
+                java.nio.file.Files.move(oldPkgDir, newPkgDir,
+                        StandardCopyOption.REPLACE_EXISTING);
+                log.info("[ProjectPlanningNode] Renamed package dir {} → {}", oldPkgDir, newPkgDir);
+            }
+            // 2. Rewrite package declarations and class references in every Java file
+            try (var walk = Files.walk(javaRoot)) {
+                walk.filter(p -> p.toString().endsWith(".java"))
+                    .forEach(p -> {
+                        try {
+                            String content = Files.readString(p);
+                            String updated = content
+                                    .replace(oldPkg, newPkg)
+                                    .replace(oldCls, newCls);
+                            if (!updated.equals(content)) Files.writeString(p, updated);
+                        } catch (IOException e) {
+                            log.warn("[ProjectPlanningNode] Could not rewrite {}: {}", p, e.getMessage());
+                        }
+                    });
+            }
+        }
+
+        // ── pom.xml: update groupId, artifactId, name ────────────────────────
+        Path pom = workspace.resolve("backend/pom.xml");
+        if (Files.exists(pom)) {
+            String content = Files.readString(pom)
+                    .replace("<groupId>com.webappfoundation</groupId>",
+                             "<groupId>com." + slug + "</groupId>")
+                    .replace("<artifactId>webapp-foundation-backend</artifactId>",
+                             "<artifactId>" + slug + "-backend</artifactId>")
+                    .replace("<name>webapp-foundation</name>",
+                             "<name>" + slug + "backend</name>");
+            Files.writeString(pom, content);
+        }
+
+        // ── application.properties: update app name ───────────────────────────
+        Path appProps = workspace.resolve("backend/src/main/resources/application.properties");
+        if (Files.exists(appProps)) {
+            String content = Files.readString(appProps)
+                    .replace("spring.application.name=webappfoundation",
+                             "spring.application.name=" + slug);
+            Files.writeString(appProps, content);
+        }
+
+        // ── Inject any extra Maven deps the planning LLM declared ─────────────
+        if (specDeclaredDeps != null && !specDeclaredDeps.isEmpty()) {
+            injectSpecDeclaredDeps(pom, specDeclaredDeps);
+        }
+
+        // ── Inject business-specific Spring Boot starters beyond the foundation baseline ─
+        // The foundation already has: web, data-jpa, postgresql, lombok, validation,
+        // actuator, security, mail. Only inject extras the planning LLM requested.
+        // resolveDependencies() was already called by the caller; its starters list is
+        // passed in here so this method stays stateless.
+        injectExtraStarters(pom, extraStarters);
+
+        // mvnw must be executable for BackendValidationNode
+        workspace.resolve("backend/mvnw").toFile().setExecutable(true);
+
+        // ── npm ci — restore node_modules from the committed lock file ─────────
+        // Much faster than npm install (~5s vs ~60s) because all versions are locked.
+        Path frontend = workspace.resolve("frontend");
+        log.info("[ProjectPlanningNode] Running npm ci in {}", frontend);
+        run(frontend, "npm", "ci");
+
+        log.info("[ProjectPlanningNode] Foundation clone complete — package {} → {}, class {} → {}",
+                oldPkg, newPkg, oldCls, newCls);
+    }
+
+    /**
+     * Injects Spring Boot starter dependencies that the planning LLM requested but aren't
+     * already in the foundation's pom.xml. Most starters follow the canonical pattern
+     * {@code org.springframework.boot:spring-boot-starter-<id>}; the method skips any
+     * that are already present to remain idempotent across retries.
+     *
+     * <p>Examples of extras a planning LLM might request: cache, websocket, batch,
+     * oauth2-client, data-redis, data-elasticsearch. The foundation baseline (web, data-jpa,
+     * postgresql, lombok, validation, actuator, security, mail) covers ~90% of projects;
+     * this handles the remaining specialised starters.
+     */
+    private void injectExtraStarters(Path pomPath, List<String> extraStarters) throws IOException {
+        if (extraStarters == null || extraStarters.isEmpty()) return;
+        if (!Files.exists(pomPath)) return;
+        String pom = Files.readString(pomPath);
+        StringBuilder toAdd = new StringBuilder();
+        for (String starter : extraStarters) {
+            // Spring Boot starters follow: org.springframework.boot:spring-boot-starter-<id>
+            // Some starters (e.g. "postgresql") are actually driver starters under a different
+            // groupId — skip those; they're either in the foundation or handled by keyword injection.
+            String artifactId = starter.startsWith("spring-boot-starter-")
+                    ? starter : "spring-boot-starter-" + starter;
+            if (pom.contains("<artifactId>" + artifactId + "</artifactId>")
+                    || toAdd.toString().contains(artifactId)) continue;
+            toAdd.append("\t\t<dependency>\n")
+                 .append("\t\t\t<groupId>org.springframework.boot</groupId>\n")
+                 .append("\t\t\t<artifactId>").append(artifactId).append("</artifactId>\n")
+                 .append("\t\t</dependency>\n");
+            log.info("[ProjectPlanningNode] Injected extra starter: {}", artifactId);
+        }
+        if (toAdd.isEmpty()) return;
+        Files.writeString(pomPath, pom.replace("</dependencies>", toAdd + "\t</dependencies>"));
+    }
+
+    /** Recursively deletes a path tree (used to remove the nested .git after clone). */
+    private static void deleteRecursive(Path root) throws IOException {
+        try (var walk = Files.walk(root)) {
+            walk.sorted(java.util.Comparator.reverseOrder())
+                .forEach(p -> {
+                    try { Files.delete(p); } catch (IOException ignored) {}
+                });
         }
     }
 

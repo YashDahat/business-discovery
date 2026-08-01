@@ -399,6 +399,27 @@ public abstract class LlmGeneratorService {
     }
 
     /**
+     * Generates ONE Playwright e2e spec file's raw content for a feature's user flow. Writes only
+     * the test SCRIPT — config/deps are deterministic scaffold elsewhere. Context is the feature
+     * flow + the route manifest + the available data-testid selectors + seeded login credentials.
+     */
+    public String generateE2eSpec(String featureName,
+                                  String featureInstruction,
+                                  String routesContext,
+                                  String selectorContext,
+                                  String credentialsContext) {
+        String system = PromptLoader.load("system/e2e_spec.txt");
+        String user = PromptTemplate.from(PromptLoader.load("user/e2e_spec.txt"))
+                .with("featureName",        featureName != null ? featureName : "")
+                .with("featureInstruction", featureInstruction != null ? featureInstruction : "")
+                .with("routes",             routesContext != null ? routesContext : "")
+                .with("selectors",          selectorContext != null ? selectorContext : "")
+                .with("credentials",        credentialsContext != null ? credentialsContext : "(none seeded)")
+                .render();
+        return stripMarkdown(callLlm(system, user));
+    }
+
+    /**
      * Pro call: compares generated file against its spec, returns deviations.
      * Pass "FEATURE ROLE: {fileRole}\n\nFEATURE INSTRUCTION:\n{featureInstruction}" as codingInstruction.
      * Parse failures are treated as compliant to avoid blocking the pipeline.

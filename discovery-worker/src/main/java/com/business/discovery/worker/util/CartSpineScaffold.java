@@ -57,7 +57,23 @@ public final class CartSpineScaffold {
         writeFile(cart.resolve("index.ts"), INDEX);
         // Config is the single business edit point — write it only if absent so tuning survives retries.
         writeIfAbsent(cart.resolve("cartConfig.ts"), CART_CONFIG);
-        log.info("[CartSpineScaffold] Wrote headless cart framework under {}", cart);
+
+        // The LLM consistently imports CartContext and CheckoutContext from @/context/* (the
+        // conventional React path) instead of @/cart/* (our internal module path). These shim
+        // re-exports make BOTH import paths resolve without changing the canonical implementations,
+        // eliminating the "Cannot find module '@/context/CartContext'" errors that burned
+        // ErrorFixAgent rounds on every restaurant/e-commerce run.
+        Path context = frontendSrc.resolve("context");
+        Files.createDirectories(context);
+        writeIfAbsent(context.resolve("CartContext.tsx"),
+                "// Generated shim — canonical implementation lives in @/cart/CartContext\n"
+                + "export { CartProvider, useCart } from '@/cart/CartContext';\n"
+                + "export type { CartContextValue } from '@/cart/CartContext';\n");
+        writeIfAbsent(context.resolve("CheckoutContext.tsx"),
+                "// Generated shim — checkout flow lives in @/cart/useCheckout\n"
+                + "export { useCheckout } from '@/cart/useCheckout';\n");
+
+        log.info("[CartSpineScaffold] Wrote headless cart framework under {} + context shims", cart);
     }
 
     private static void writeFile(Path path, String content) throws IOException {

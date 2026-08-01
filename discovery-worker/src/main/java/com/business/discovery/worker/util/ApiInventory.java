@@ -45,6 +45,17 @@ public final class ApiInventory {
 
     public record TypeDef(String name, boolean isEnum, List<Field> fields, List<String> enumConstants) {}
 
+    // Foundation-spine controllers whose endpoints must NOT be turned into TypeScript SDK
+    // functions. AuthController's login is handled by AuthContext directly; PaymentController's
+    // endpoints are called by the payment checkout UI using the raw ApiContractCard (the LLM
+    // sees the path + type info without needing a derived service wrapper here). Deriving
+    // authService.ts would conflict with AuthContext's self-contained login logic.
+    private static final java.util.Set<String> FOUNDATION_CONTROLLERS = java.util.Set.of(
+            "AuthController.java",
+            "PaymentController.java",
+            "SpaController.java"
+    );
+
     private final List<Endpoint> endpoints;
     private final Map<String, TypeDef> types; // by simple name
 
@@ -93,9 +104,17 @@ public final class ApiInventory {
                 }
                 String fileName = f.getFileName().toString();
                 if (fileName.endsWith("Controller.java")) {
+                    // Skip foundation-spine controllers — their endpoints are handled by
+                    // AuthContext (login) and the payment scaffold (createOrder/verify/webhook).
+                    // Deriving an authService.ts or paymentService.ts from these would conflict
+                    // with the foundation's self-contained AuthContext and the payment spine.
+                    if (FOUNDATION_CONTROLLERS.contains(fileName)) continue;
                     parseController(content, endpoints);
                 }
-                // DTOs and model classes/enums both feed the type table
+                // DTOs and model classes/enums both feed the type table.
+                // Foundation DTOs (AuthRequest, AuthResponse, payment DTOs) ARE included so
+                // generated code that depends on them gets correct type info — they're just not
+                // exposed as standalone service SDK functions.
                 String dir = f.getParent().getFileName() != null ? f.getParent().getFileName().toString() : "";
                 if (dir.equals("dto") || dir.equals("model")) {
                     parseType(content, types);

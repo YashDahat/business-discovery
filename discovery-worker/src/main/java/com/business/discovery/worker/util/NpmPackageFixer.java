@@ -57,6 +57,9 @@ public final class NpmPackageFixer {
         RENAMED_PACKAGES.put("@radix-ui/react-form",     "@/components/ui/form");
 
         // Packages the LLM frequently imports but aren't scaffolded by default
+        // lucide-react: shadcn pulls it transitively but npm prune can drop it; LLM also imports
+        // it directly. It is always correct to install — shadcn requires it.
+        INSTALLABLE_PACKAGES.add("lucide-react");
         INSTALLABLE_PACKAGES.add("react-toastify");
         INSTALLABLE_PACKAGES.add("react-hot-toast");
         INSTALLABLE_PACKAGES.add("sonner");

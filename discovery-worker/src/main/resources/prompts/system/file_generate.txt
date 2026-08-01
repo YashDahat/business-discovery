@@ -176,6 +176,7 @@ PRINCIPAL IS NOT AN ID — @AuthenticationPrincipal UserDetails.getUsername() is
 8. EMPTY STATES: when a list/result is empty, render a styled empty-state with icon + message — not a blank section.
 9. DYNAMIC COPY ONLY: business name, phone, address, hours — all from props or API response. Zero hardcoded strings in JSX.
 10. MOBILE NAV: a Header/navbar that hides its links with `hidden md:flex` MUST provide a mobile fallback — a hamburger button (lucide-react Menu/X, shown `md:hidden`) that toggles a dropdown listing the same links plus the auth actions. Without it, mobile visitors see only the logo and cannot navigate.
+11. TEST HOOKS (data-testid): put a `data-testid` on every element an automated flow must find — so browser e2e tests locate elements by a stable id, not brittle text. Use kebab-case with a stable convention: nav links `nav-<routeKey>` (nav-memberships); a form `<entity>-form`; its inputs `<entity>-<field>` (login-email, login-password, trial-name); its submit `<entity>-submit` (login-submit); primary CTAs `<action>-cta` (join-cta, book-cta); repeated list/card items `<entity>-card` (same testid on each — tests select by index). Add them to real interactive elements only (inputs, buttons, links, cards); never to layout wrappers. This is additive — it never changes rendered output or replaces accessibility roles/labels.
 
 # OUTPUT
 Return ONLY raw file content — no fences, language tag, explanation, or preamble.
