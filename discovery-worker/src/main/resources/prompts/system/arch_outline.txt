@@ -120,7 +120,8 @@ regenerates the whole file) and routinely exceeds the LLM output budget.
 ## Step 3 — Baseline infra (ADDITIVE, never a substitute)
 Add to EVERY project in addition to Steps 1–2, never displacing a derived file:
 
-  Backend (PLAN THESE): SpaController, GlobalExceptionHandler, ErrorResponse.
+  Backend (PLAN THESE): GlobalExceptionHandler, ErrorResponse.
+  SpaController is PRE-SCAFFOLDED by the foundation — DO NOT PLAN it.
 
   Backend AUTH SPINE — PRE-SCAFFOLDED, DO NOT PLAN. These files are written to disk
   deterministically by the build BEFORE you run and are NOT part of your manifest. Do NOT
@@ -284,10 +285,11 @@ same domain on backend and frontend are SEPARATE features.
   AdminPage.tsx + every Step 2a component belonging to those pages)
 - INFRA: ALL infra files (CI workflows, nginx.conf if any). Exactly one INFRA feature per
   project, named "infrastructure". No enrichment runs for it.
-- SHARED: cross-cutting backend utilities that are NOT pre-scaffolded — SpaController,
-  GlobalExceptionHandler, ErrorResponse. (The auth spine — User, Role, SecurityConfig,
-  PasswordEncoderConfig, JwtUtil, JwtAuthFilter, AuthController, Auth DTOs, UserRepository,
-  UserService, AdminInitializer — is pre-scaffolded per Step 3; never place it in a feature.)
+- SHARED: cross-cutting backend utilities — GlobalExceptionHandler, ErrorResponse.
+  (The foundation pre-scaffolds: SpaController, User, Role, SecurityConfig, PasswordEncoderConfig,
+  JwtUtil, JwtAuthFilter, AuthController, Auth DTOs, UserRepository, UserService, AdminInitializer,
+  and the full payment spine. None of these appear in SHARED or any feature — they are closed for
+  modification and open for extension: generated code imports/uses them, never reimplements them.)
 
 ## Size rule
 4–10 files per feature, NOT counting COMPONENT files. If a domain exceeds 10 non-component
