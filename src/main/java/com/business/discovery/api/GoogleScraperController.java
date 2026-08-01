@@ -10,14 +10,17 @@ import com.business.discovery.repository.ContainerTaskRepository;
 import com.business.discovery.services.container.DockerContainerService;
 import com.business.discovery.services.scraper.GoogleMapsScraperService;
 import com.business.discovery.services.scraper.ScraperContainerService;
+import com.business.discovery.services.user.AccessScope;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 @Slf4j
@@ -32,6 +35,7 @@ public class GoogleScraperController {
     private final BusinessEntityRepository businessEntityRepository;
     private final ArchitectBriefRepository architectBriefRepository;
     private final ContainerTaskRepository containerTaskRepository;
+    private final AccessScope accessScope;
 
     // ─── Scraper container lifecycle ──────────────────────────────────────────
 
@@ -166,6 +170,8 @@ public class GoogleScraperController {
                     .toList();
         }
 
+        businesses = scopeToViewable(businesses);
+
         List<BusinessSummaryResponse> result = businesses.stream()
                 .map(this::toSummary)
                 .toList();
@@ -173,9 +179,26 @@ public class GoogleScraperController {
         return ResponseEntity.ok(result);
     }
 
+    // Restrict a business list to what the caller may see:
+    //   OPERATOR/ANALYST → all; CLIENT → only assigned; RESELLER/other → none.
+    private List<BusinessEntity> scopeToViewable(List<BusinessEntity> businesses) {
+        if (accessScope.canViewAllBusinesses()) {
+            return businesses;
+        }
+        if (accessScope.isClient()) {
+            Set<UUID> allowed = accessScope.assignedBusinessIds();
+            return businesses.stream().filter(b -> allowed.contains(b.getId())).toList();
+        }
+        return List.of();
+    }
+
     // Get full business detail by ID
     @GetMapping("/businesses/{id}")
     public ResponseEntity<BusinessDetailResponse> getBusinessById(@PathVariable UUID id) {
+        // CLIENT may only open their assigned business; RESELLER gets no individual records.
+        if (!accessScope.canViewBusiness(id)) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
         return businessEntityRepository.findById(id)
                 .map(b -> {
                     Optional<ArchitectBrief> brief = architectBriefRepository.findByBusinessId(id);
@@ -196,8 +219,8 @@ public class GoogleScraperController {
     // Get businesses by category — convenience endpoint
     @GetMapping("/businesses/category/{category}")
     public ResponseEntity<List<BusinessSummaryResponse>> getByCategory(@PathVariable String category) {
-        List<BusinessSummaryResponse> result = businessEntityRepository.findByCategory(category)
-                .stream().map(this::toSummary).toList();
+        List<BusinessEntity> businesses = scopeToViewable(businessEntityRepository.findByCategory(category));
+        List<BusinessSummaryResponse> result = businesses.stream().map(this::toSummary).toList();
         return ResponseEntity.ok(result);
     }
 
