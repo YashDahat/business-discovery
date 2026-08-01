@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useBusinessDetail } from '@/hooks/useBusinessDetail'
+import { useAuth } from '@/context/AuthContext'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { DemoButton } from '@/components/shared/DemoButton'
@@ -651,6 +652,7 @@ function DataField({ label, value }: { label: string; value: React.ReactNode }) 
 export default function BusinessDetailPage() {
   const { businessId } = useParams<{ businessId: string }>()
   const navigate = useNavigate()
+  const { user } = useAuth()
   const [activeTab, setActiveTab] = useState<typeof TABS[number]['id']>('overview')
   const [pollForBrief, setPollForBrief] = useState(false)
   const [logsOpen, setLogsOpen] = useState(false)
@@ -678,7 +680,9 @@ export default function BusinessDetailPage() {
   const plan = deriveSubscriptionPlan(b.businessTier)
   const tierCls = TIER_STYLE[b.businessTier ?? ''] ?? TIER_STYLE.EXCLUDED
   const canRespawn = !!brief && (latestTask?.status === 'FAILED' || latestTask?.status === 'COMPLETED')
-  const showChatPanel = !!(brief && latestTask)
+  // Pipeline actions (generate/run/stop/retry/respawn/request-changes/redeploy) are operator-only.
+  const isOperator = user?.role === 'OPERATOR'
+  const showChatPanel = isOperator && !!(brief && latestTask)
   const chatGutter = !showChatPanel ? 0
     : chatPanelOpen ? REQUEST_CHANGES_PANEL_WIDTH
     : REQUEST_CHANGES_PANEL_COLLAPSED_WIDTH
@@ -746,7 +750,8 @@ export default function BusinessDetailPage() {
           )}
         </div>
 
-        {/* Pipeline actions */}
+        {/* Pipeline actions — operator-only (writes + ops links) */}
+        {isOperator && (
         <div className="mt-6 pt-5 border-t border-[#1e1e1e] flex items-center gap-3 flex-wrap">
           <span className="text-[10px] font-mono uppercase tracking-widest text-[#444]">
             // PIPELINE ACTIONS
@@ -783,6 +788,7 @@ export default function BusinessDetailPage() {
             </a>
           )}
         </div>
+        )}
 
         {/* Tabs */}
         <div className="mt-5 flex items-center gap-1 flex-wrap">
@@ -887,19 +893,21 @@ export default function BusinessDetailPage() {
             )}
           </div>
 
-          {/* AI Pipeline */}
-          <AiPipelineCard
-            business={b}
-            brief={brief}
-            latestTask={latestTask}
-            opsStatus={opsStatus}
-            onBriefTriggered={() => setPollForBrief(true)}
-            logsOpen={logsOpen}
-            onLogsToggle={() => setLogsOpen(v => !v)}
-          />
+          {/* AI Pipeline — operator-only ops machinery (generate/run/stop/retry/respawn/logs) */}
+          {isOperator && (
+            <AiPipelineCard
+              business={b}
+              brief={brief}
+              latestTask={latestTask}
+              opsStatus={opsStatus}
+              onBriefTriggered={() => setPollForBrief(true)}
+              logsOpen={logsOpen}
+              onLogsToggle={() => setLogsOpen(v => !v)}
+            />
+          )}
 
           {/* Logs */}
-          {logsOpen && latestTask && (
+          {isOperator && logsOpen && latestTask && (
             <div className="rounded-2xl border border-[#1e1e1e] bg-[#0a0a0a] overflow-hidden">
               <div className="flex items-center justify-between px-4 py-2.5 border-b border-[#1e1e1e]">
                 <div className="flex items-center gap-2">

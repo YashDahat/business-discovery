@@ -6,7 +6,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends maven && rm -rf
 
 COPY pom.xml .
 COPY src ./src
-RUN mvn clean package -DskipTests -q
+# -Dmaven.test.skip=true (not just -DskipTests) skips COMPILING tests too, so the
+# test-scoped deps (testcontainers ~17MB, junit-jupiter) are never downloaded — they
+# were the flaky Maven Central download that truncated the build. The packaged jar
+# excludes tests regardless. Retry flags harden the remaining (compile-scoped) downloads
+# against truncated responses (GET is idempotent → safe to retry after request sent).
+RUN mvn clean package -q \
+        -Dmaven.test.skip=true \
+        -Dmaven.wagon.http.retryHandler.count=5 \
+        -Dmaven.wagon.http.retryHandler.requestSentEnabled=true \
+        --no-transfer-progress
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
 FROM eclipse-temurin:17-jdk-jammy
