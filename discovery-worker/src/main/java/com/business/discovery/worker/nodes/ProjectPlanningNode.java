@@ -334,7 +334,11 @@ public class ProjectPlanningNode implements WorkerNode {
                         StandardCopyOption.REPLACE_EXISTING);
                 log.info("[ProjectPlanningNode] Renamed package dir {} → {}", oldPkgDir, newPkgDir);
             }
-            // 2. Rewrite package declarations and class references in every Java file
+            // 2. Rewrite package declarations and class references in every Java file,
+            //    AND rename WebAppFoundationApplication.java → <BusinessName>Application.java.
+            //    Java requires the public class name to match its filename — without renaming
+            //    the file, BackendValidationNode fails with "class X is public, should be
+            //    declared in a file named X.java".
             try (var walk = Files.walk(javaRoot)) {
                 walk.filter(p -> p.toString().endsWith(".java"))
                     .forEach(p -> {
@@ -344,6 +348,13 @@ public class ProjectPlanningNode implements WorkerNode {
                                     .replace(oldPkg, newPkg)
                                     .replace(oldCls, newCls);
                             if (!updated.equals(content)) Files.writeString(p, updated);
+                            // Rename the file itself when it carries the old class name
+                            String fname = p.getFileName().toString();
+                            if (fname.equals("WebAppFoundationApplication.java")) {
+                                Files.move(p, p.resolveSibling(newCls + ".java"),
+                                        StandardCopyOption.REPLACE_EXISTING);
+                                log.info("[ProjectPlanningNode] Renamed Application file → {}.java", newCls);
+                            }
                         } catch (IOException e) {
                             log.warn("[ProjectPlanningNode] Could not rewrite {}: {}", p, e.getMessage());
                         }
