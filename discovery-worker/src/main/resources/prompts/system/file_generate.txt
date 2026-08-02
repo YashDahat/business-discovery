@@ -82,14 +82,37 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    NEVER import from @/lib/utils in app files. Use clsx for className merging.
 
 # TYPESCRIPT / REACT 19 CONSTRAINTS (TS/TSX files only — every rule fixes a recurring build breaker)
-1. TANSTACK QUERY v5 API ONLY (v4 idioms do not compile):
-   - useQuery({ queryKey: ['trainers'], queryFn: fetchTrainers })  — OBJECT form; positional
-     useQuery(['trainers'], fetchTrainers) is a compile error in v5.
-   - Mutations expose isPending — mutation.isLoading DOES NOT EXIST on useMutation results.
-   - useMutation result has: mutate, mutateAsync, isPending, isError, isSuccess, data, error.
-     queryFn, queryKey, refetch DO NOT EXIST on mutations — those are useQuery-only properties.
-     Never call result.queryFn() — call result.mutate(args) or result.mutateAsync(args).
-   - useMutation({ mutationFn: createTrainer, onSuccess: ... }) — object form here too.
+1. TANSTACK QUERY v5 — SERVER STATE MANAGEMENT (applies to every business domain)
+   TanStack Query separates SERVER state (data from an API, cached and synchronised)
+   from LOCAL state (UI toggles, form values). Use it for any data that comes from the
+   backend: menu items, reservations, orders, trainers, blog posts, gallery images —
+   anything fetched via a service function. Never use useState + useEffect to fetch.
+
+   TWO HOOKS, TWO PURPOSES — never mix them:
+
+   useQuery  — READ data (GET requests). Result exposes:
+     { data, isLoading, isError, error, isFetching, refetch }
+     const { data: menuItems, isLoading } = useQuery({
+       queryKey: ['menuItems'],          // cache key — array, unique per query
+       queryFn: getAllMenuItems,         // service function from @/services/<domain>Service
+     });
+
+   useMutation — WRITE data (POST / PUT / PATCH / DELETE). Result exposes:
+     { mutate, mutateAsync, isPending, isError, isSuccess, data, error }
+     const { mutate: createItem, isPending } = useMutation({
+       mutationFn: createMenuItem,       // service function
+       onSuccess: () => queryClient.invalidateQueries({ queryKey: ['menuItems'] }),
+     });
+     // To trigger: createItem(formData)  or  await mutateAsync(formData)
+
+   COMMON MISTAKES TO AVOID:
+   - NEVER call query.queryFn() — queryFn is an internal config, not callable on the result.
+   - NEVER use mutation.isLoading — it was renamed to mutation.isPending in v5.
+   - NEVER use positional form: useQuery(['key'], fn) — object form only in v5.
+   - NEVER use useState + fetch/axios for server data — use useQuery instead.
+   - ALWAYS invalidate the relevant queryKey in onSuccess so the UI refreshes.
+   - queryKey should match the domain noun: ['menuItems'], ['reservations'], ['orders'],
+     ['trainers'], ['blogPosts'], ['galleryImages'] — consistent naming prevents stale cache.
 2. ZOD NUMERIC FORM FIELDS: HTML inputs yield strings — use z.coerce.number() (NOT z.number())
    for any numeric field bound to an <input>, or the zodResolver output type will not match
    the DTO interface and the resolver assignment fails to compile.
