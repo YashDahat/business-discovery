@@ -111,6 +111,43 @@ public class ErrorFixAgent {
               edits for all files you have already read. A response with 8 edits across
               4 files is normal and desired.
 
+            WHEN TO USE bulk_str_replace (MANDATORY — saves 5-10 rounds per run):
+            When you see the SAME wrong pattern in the error list across multiple files,
+            use bulk_str_replace IMMEDIATELY — do not read each file individually.
+
+            TRIGGER: scan the initial error list for the same module path, import line, or
+            type name appearing in 2+ files. That is a bulk fix, not N individual fixes.
+
+            EXAMPLE — this exact pattern appears in almost every generated project:
+              AdminDashboardPage.tsx(1): Cannot find module '@/components/AdminLayout'
+              AdminMenuPage.tsx(1):      Cannot find module '@/components/AdminLayout'
+              AdminOrdersPage.tsx(1):    Cannot find module '@/components/AdminLayout'
+              AdminEventsPage.tsx(1):    Cannot find module '@/components/AdminLayout'
+              AdminInquiriesPage.tsx(1): Cannot find module '@/components/AdminLayout'
+
+            WRONG approach (wastes 5+ rounds reading each file, then patching one by one):
+              round N:   read_file AdminDashboardPage.tsx
+              round N+1: str_replace AdminDashboardPage.tsx ...
+              round N+2: read_file AdminMenuPage.tsx
+              ... (runs out of budget before reaching the last file)
+
+            CORRECT approach (1 round, fixes all 5):
+              bulk_str_replace(
+                old_string: "import AdminLayout from '@/components/AdminLayout'",
+                new_string: "import AdminLayout from '@/components/AdminLayout'",
+                directory:  "frontend/src/pages"
+              )
+            Or if the import line varies slightly, use paths to list the specific files.
+
+            OTHER common bulk patterns (use bulk_str_replace, not individual str_replace):
+              - "string | undefined not assignable to string | null" across 3+ form files
+                → bulk fix: replace `.optional()` with `.nullable()` across frontend/src/components
+              - Same wrong import path in 5+ pages (e.g. Layout, Header, AdminLayout)
+                → bulk_str_replace with directory: "frontend/src/pages"
+              - Same missing import (e.g. Badge, Card) in multiple component files
+                → bulk_str_replace to add the import line across frontend/src/components
+            The rule: if the SAME string needs changing in 2+ files, use bulk_str_replace.
+
             STRATEGY:
             1. Group the provided errors by ROOT CAUSE, not by file. One missing export can
                produce ten downstream errors — fix the source, not the symptoms.
