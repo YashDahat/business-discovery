@@ -451,6 +451,22 @@ public class ErrorFixAgent {
         String refusal = derivedFileGuard(target, relativePath);
         if (refusal != null) return refusal;
 
+        // ── Option 3: enforce surgical str_replace edits on existing files ──────────
+        // write_file on an existing file replaces ALL content at once: the agent must
+        // reproduce the entire file from memory, which (a) costs ~10–40× more output
+        // tokens than a targeted str_replace, and (b) risks silently changing lines it
+        // didn't intend to touch. Blocking it here forces the agent to use str_replace
+        // for every edit, which is always safe: read the file, find the exact string,
+        // replace just that string, write back — zero drift outside the changed lines.
+        if (Files.exists(target)) {
+            log.warn("[ErrorFixAgent] Blocked write_file on existing file {} — use str_replace for edits",
+                    relativePath);
+            return "REFUSED: '" + relativePath + "' already exists. "
+                    + "Use str_replace to make targeted edits — write_file is only for creating new files. "
+                    + "str_replace(path, old_string, new_string) replaces exactly old_string with new_string; "
+                    + "make old_string the smallest unique snippet that contains the lines you want to change.";
+        }
+
         refusal = lombokGuard(target, relativePath, content);
         if (refusal != null) return refusal;
 

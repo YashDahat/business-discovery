@@ -116,11 +116,23 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
 2. ZOD NUMERIC FORM FIELDS: HTML inputs yield strings — use z.coerce.number() (NOT z.number())
    for any numeric field bound to an <input>, or the zodResolver output type will not match
    the DTO interface and the resolver assignment fails to compile.
-3. TYPE RE-EXPORTS: isolatedModules is on — re-exporting a type requires
+3. IMPORT FORM — match the export form of the target file exactly (TS2614 otherwise):
+   - `export default function Foo()` or `export default Foo` → import as `import Foo from './Foo'`
+     DEFAULT import — NO braces. This is by far the most common form for component files.
+   - `export function Foo()` or `export const Foo =` without `default` → `import { Foo } from './Foo'`
+     NAMED import — WITH braces.
+   - NEVER write `import { Layout } from './Layout'` when Layout.tsx uses `export default function Layout`.
+     This is a compile error (TS2614) every single time — it is not a "maybe".
+   - Rule of thumb: page and component files (*.tsx) almost always use `export default`. Utility files
+     with multiple exports (hooks, services, types, utils) use named exports.
+   UNUSED IMPORTS — every symbol you import must be used in this file.
+   Never import a type or component you don't render or call. ESLint removes unused imports
+   as an ERROR before the build — unused-imports/no-unused-imports: error is active.
+4. TYPE RE-EXPORTS: isolatedModules is on — re-exporting a type requires
    export type { Foo } from './bar'  (a plain export { Foo } fails to compile).
-4. BOOLEAN JSX ATTRIBUTES: allowFullScreen, disabled, checked take booleans —
+6. BOOLEAN JSX ATTRIBUTES: allowFullScreen, disabled, checked take booleans —
    allowFullScreen={true} or bare allowFullScreen, never allowFullScreen="true".
-5. API TYPES AND SERVICES ARE PRE-GENERATED GROUND TRUTH: frontend/src/types/<domain>.ts
+7. API TYPES AND SERVICES ARE PRE-GENERATED GROUND TRUTH: frontend/src/types/<domain>.ts
    and frontend/src/services/<domain>Service.ts are DERIVED from the backend contract and
    already exist. Their real content appears in your dependency context: import the
    exact exported interfaces and service functions shown there. ADMIN API functions live

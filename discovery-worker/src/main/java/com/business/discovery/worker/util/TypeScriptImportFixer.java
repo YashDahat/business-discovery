@@ -26,6 +26,13 @@ public final class TypeScriptImportFixer {
             Pattern.MULTILINE);
     private static final Pattern NAMED_SYMBOLS = Pattern.compile("\\{([^}]+)}");
 
+    // Detects `export default` in a TypeScript/TSX file — the file exposes a single default export.
+    // Any named import { X } on such a file is wrong: must be `import X from '...'`.
+    private static final Pattern DEFAULT_EXPORT_DECL = Pattern.compile(
+            "^export\\s+default\\s+", Pattern.MULTILINE);
+    // Detects `import { X, Y } from` — named import form.
+    private static final Pattern NAMED_IMPORT_FORM = Pattern.compile("import\\s*\\{");
+
     private TypeScriptImportFixer() {}
 
     public static void fix(Path filePath, Path workspace, TypeScriptExportRegistry registry) {
@@ -81,7 +88,38 @@ public final class TypeScriptImportFixer {
                 resolvedBase = filePath.getParent().resolve(specifier).normalize();
             }
 
-            if (fileExists(resolvedBase)) continue; // already correct
+            if (fileExists(resolvedBase)) {
+                // File exists — but check for named-vs-default mismatch.
+                // `import { Layout } from './Layout'` when Layout.tsx has `export default function Layout`
+                // is a TS2614 compile error. TypeScript even says "Did you mean to use 'import Layout from...'?"
+                // This is the most common structural import error after code generation.
+                String importLine = m.group(0);
+                if (NAMED_IMPORT_FORM.matcher(importLine).find()) {
+                    Path actualFile = resolveToActualFile(resolvedBase);
+                    if (actualFile != null) {
+                        String targetContent = readSilent(actualFile);
+                        if (targetContent != null && DEFAULT_EXPORT_DECL.matcher(targetContent).find()) {
+                            // Extract the single symbol inside { } and convert to default import.
+                            // `import { Layout } from './Layout'` → `import Layout from './Layout'`
+                            Matcher nm = NAMED_SYMBOLS.matcher(importLine);
+                            if (nm.find()) {
+                                String symbols = nm.group(1).trim();
+                                // Only rewrite single-symbol named imports — multi-symbol like { A, B }
+                                // may mix a default re-export with named; leave those to the agent.
+                                if (!symbols.contains(",")) {
+                                    String sym = symbols.split("\\s+as\\s+")[0].trim();
+                                    String quote = importLine.contains("'") ? "'" : "\"";
+                                    String newLine = "import " + sym + " from " + quote + specifier + quote;
+                                    replacements.add(new String[]{importLine, newLine});
+                                    log.info("[TypeScriptImportFixer] {}: rewrote named import to default: {{ {} }} → {}",
+                                            fileName, sym, sym);
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
 
             // File doesn't exist — look up the imported symbol(s) in the registry
             Matcher nm = NAMED_SYMBOLS.matcher(m.group(0));
@@ -129,5 +167,19 @@ public final class TypeScriptImportFixer {
             if (Files.exists(Path.of(base + idx))) return true;
         }
         return false;
+    }
+
+    /** Resolves an import specifier base to the actual file on disk, trying .tsx then .ts. */
+    private static Path resolveToActualFile(Path base) {
+        for (String ext : new String[]{".tsx", ".ts", "/index.tsx", "/index.ts"}) {
+            Path candidate = Path.of(base.toString() + ext);
+            if (Files.exists(candidate)) return candidate;
+        }
+        if (Files.exists(base)) return base; // already has extension
+        return null;
+    }
+
+    private static String readSilent(Path file) {
+        try { return Files.readString(file); } catch (IOException e) { return null; }
     }
 }
