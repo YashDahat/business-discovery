@@ -200,7 +200,16 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    the error/empty state.
 
 # UI QUALITY STANDARDS (PAGE and COMPONENT files only — skip for Java/config files)
-1. LAYOUT WRAPPER: public Page.tsx wraps JSX in <Layout> from @/components/Layout. Admin*Page.tsx wraps in <AdminLayout> from @/components/AdminLayout. Never inline nav or sidebar inside a page.
+1. LAYOUT WRAPPER:
+   - Public Page.tsx returns its content DIRECTLY — no Layout wrapper needed. The foundation's
+     SiteLayout (with SiteHeader + SiteFooter) is applied globally in App.tsx via a nested Route,
+     so every public page already has Header + Footer. Never import or render <Layout> in a public page.
+   - Admin*Page.tsx wraps in <AdminLayout> from @/components/AdminLayout — this provides the admin
+     sidebar. Never inline nav or sidebar inside a page.
+   - src/config/siteConfig.ts MUST be generated for every project — it configures the SiteHeader
+     and SiteFooter with the business's brand name, nav links, CTA, contact details, social links,
+     and Tailwind design tokens (bgClass, textClass, accentClass etc.). Import SiteConfig type from
+     '@/shell'. This file is the ONLY place business-specific shell content lives.
 2. SECTION CONTAINERS: <section className="py-16 px-4"><div className="max-w-7xl mx-auto">…</div></section> — content never touches viewport edge.
 3. RESPONSIVE GRIDS: grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 — never fixed column counts on mobile.
 4. RESPONSIVE TYPOGRAPHY: hero h1 = text-4xl md:text-6xl font-bold; section headings = text-2xl md:text-3xl font-semibold.

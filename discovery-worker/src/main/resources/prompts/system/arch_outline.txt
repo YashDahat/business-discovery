@@ -123,6 +123,20 @@ Add to EVERY project in addition to Steps 1–2, never displacing a derived file
   Backend (PLAN THESE): GlobalExceptionHandler, ErrorResponse.
   SpaController is PRE-SCAFFOLDED by the foundation — DO NOT PLAN it.
 
+  Frontend (PLAN THIS — exactly once, in the shared-frontend or core-ui feature):
+    src/config/siteConfig.ts — the site shell configuration. This file supplies the
+    SiteHeader and SiteFooter with ALL business-specific content and design tokens via props.
+    It is the ONLY place Header/Footer content is authored. Generate it as a named const
+    that exports a SiteConfig object (import type { SiteConfig } from '@/shell'):
+      header: { brandName, navLinks, ctaButton, bgClass, textClass, hoverClass, ctaClass }
+      footer: { brandName, tagline, address, phone, email, openingHours, quickLinks, socialLinks,
+                bgClass, textClass, accentClass }
+    navLinks must cover every public route in the plan. ctaButton should be the primary
+    conversion action (book table / order now / join / enquire). bgClass/textClass/accentClass
+    must use Tailwind classes that match the business's brand palette.
+    DO NOT generate Header.tsx, Footer.tsx, or Layout.tsx — these are pre-built in the
+    foundation at @/shell and are closed for modification.
+
   Backend AUTH SPINE — PRE-SCAFFOLDED, DO NOT PLAN. These files are written to disk
   deterministically by the build BEFORE you run and are NOT part of your manifest. Do NOT
   emit a FileSpec for any of them, nor for any renamed variant (JwtService / JwtTokenProvider

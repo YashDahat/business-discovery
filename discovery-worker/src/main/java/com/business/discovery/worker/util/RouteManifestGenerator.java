@@ -146,7 +146,7 @@ public final class RouteManifestGenerator {
         StringBuilder sb = new StringBuilder();
         sb.append(APP_HEADER).append('\n');
         sb.append("import './index.css'\n");
-        sb.append("import { BrowserRouter, Routes, Route } from 'react-router-dom'\n");
+        sb.append("import { BrowserRouter, Routes, Route, Outlet } from 'react-router-dom'\n");
         if (flags.hasQuery()) {
             sb.append("import { QueryClient, QueryClientProvider } from '@tanstack/react-query'\n");
         }
@@ -155,6 +155,9 @@ public final class RouteManifestGenerator {
         for (ProviderRef p : flags.contextProviders()) {
             sb.append("import { ").append(p.name()).append(" } from '").append(p.importPath()).append("'\n");
         }
+        // Foundation shell — SiteLayout wraps all public routes; admin routes use their own layout
+        sb.append("import { SiteLayout } from '@/shell'\n");
+        sb.append("import siteConfig from '@/config/siteConfig'\n");
         sb.append('\n');
         for (RouteManifest.Entry e : manifest.entries()) {
             sb.append("import ").append(e.page()).append(" from '").append(e.importPath()).append("';\n");
@@ -171,8 +174,6 @@ public final class RouteManifestGenerator {
             close.add(0, "</QueryClientProvider>");
         }
         if (flags.hasAuth()) { open.add("<AuthProvider>"); close.add(0, "</AuthProvider>"); }
-        // Discovered providers sit innermost (inside auth/query/router, outside Routes) so they may
-        // use those hooks; every page therefore renders within each provider the LLM authored.
         for (ProviderRef p : flags.contextProviders()) {
             open.add("<" + p.name() + ">");
             close.add(0, "</" + p.name() + ">");
@@ -183,15 +184,37 @@ public final class RouteManifestGenerator {
             sb.append(indent).append("  ".repeat(k)).append(open.get(k)).append('\n');
         }
         String routesIndent = indent + "  ".repeat(open.size());
+
+        // Split routes into admin and public.
+        // Admin routes keep their AdminLayout (generated page components include it).
+        // Public routes are wrapped in <SiteLayout config={siteConfig}> so Header + Footer
+        // appear globally without every page component needing to import Layout individually.
+        java.util.List<RouteManifest.Entry> adminRoutes = manifest.entries().stream()
+                .filter(RouteManifest.Entry::admin).toList();
+        java.util.List<RouteManifest.Entry> publicRoutes = manifest.entries().stream()
+                .filter(e -> !e.admin()).toList();
+
         sb.append(routesIndent).append("<Routes>\n");
-        for (RouteManifest.Entry e : manifest.entries()) {
+
+        // Admin routes — no SiteLayout, pages use AdminLayout internally
+        for (RouteManifest.Entry e : adminRoutes) {
             String element = "<" + e.page() + " />";
-            if (e.admin() && flags.hasProtected()) {
-                element = "<ProtectedRoute>" + element + "</ProtectedRoute>";
-            }
+            if (flags.hasProtected()) element = "<ProtectedRoute>" + element + "</ProtectedRoute>";
             sb.append(routesIndent).append("  <Route path=\"").append(e.path())
               .append("\" element={").append(element).append("} />\n");
         }
+
+        // Public routes — wrapped in SiteLayout shell (Header + Footer from foundation)
+        if (!publicRoutes.isEmpty()) {
+            sb.append(routesIndent).append("  <Route element={<SiteLayout config={siteConfig}><Outlet /></SiteLayout>}>\n");
+            sb.append(routesIndent).append("    {/* Outlet receives the matched child route */}\n");
+            for (RouteManifest.Entry e : publicRoutes) {
+                sb.append(routesIndent).append("    <Route path=\"").append(e.path())
+                  .append("\" element={<").append(e.page()).append(" />} />\n");
+            }
+            sb.append(routesIndent).append("  </Route>\n");
+        }
+
         sb.append(routesIndent).append("</Routes>\n");
         for (int k = 0; k < close.size(); k++) {
             sb.append(indent).append("  ".repeat(open.size() - 1 - k)).append(close.get(k)).append('\n');

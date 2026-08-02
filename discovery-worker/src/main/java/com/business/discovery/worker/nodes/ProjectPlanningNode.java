@@ -466,8 +466,10 @@ public class ProjectPlanningNode implements WorkerNode {
     private void fenceFoundationFrontendFiles(Path frontendSrc) {
         String marker = "// " + com.business.discovery.worker.nodes.FrontendGeneratorNode.FOUNDATION_FENCE_MARKER
                 + " — do not edit by hand.\n";
-        // Exactly the foundation-owned directories — nothing else
-        List<String> foundationDirs = List.of("context", "api", "lib", "cart");
+        // Exactly the foundation-owned directories — nothing else.
+        // 'shell' = SiteHeader, SiteFooter, SiteLayout (configurable via props, never LLM-regenerated).
+        // 'context', 'api', 'lib', 'cart' = AuthContext, apiClient, utils, cart spine.
+        List<String> foundationDirs = List.of("context", "api", "lib", "cart", "shell");
         for (String dir : foundationDirs) {
             Path dirPath = frontendSrc.resolve(dir);
             if (!Files.isDirectory(dirPath)) continue;
