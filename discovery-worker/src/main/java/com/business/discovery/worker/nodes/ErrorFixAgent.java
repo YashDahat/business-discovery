@@ -118,35 +118,41 @@ public class ErrorFixAgent {
             TRIGGER: scan the initial error list for the same module path, import line, or
             type name appearing in 2+ files. That is a bulk fix, not N individual fixes.
 
-            EXAMPLE — this exact pattern appears in almost every generated project:
-              AdminDashboardPage.tsx(1): Cannot find module '@/components/AdminLayout'
-              AdminMenuPage.tsx(1):      Cannot find module '@/components/AdminLayout'
-              AdminOrdersPage.tsx(1):    Cannot find module '@/components/AdminLayout'
-              AdminEventsPage.tsx(1):    Cannot find module '@/components/AdminLayout'
-              AdminInquiriesPage.tsx(1): Cannot find module '@/components/AdminLayout'
+            EXAMPLE — generic import error repeated across many files:
+              PageA.tsx(1): error TS2307: Cannot find module '@/components/Layout'
+              PageB.tsx(1): error TS2307: Cannot find module '@/components/Layout'
+              PageC.tsx(1): error TS2307: Cannot find module '@/components/Layout'
+              PageD.tsx(1): error TS2307: Cannot find module '@/components/Layout'
+              PageE.tsx(1): error TS2307: Cannot find module '@/components/Layout'
 
-            WRONG approach (wastes 5+ rounds reading each file, then patching one by one):
-              round N:   read_file AdminDashboardPage.tsx
-              round N+1: str_replace AdminDashboardPage.tsx ...
-              round N+2: read_file AdminMenuPage.tsx
+            WRONG approach (wastes 5+ rounds reading each file one by one):
+              round N:   read_file PageA.tsx
+              round N+1: str_replace PageA.tsx  (fix one file)
+              round N+2: read_file PageB.tsx
+              round N+3: str_replace PageB.tsx  (fix one file)
               ... (runs out of budget before reaching the last file)
 
-            CORRECT approach (1 round, fixes all 5):
+            CORRECT approach (1 round, all 5 files fixed at once):
               bulk_str_replace(
-                old_string: "import AdminLayout from '@/components/AdminLayout'",
-                new_string: "import AdminLayout from '@/components/AdminLayout'",
+                old_string: "import Layout from '@/components/Layout'",
+                new_string: "import Layout from '@/components/layout/Layout'",
                 directory:  "frontend/src/pages"
               )
-            Or if the import line varies slightly, use paths to list the specific files.
+            The tool scans every .ts/.tsx file under that directory, applies the replacement
+            wherever it finds old_string, and returns a summary of which files changed.
 
-            OTHER common bulk patterns (use bulk_str_replace, not individual str_replace):
-              - "string | undefined not assignable to string | null" across 3+ form files
-                → bulk fix: replace `.optional()` with `.nullable()` across frontend/src/components
-              - Same wrong import path in 5+ pages (e.g. Layout, Header, AdminLayout)
+            OTHER common bulk patterns (always use bulk_str_replace, never individual str_replace):
+              - "string | undefined not assignable to string | null" in 3+ form components
+                → bulk replace `.optional()` with `.nullable()` across frontend/src/components
+              - Same wrong import path (Layout, Header, a hook, a type) repeated across pages
                 → bulk_str_replace with directory: "frontend/src/pages"
-              - Same missing import (e.g. Badge, Card) in multiple component files
-                → bulk_str_replace to add the import line across frontend/src/components
-            The rule: if the SAME string needs changing in 2+ files, use bulk_str_replace.
+              - Same missing named import (e.g. Badge, Card, Icon) added to multiple files
+                → bulk_str_replace to prepend the import line across the relevant directory
+              - Same DTO field name used incorrectly in multiple service/hook files
+                → bulk_str_replace across frontend/src/hooks or frontend/src/services
+
+            THE RULE: if the SAME string needs changing in 2+ files, bulk_str_replace.
+            str_replace is for unique, file-specific fixes only.
 
             STRATEGY:
             1. Group the provided errors by ROOT CAUSE, not by file. One missing export can
