@@ -56,7 +56,7 @@ public class ErrorFixAgent {
     private static final int AUTO_VERIFY_MAX_CHARS = 4000;
 
     private static final Set<String> MUTATING_TOOLS =
-            Set.of("write_file", "str_replace", "run_npm_install");
+            Set.of("write_file", "str_replace", "bulk_str_replace", "run_npm_install");
 
     // Framework packages that conflict with the platform stack — installing them "fixes"
     // the compile error while breaking the app (e.g. `next` for a next/navigation import).
@@ -67,9 +67,14 @@ public class ErrorFixAgent {
     private static final String SYSTEM_PROMPT = """
             You are a senior engineer debugging multi-file compilation failures in a generated project.
 
-            You have 8 tools:
-            - str_replace            — PREFERRED for fixes: replace an exact text snippet in a file
-            - write_file             — for NEW files or unavoidable full rewrites only
+            You have 9 tools:
+            - str_replace            — PREFERRED for fixes: replace an exact text snippet in ONE file
+            - bulk_str_replace       — apply the SAME fix across MANY files in one call; provide either
+                                       'directory' (scans all .ts/.tsx files under it) or 'paths'
+                                       (comma-separated list). Use when the same wrong pattern repeats
+                                       across multiple pages/components — e.g. a named import on a
+                                       default export used in 10 files: one call fixes all 10.
+            - write_file             — create a NEW file only; blocked on existing files
             - read_file              — read any file's current content
             - search_symbol          — grep for a class/type/function across the project
             - run_compiler           — run the compiler and get ALL current errors
@@ -290,6 +295,12 @@ public class ErrorFixAgent {
                 case "write_file"             -> writeFile(args.path("path").asText(), args.path("content").asText(), workspace, ctx);
                 case "str_replace"            -> strReplace(args.path("path").asText(), args.path("old_string").asText(),
                                                             args.path("new_string").asText(), workspace, ctx);
+                case "bulk_str_replace"       -> bulkStrReplace(
+                                                            args.path("old_string").asText(),
+                                                            args.path("new_string").asText(),
+                                                            args.path("directory").asText(""),
+                                                            args.path("paths").asText(""),
+                                                            workspace, ctx);
                 case "run_npm_install"        -> runNpmInstall(args.path("package").asText(), fileType, workspace);
                 case "search_symbol"          -> searchSymbol(args.path("symbol").asText(), args.path("scope").asText("all"), workspace);
                 case "read_architecture_spec" -> readArchSpec(args.path("path").asText(), workspace);
@@ -545,6 +556,84 @@ public class ErrorFixAgent {
         }
     }
 
+    /**
+     * Applies the same find-and-replace to every matching file in one tool call.
+     * Covers two modes:
+     *  - directory scan: walks all .ts/.tsx files under the given directory
+     *  - explicit paths: applies only to the comma-separated list of paths
+     * Returns a summary listing which files changed and which were skipped (pattern absent).
+     * Same guards as strReplace: derived files refused, Lombok guard applied.
+     */
+    private String bulkStrReplace(String oldString, String newString,
+                                   String directory, String paths,
+                                   Path workspace, WorkerContext ctx) {
+        if (oldString == null || oldString.isBlank()) return "ERROR: old_string is required";
+        if (newString == null) newString = "";
+
+        // Collect the files to process
+        List<Path> candidates = new java.util.ArrayList<>();
+        if (!paths.isBlank()) {
+            for (String raw : paths.split(",")) {
+                String trimmed = raw.trim();
+                if (!trimmed.isEmpty()) candidates.add(workspace.resolve(trimmed).normalize());
+            }
+        } else if (!directory.isBlank()) {
+            Path dir = workspace.resolve(directory).normalize();
+            if (!dir.startsWith(workspace)) return "ERROR: path traversal not allowed: " + directory;
+            if (!Files.isDirectory(dir)) return "ERROR: not a directory: " + directory;
+            try (java.util.stream.Stream<Path> walk = Files.walk(dir)) {
+                walk.filter(p -> p.toString().endsWith(".ts") || p.toString().endsWith(".tsx"))
+                    .filter(p -> !p.toString().contains("node_modules"))
+                    .sorted()
+                    .forEach(candidates::add);
+            } catch (IOException e) {
+                return "ERROR: could not walk directory: " + e.getMessage();
+            }
+        } else {
+            return "ERROR: provide either 'directory' (to scan) or 'paths' (comma-separated list)";
+        }
+
+        List<String> changed = new java.util.ArrayList<>();
+        List<String> skipped = new java.util.ArrayList<>();
+        List<String> refused = new java.util.ArrayList<>();
+
+        for (Path target : candidates) {
+            if (!target.startsWith(workspace)) { refused.add(target.toString()); continue; }
+            String rel = workspace.relativize(target).toString().replace('\\', '/');
+
+            String refusal = derivedFileGuard(target, rel);
+            if (refusal != null) { refused.add(rel + " (derived)"); continue; }
+            if (!Files.exists(target)) { skipped.add(rel + " (not found)"); continue; }
+
+            try {
+                String content = Files.readString(target);
+                if (!content.contains(oldString)) { skipped.add(rel); continue; }
+
+                String lombokRefusal = lombokGuard(target, rel, content.replace(oldString, newString));
+                if (lombokRefusal != null) { refused.add(rel + " (lombok guard)"); continue; }
+
+                Files.writeString(target, content.replace(oldString, newString));
+                updateDbRecord(rel, ctx);
+                changed.add(rel);
+            } catch (IOException e) {
+                refused.add(rel + " (" + e.getMessage() + ")");
+            }
+        }
+
+        log.info("[ErrorFixAgent] bulk_str_replace: changed={}, skipped={}, refused={}",
+                changed.size(), skipped.size(), refused.size());
+
+        StringBuilder result = new StringBuilder();
+        result.append("Changed ").append(changed.size()).append(" file(s)");
+        if (!changed.isEmpty())
+            result.append(": ").append(String.join(", ", changed));
+        if (!skipped.isEmpty())
+            result.append("\nSkipped (pattern absent): ").append(String.join(", ", skipped));
+        if (!refused.isEmpty())
+            result.append("\nRefused: ").append(String.join(", ", refused));
+        return result.toString();
+    }
+
     private static int countOccurrences(String haystack, String needle) {
         int count = 0;
         int idx = 0;
@@ -673,6 +762,29 @@ public class ErrorFixAgent {
                                 .addStringProperty("old_string", "Exact text to replace — must occur exactly once in the file")
                                 .addStringProperty("new_string", "Replacement text")
                                 .required(List.of("path", "old_string", "new_string"))
+                                .build())
+                        .build(),
+
+                ToolSpecification.builder()
+                        .name("bulk_str_replace")
+                        .description("Apply the SAME find-and-replace to many files in one call. "
+                                + "Use when the same pattern is wrong across multiple files — e.g. "
+                                + "a named import used on a default-export component in 10 pages, "
+                                + "or the same wrong import path repeated across hooks/components. "
+                                + "Provide EITHER 'directory' (scans all .ts/.tsx files under it) "
+                                + "OR 'paths' (comma-separated list of specific files). "
+                                + "Returns a summary: how many files were changed and which ones.")
+                        .parameters(JsonObjectSchema.builder()
+                                .addStringProperty("old_string",
+                                        "Exact text to replace — applied to every matching file")
+                                .addStringProperty("new_string",
+                                        "Replacement text")
+                                .addStringProperty("directory",
+                                        "Relative directory to scan, e.g. 'frontend/src/pages' or 'frontend/src'. "
+                                        + "All .ts and .tsx files under it are checked; unchanged if old_string not found.")
+                                .addStringProperty("paths",
+                                        "Comma-separated list of specific relative file paths to patch instead of scanning a directory.")
+                                .required(List.of("old_string", "new_string"))
                                 .build())
                         .build(),
 
