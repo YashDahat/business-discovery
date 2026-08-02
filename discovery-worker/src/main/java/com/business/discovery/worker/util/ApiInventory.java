@@ -208,10 +208,17 @@ public final class ApiInventory {
             String fieldName = fm.group(3);
             // static/serial fields and logger-ish members don't cross the wire
             if (fieldName.equals("serialVersionUID") || javaType.contains("Logger")) continue;
-            boolean required = annotations.contains("@NotNull")
-                    || annotations.contains("@NotBlank")
-                    || annotations.contains("@NotEmpty")
-                    || annotations.contains("@Id");
+            // A plain Java type with no nullability marker is non-null by default.
+            // required = false ONLY when the field is explicitly nullable:
+            //   @Nullable annotation, Optional<T> wrapper, or known-nullable patterns.
+            // The old logic (required = has @NotNull) inverted this: it treated every
+            // un-annotated field as nullable, producing `field: string | null` for all
+            // plain `private String field` fields in DTOs like CustomerDto — even though
+            // those fields cannot be null at the Java level.
+            boolean nullable = annotations.contains("@Nullable")
+                    || annotations.contains("@Null")
+                    || javaType.startsWith("Optional<");
+            boolean required = !nullable;
             fields.add(new Field(fieldName, javaType, required));
         }
         if (!fields.isEmpty()) {
