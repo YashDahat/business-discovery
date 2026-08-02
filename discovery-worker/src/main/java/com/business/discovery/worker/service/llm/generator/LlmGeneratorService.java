@@ -53,6 +53,18 @@ public abstract class LlmGeneratorService {
      * beats burning a ~5-minute container attempt.
      */
     public ArchitectureSpec generateArchitectureSpec(BriefContext brief, String slug) {
+        return generateArchitectureSpec(brief, slug, null);
+    }
+
+    /**
+     * Generates the architecture spec with optional workspace tool access.
+     * When {@code workspace} is provided (non-null), the LLM can call {@code read_file}
+     * to inspect the foundation files already on disk — auth spine, payment spine,
+     * cart context, etc. — before deciding what to plan. This gives it the same context
+     * a human developer would have when extending an existing project.
+     */
+    public ArchitectureSpec generateArchitectureSpec(BriefContext brief, String slug,
+                                                     com.business.discovery.worker.util.WorkspaceReader workspace) {
         boolean isUpdate = brief.requestedChanges() != null && !brief.requestedChanges().isBlank();
 
         String system = PromptLoader.load("system/arch_outline.txt");
@@ -60,7 +72,10 @@ public abstract class LlmGeneratorService {
 
         Exception lastError = null;
         for (int attempt = 1; attempt <= 3; attempt++) {
-            String json = stripMarkdown(callLlm(system, user));
+            String raw = workspace != null
+                    ? callLlmWithTools(system, user, workspace)
+                    : callLlm(system, user);
+            String json = stripMarkdown(raw);
             try {
                 ArchitectureSpec spec = SPEC_MAPPER.readValue(json, ArchitectureSpec.class);
                 int fileCount    = spec.getFiles()    == null ? 0 : spec.getFiles().size();

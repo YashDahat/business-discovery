@@ -190,8 +190,13 @@ public class ProjectPlanningNode implements WorkerNode {
         }
 
         // ── Outline generation (retried in-process inside generateArchitectureSpec) ──
+        // Pass WorkspaceReader so the planning LLM can read foundation files on disk.
+        // The foundation was cloned above, so the LLM can now call read_file to inspect
+        // UserService.java, PaymentService.java, CartContext.tsx etc. before planning.
         if (!skipGeneration) {
-            spec = llm.generateArchitectureSpec(briefCtx, slug);
+            com.business.discovery.worker.util.WorkspaceReader reader =
+                    new com.business.discovery.worker.util.WorkspaceReader(workspace);
+            spec = llm.generateArchitectureSpec(briefCtx, slug, reader);
             int fileCount = spec.getFiles() == null ? 0 : spec.getFiles().size();
             // Belt-and-suspenders: the retry loop already guards this
             if (fileCount == 0) {
