@@ -86,6 +86,9 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    - useQuery({ queryKey: ['trainers'], queryFn: fetchTrainers })  — OBJECT form; positional
      useQuery(['trainers'], fetchTrainers) is a compile error in v5.
    - Mutations expose isPending — mutation.isLoading DOES NOT EXIST on useMutation results.
+   - useMutation result has: mutate, mutateAsync, isPending, isError, isSuccess, data, error.
+     queryFn, queryKey, refetch DO NOT EXIST on mutations — those are useQuery-only properties.
+     Never call result.queryFn() — call result.mutate(args) or result.mutateAsync(args).
    - useMutation({ mutationFn: createTrainer, onSuccess: ... }) — object form here too.
 2. ZOD NUMERIC FORM FIELDS: HTML inputs yield strings — use z.coerce.number() (NOT z.number())
    for any numeric field bound to an <input>, or the zodResolver output type will not match
