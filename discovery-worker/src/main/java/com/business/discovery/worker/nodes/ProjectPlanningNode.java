@@ -121,6 +121,28 @@ public class ProjectPlanningNode implements WorkerNode {
         BriefContext briefCtx = buildBriefContext(brief, business, ctx.getProjectHistory());
         ctx.setBriefCtx(briefCtx);
 
+        // ── Clone foundation BEFORE planning so the LLM sees real files ──────────
+        // With the foundation on disk before arch spec generation, the planning LLM
+        // can see the actual auth spine, payment spine, cart context, and shadcn
+        // components as real source files — not just as text instructions in the
+        // prompt. This gives better context: the LLM knows exactly what already
+        // exists and plans only the business-specific layer on top.
+        // Extra starters/deps from the spec are injected AFTER generation (below).
+        // On retry runs backend/pom.xml already exists → clone is skipped.
+        if (!Files.exists(workspace.resolve("backend/pom.xml"))) {
+            try {
+                cloneFoundation(workspace, slug, business.getTitle(),
+                        ctx.getGithubToken(), List.of(), null);
+                writeDockerArtifacts(workspace, slug);
+                log.info("[ProjectPlanningNode] Foundation cloned before planning — "
+                        + "LLM will see existing files as context");
+            } catch (IOException | InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new WorkerException(FailureType.INFRA,
+                        "Foundation pre-clone failed: " + e.getMessage(), e);
+            }
+        }
+
         // ── Decide what to skip ───────────────────────────────────────────────
         boolean hasChanges = briefCtx.requestedChanges() != null && !briefCtx.requestedChanges().isBlank();
         // Load existing spec whenever it exists — even for requestedChanges runs.
@@ -201,45 +223,46 @@ public class ProjectPlanningNode implements WorkerNode {
         ctx.setFileManifest(toManifest(spec));
 
         try {
-            // Scaffold only on first run — on retry the cloned foundation already has these
-            if (!Files.exists(workspace.resolve("backend/pom.xml"))) {
-                ProjectDependencies deps = resolveDependencies(spec);
-                // Extra starters = what the planning LLM requested minus the foundation baseline
-                List<String> extraStarters = deps.getSpringBootStarters().stream()
-                        .filter(s -> !DEFAULT_SPRING_STARTERS.contains(s))
-                        .toList();
-                cloneFoundation(workspace, slug, business.getTitle(),
-                        ctx.getGithubToken(), extraStarters, deps.getMavenDependencies());
-                writeDockerArtifacts(workspace, slug);
-                log.info("[ProjectPlanningNode] Foundation scaffold complete for '{}'", business.getTitle());
-            } else {
-                // Scaffold was already done on a prior attempt. Remove any Application.java
-                // that landed in a wrong sub-package (happens when packageName param was missing).
-                // Expected location: backend/src/main/java/com/<slug>/<ArtifactId>Application.java
-                Path expectedPackageDir = workspace.resolve("backend/src/main/java/com/" + slug);
-                Path javaRoot = workspace.resolve("backend/src/main/java");
-                if (Files.exists(javaRoot)) {
-                    try (var walk = Files.walk(javaRoot)) {
-                        walk.filter(p -> p.getFileName().toString().endsWith("Application.java"))
-                            .filter(p -> !p.getParent().equals(expectedPackageDir))
-                            .forEach(p -> {
-                                try {
-                                    Files.delete(p);
-                                    log.info("[ProjectPlanningNode] Removed stale Application.java at wrong package: {}", p);
-                                } catch (IOException e) {
-                                    log.warn("[ProjectPlanningNode] Could not remove stale Application.java: {}", p);
-                                }
-                            });
-                    }
+            // ── Inject extra deps the planning LLM declared in the spec ──────────
+            // The foundation baseline covers ~90% of projects. Any extra Spring Boot
+            // starters or raw Maven coords the LLM requested are injected here, now
+            // that the spec exists. The foundation was already cloned above.
+            ProjectDependencies deps = resolveDependencies(spec);
+            Path pom = workspace.resolve("backend/pom.xml");
+            List<String> extraStarters = deps.getSpringBootStarters().stream()
+                    .filter(s -> !DEFAULT_SPRING_STARTERS.contains(s))
+                    .toList();
+            if (!extraStarters.isEmpty()) {
+                injectExtraStarters(pom, extraStarters);
+            }
+            if (deps.getMavenDependencies() != null && !deps.getMavenDependencies().isEmpty()) {
+                injectSpecDeclaredDeps(pom, deps.getMavenDependencies());
+            }
+
+            // Remove any stale Application.java that landed in a wrong sub-package
+            // on a retry attempt (happens when packageName param was missing).
+            Path expectedPackageDir = workspace.resolve("backend/src/main/java/com/" + slug);
+            Path javaRoot = workspace.resolve("backend/src/main/java");
+            if (Files.exists(javaRoot)) {
+                try (var walk = Files.walk(javaRoot)) {
+                    walk.filter(p -> p.getFileName().toString().endsWith("Application.java"))
+                        .filter(p -> !p.getParent().equals(expectedPackageDir))
+                        .forEach(p -> {
+                            try {
+                                Files.delete(p);
+                                log.info("[ProjectPlanningNode] Removed stale Application.java at wrong package: {}", p);
+                            } catch (IOException e) {
+                                log.warn("[ProjectPlanningNode] Could not remove stale Application.java: {}", p);
+                            }
+                        });
                 }
             }
 
             ArchitectureJsonUtil.write(workspace, spec);
             writeHistoryStub(workspace, ctx, spec);
 
-        } catch (IOException | InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new WorkerException(FailureType.INFRA, "Scaffold failed: " + e.getMessage(), e);
+        } catch (IOException e) {
+            throw new WorkerException(FailureType.INFRA, "Post-planning setup failed: " + e.getMessage(), e);
         }
     }
 
