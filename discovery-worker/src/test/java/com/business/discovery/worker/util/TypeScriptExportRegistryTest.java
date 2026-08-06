@@ -57,4 +57,26 @@ class TypeScriptExportRegistryTest {
 
         assertThat(reg.toImportCatalog()).isEqualTo("@/components/index -> Card, Modal");
     }
+
+    @Test
+    void capturesDefaultVsNamedBinding() {
+        TypeScriptExportRegistry reg = new TypeScriptExportRegistry(workspace);
+        reg.register(workspace.resolve("frontend/src/shell/AdminLayout.tsx"),
+                "export default function AdminLayout() { return null; }");
+        reg.register(workspace.resolve("frontend/src/components/ui/badge.tsx"),
+                "export const Badge = () => null;");
+
+        assertThat(reg.resolveBinding("AdminLayout")).contains(TypeScriptExportRegistry.Binding.DEFAULT);
+        assertThat(reg.resolveBinding("Badge")).contains(TypeScriptExportRegistry.Binding.NAMED);
+        assertThat(reg.resolveBinding("Nonexistent")).isEmpty();
+    }
+
+    @Test
+    void reExportedSymbolsAreNamedBinding() {
+        TypeScriptExportRegistry reg = new TypeScriptExportRegistry(workspace);
+        reg.register(workspace.resolve("frontend/src/components/index.ts"),
+                "export { Card } from './ui';");
+
+        assertThat(reg.resolveBinding("Card")).contains(TypeScriptExportRegistry.Binding.NAMED);
+    }
 }

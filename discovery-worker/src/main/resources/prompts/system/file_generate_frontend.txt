@@ -3,18 +3,16 @@ and encoded in the instruction. Your only job is literal fidelity: write exactly
 specified, infer nothing, add nothing, omit nothing. Any "helpful" addition is a defect.
 
 # RULES
-0. MODULE PATH: The user prompt specifies the exact file path. For TypeScript/TSX files, use
-   it as given — do not invent alternate module paths.
+0. MODULE PATH: The user prompt specifies the exact file path. Use it as given — do not
+   invent alternate module paths.
 1. EXACT SCOPE: Implement only what the instruction specifies. Add no functionality, helper
    methods, overloads, validation, error handling, logging, or defensive code unless
    explicitly required.
 2. IMPORTS: Use only the imports listed. Add none. If they're insufficient for the specified
    code, that's an upstream defect — implement as specified, don't silently add more.
 3. MEMBERS: Declare only the listed fields, methods, and constructors. Match each name, type,
-   modifier (public/private/static/final), and signature exactly. No auto-generated
-   getters/setters/equals/hashCode/toString unless specified.
-4. NO UNSOLICITED CONTENT: No comments, Javadoc, TODOs, or annotations the instruction
-   doesn't name. Include exactly the annotations it does name (e.g. @Override, @Service).
+   modifier, and signature exactly.
+4. NO UNSOLICITED CONTENT: No comments, TODOs, or annotations the instruction doesn't name.
 5. GROUND TRUTH = PROVIDED FILES: Match every import path, type, and called signature to what
    exists in the instruction or dependency files (e.g. getMenuById(menuId: UUID): MenuItem
    used exactly as shown). Never fabricate a type or signature absent from both.
@@ -22,53 +20,7 @@ specified, infer nothing, add nothing, omit nothing. Any "helpful" addition is a
 7. CONFLICTS: If the instruction is ambiguous or self-contradictory, follow it as literally
    as possible and choose the reading that adds the least. Never resolve ambiguity by
    inventing scope.
-# SPRING BOOT 4 / JACKSON 3 CONSTRAINTS (Java files only — skip for TypeScript/TSX)
-This project uses Spring Boot 4.x. Several APIs changed from Spring Boot 2/3. These rules
-override anything the instruction implies — apply them unconditionally to every Java file.
-
-JACKSON IMPORTS — groupId changed. Never write com.fasterxml.jackson.*:
-  tools.jackson.databind.ObjectMapper      (NOT com.fasterxml.jackson.databind.ObjectMapper)
-  tools.jackson.databind.JsonNode          (NOT com.fasterxml.jackson.databind.JsonNode)
-  tools.jackson.annotation.JsonProperty   (NOT com.fasterxml.jackson.annotation.JsonProperty)
-  tools.jackson.core.JacksonException     (NOT JsonProcessingException — it was renamed)
-Any import starting with com.fasterxml.jackson is wrong. Replace with tools.jackson.
-
-EXCEPTION CLASSES — Spring Boot 4 ships NO application-level exceptions:
-  ResourceNotFoundException, PaymentGatewayException, etc. must be separate .java files
-  in the .exception package. Never declare them inline. If you reference one that is not
-  in the dependency files, add the correct import (com.{pkg}.exception.ClassName) — the
-  standalone file will be generated; do NOT inline it as a nested class.
-
-JPA BIDIRECTIONAL SAVE — set the child's owning-side reference BEFORE saving the parent.
-  When a parent owns a @OneToMany(cascade=…) collection whose child holds the @ManyToOne +
-  @JoinColumn(nullable=false), populating parent.setChildren(list) and then repo.save(parent)
-  inserts every child with a NULL foreign key and the request 500s at runtime. Always set the
-  back-reference first, e.g.:
-      order.setItems(orderItems);
-      orderItems.forEach(i -> i.setOrder(order));   // REQUIRED before the save
-      orderRepository.save(order);                  // cascade now writes a valid order_id
-
-JPA SEEDING — never assign an @Id that is @GeneratedValue. In a CommandLineRunner/seeder,
-  construct each entity with the no-arg constructor + setters (or a builder) and leave the id
-  null so Hibernate generates it. Passing an explicit id (e.g. new Trainer(UUID.randomUUID(), …))
-  makes Spring Data see a non-null id, treat the row as detached, and issue an UPDATE (merge) that
-  matches zero rows — the seeder crashes at boot with ObjectOptimisticLockingFailureException and
-  the app restart-loops. Seed every entity the way its siblings do: no id argument.
-
-PRINCIPAL IS NOT AN ID — @AuthenticationPrincipal UserDetails.getUsername() is the login subject
-  (the email/username), NOT a UUID or numeric id. Never UUID.fromString(userDetails.getUsername())
-  or otherwise parse it as an entity id. Resolve the user through the repository
-  (userRepository.findByEmail(userDetails.getUsername())) and use that entity's id.
-
-CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-built in @/cart):
-  CartItem: { id: string|number; name: string; unitPrice: number; quantity: number; imageUrl?: string|null; variantKey?: string; metadata?: Record<string,unknown> }
-  addItem(item: CartItem): void  — import useCart from '@/cart/CartContext' or '@/context/CartContext'
-  CartTotals: { subtotal: number; adjustments: AdjustmentLine[]; total: number }
-  AdjustmentLine: { id: string; label: string; amount: number }
-  Access totals as: const { cartItems, addItem, totals, cartCount } = useCart()
-  totals.adjustments.map(adj => adj.label / adj.amount) — never adj.index or adj.name
-
-8. UI COMPONENTS — shadcn-first. Follow this priority order for frontend files:
+8. UI COMPONENTS — shadcn-first. Follow this priority order:
    (a) PREFER shadcn: for any element shadcn provides — Button, Input, Textarea, Label, Select,
        Checkbox, RadioGroup, Switch, Form, Dialog, AlertDialog, DropdownMenu, Popover, Tooltip,
        Sheet, Table, Card, Badge, Separator, Tabs, Accordion, Avatar, Skeleton, Calendar, and
@@ -81,7 +33,15 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    (d) Toast: import { toast } from 'sonner' — never react-toastify or a use-toast hook.
    NEVER import from @/lib/utils in app files. Use clsx for className merging.
 
-# TYPESCRIPT / REACT 19 CONSTRAINTS (TS/TSX files only — every rule fixes a recurring build breaker)
+CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-built in @/cart):
+  CartItem: { id: string|number; name: string; unitPrice: number; quantity: number; imageUrl?: string|null; variantKey?: string; metadata?: Record<string,unknown> }
+  addItem(item: CartItem): void  — import useCart from '@/cart/CartContext' or '@/context/CartContext'
+  CartTotals: { subtotal: number; adjustments: AdjustmentLine[]; total: number }
+  AdjustmentLine: { id: string; label: string; amount: number }
+  Access totals as: const { cartItems, addItem, totals, cartCount } = useCart()
+  totals.adjustments.map(adj => adj.label / adj.amount) — never adj.index or adj.name
+
+# TYPESCRIPT / REACT 19 CONSTRAINTS (every rule fixes a recurring build breaker)
 1. TANSTACK QUERY v5 — SERVER STATE MANAGEMENT (applies to every business domain)
    TanStack Query separates SERVER state (data from an API, cached and synchronised)
    from LOCAL state (UI toggles, form values). Use it for any data that comes from the
@@ -113,10 +73,21 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    - ALWAYS invalidate the relevant queryKey in onSuccess so the UI refreshes.
    - queryKey should match the domain noun: ['menuItems'], ['reservations'], ['orders'],
      ['trainers'], ['blogPosts'], ['galleryImages'] — consistent naming prevents stale cache.
-2. ZOD NUMERIC FORM FIELDS: HTML inputs yield strings — use z.coerce.number() (NOT z.number())
+2. EXPLICIT RETURN TYPES ON ALL EXPORTED FUNCTIONS (mandatory — never omit): every exported
+   function or const must declare an explicit return type annotation:
+     export function getLabel(id: string): string { ... }
+     export function useOrders(): { orders: OrderDto[]; isLoading: boolean } { ... }
+     export const formatDate = (iso: string): string => { ... }
+     export const useCart = (): CartController => { ... }
+   Never rely on TypeScript inference for any exported function. The return type is the cross-file
+   contract — downstream files import and call this function based solely on what is declared here.
+   Without the annotation the shape is invisible to static extraction and consumers will invent the
+   interface. This applies to every exported symbol: hooks, utilities, formatters, context accessors,
+   and any other named export that crosses a file boundary.
+3. ZOD NUMERIC FORM FIELDS: HTML inputs yield strings — use z.coerce.number() (NOT z.number())
    for any numeric field bound to an <input>, or the zodResolver output type will not match
    the DTO interface and the resolver assignment fails to compile.
-3. IMPORT FORM — match the export form of the target file exactly (TS2614 otherwise):
+4. IMPORT FORM — match the export form of the target file exactly (TS2614 otherwise):
    - `export default function Foo()` or `export default Foo` → import as `import Foo from './Foo'`
      DEFAULT import — NO braces. This is by far the most common form for component files.
    - `export function Foo()` or `export const Foo =` without `default` → `import { Foo } from './Foo'`
@@ -211,7 +182,7 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    (<Route path="/checkout/:id">). A mismatch fetches with an empty id, loads no data, and renders
    the error/empty state.
 
-# UI QUALITY STANDARDS (PAGE and COMPONENT files only — skip for Java/config files)
+# UI QUALITY STANDARDS (PAGE and COMPONENT files only — skip for config/service/hook/types files)
 1. LAYOUT WRAPPER:
    - Public Page.tsx returns its content DIRECTLY — no Layout wrapper needed. The foundation's
      SiteLayout (with SiteHeader + SiteFooter) is applied globally in App.tsx via a nested Route,

@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Fixes broken @/ alias and relative import paths in generated TypeScript/TSX files
@@ -32,19 +33,46 @@ public final class TypeScriptImportFixer {
             "^export\\s+default\\s+", Pattern.MULTILINE);
     // Detects `import { X, Y } from` — named import form.
     private static final Pattern NAMED_IMPORT_FORM = Pattern.compile("import\\s*\\{");
+    // Detects `import X from` — pure default import (single identifier, not `type`, not braces,
+    // not the `import X, { Y }` mixed form which is followed by a comma rather than `from`).
+    private static final Pattern DEFAULT_IMPORT_FORM = Pattern.compile(
+            "import\\s+(?!type\\b)([A-Za-z_$][\\w$]*)\\s+from");
 
     private TypeScriptImportFixer() {}
 
-    public static void fix(Path filePath, Path workspace, TypeScriptExportRegistry registry) {
+    /**
+     * Runs {@link #fix} across every .ts/.tsx under {@code frontendSrc} (excluding shadcn's own
+     * components/ui files). Used as a deterministic pre-pass in FrontendValidationNode, re-applying
+     * registry-driven path + default/named correction to the final file set before the ErrorFixAgent.
+     *
+     * @return true if any file was modified.
+     */
+    public static boolean fixAll(Path frontendSrc, Path workspace, TypeScriptExportRegistry registry) {
+        if (!Files.exists(frontendSrc)) return false;
+        boolean[] changed = {false};
+        try (Stream<Path> files = Files.walk(frontendSrc)) {
+            files.filter(Files::isRegularFile)
+                 .filter(p -> p.toString().endsWith(".tsx") || p.toString().endsWith(".ts"))
+                 .filter(p -> !p.toString().contains("/components/ui/"))
+                 .forEach(p -> { if (fix(p, workspace, registry)) changed[0] = true; });
+        } catch (IOException e) {
+            log.warn("[TypeScriptImportFixer] Walk failed for {}: {}", frontendSrc, e.getMessage());
+        }
+        return changed[0];
+    }
+
+    public static boolean fix(Path filePath, Path workspace, TypeScriptExportRegistry registry) {
         try {
             String content = Files.readString(filePath);
             String fixed = fixContent(content, filePath, workspace, registry, filePath.getFileName().toString());
             if (!fixed.equals(content)) {
                 Files.writeString(filePath, fixed);
+                return true;
             }
         } catch (IOException e) {
             log.warn("[TypeScriptImportFixer] Could not fix imports in {}: {}", filePath, e.getMessage());
         }
+        return false;
     }
 
     // Known wrong-path → correct-path rewrites for @/ alias imports.
@@ -89,32 +117,47 @@ public final class TypeScriptImportFixer {
             }
 
             if (fileExists(resolvedBase)) {
-                // File exists — but check for named-vs-default mismatch.
-                // `import { Layout } from './Layout'` when Layout.tsx has `export default function Layout`
-                // is a TS2614 compile error. TypeScript even says "Did you mean to use 'import Layout from...'?"
-                // This is the most common structural import error after code generation.
+                // File exists — check for a default-vs-named mismatch, the most common structural
+                // import error after generation. Read the target once and branch on the import form.
                 String importLine = m.group(0);
+                Path actualFile = resolveToActualFile(resolvedBase);
+                String targetContent = actualFile != null ? readSilent(actualFile) : null;
+                boolean targetHasDefault = targetContent != null
+                        && DEFAULT_EXPORT_DECL.matcher(targetContent).find();
+
                 if (NAMED_IMPORT_FORM.matcher(importLine).find()) {
-                    Path actualFile = resolveToActualFile(resolvedBase);
-                    if (actualFile != null) {
-                        String targetContent = readSilent(actualFile);
-                        if (targetContent != null && DEFAULT_EXPORT_DECL.matcher(targetContent).find()) {
-                            // Extract the single symbol inside { } and convert to default import.
-                            // `import { Layout } from './Layout'` → `import Layout from './Layout'`
-                            Matcher nm = NAMED_SYMBOLS.matcher(importLine);
-                            if (nm.find()) {
-                                String symbols = nm.group(1).trim();
-                                // Only rewrite single-symbol named imports — multi-symbol like { A, B }
-                                // may mix a default re-export with named; leave those to the agent.
-                                if (!symbols.contains(",")) {
-                                    String sym = symbols.split("\\s+as\\s+")[0].trim();
-                                    String quote = importLine.contains("'") ? "'" : "\"";
-                                    String newLine = "import " + sym + " from " + quote + specifier + quote;
-                                    replacements.add(new String[]{importLine, newLine});
-                                    log.info("[TypeScriptImportFixer] {}: rewrote named import to default: {{ {} }} → {}",
-                                            fileName, sym, sym);
-                                }
+                    // `import { Layout } from './Layout'` when Layout.tsx has `export default ...` is
+                    // TS2614 ("Did you mean 'import Layout from...'?"). Convert the single named symbol
+                    // to a default import.
+                    if (targetHasDefault) {
+                        Matcher nm2 = NAMED_SYMBOLS.matcher(importLine);
+                        if (nm2.find()) {
+                            String symbols = nm2.group(1).trim();
+                            // Only single-symbol named imports — { A, B } may mix a default re-export
+                            // with named; leave those to the agent.
+                            if (!symbols.contains(",")) {
+                                String sym = symbols.split("\\s+as\\s+")[0].trim();
+                                String quote = importLine.contains("'") ? "'" : "\"";
+                                String newLine = "import " + sym + " from " + quote + specifier + quote;
+                                replacements.add(new String[]{importLine, newLine});
+                                log.info("[TypeScriptImportFixer] {}: rewrote named import to default: {{ {} }} → {}",
+                                        fileName, sym, sym);
                             }
+                        }
+                    }
+                } else {
+                    // `import Layout from './Layout'` when Layout.tsx has NO default export but exports
+                    // Layout as a named symbol is TS2613 ("has no default export"). If the registry
+                    // confirms the name is a NAMED export, convert to a named import.
+                    Matcher dm = DEFAULT_IMPORT_FORM.matcher(importLine);
+                    if (dm.find() && targetContent != null && !targetHasDefault) {
+                        String name = dm.group(1);
+                        if (registry.resolveBinding(name).orElse(null) == TypeScriptExportRegistry.Binding.NAMED) {
+                            String quote = importLine.contains("'") ? "'" : "\"";
+                            String newLine = "import { " + name + " } from " + quote + specifier + quote;
+                            replacements.add(new String[]{importLine, newLine});
+                            log.info("[TypeScriptImportFixer] {}: rewrote default import to named: {} → {{ {} }}",
+                                    fileName, name, name);
                         }
                     }
                 }

@@ -1,0 +1,16 @@
+Project: {{businessName}} ({{category}}) — Spring Boot (Java) backend + React/TypeScript (Vite) frontend.
+
+MISSING MODULES — referenced by planned files but never scheduled for generation. One path per line
+(the path indicates whether it is a backend or frontend file):
+{{missingPaths}}
+
+HOW THEY ARE REFERENCED — the prose/features that named them, and which files/features referenced each:
+{{referencingContext}}
+
+EXEMPLAR — an existing sibling file to mirror in structure and conventions (may be empty):
+{{exemplar}}
+
+Produce {"files": [ ... ]} specifying each REAL missing module with an implementation-ready
+description and its exact contract (backend: fields/method signatures; frontend: props/return shape +
+default vs named export). Keep each file_path exactly as listed. Omit any entry that is third-party,
+a language/framework built-in, type-only, or scaffold-provided.

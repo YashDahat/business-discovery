@@ -21,6 +21,8 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.nio.file.Files;
 import com.business.discovery.worker.util.ApiContractCard;
+import com.business.discovery.worker.util.CompileErrorClusterer;
+import com.business.discovery.worker.util.FrontendContractCard;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -177,7 +179,12 @@ public class ErrorFixAgent {
             Files under frontend/src/types/ (except types/local/) and frontend/src/services/*Service.ts
             are DERIVED from the compiled backend. They are ground truth and are regenerated
             on every attempt — the harness REFUSES edits to them, and any workaround you find
-            will be overwritten. When a page/hook disagrees with a derived type or service:
+            will be overwritten. The FRONTEND MODULE CONTRACTS section lists every hook,
+            context, type, component and shell module — use it to know what a module exports
+            and its exact shape WITHOUT reading the file first. Modules marked [immutable-context]
+            or [shell] are closed for editing — fix consumers to match them. For other modules,
+            read_file first if you need to edit the module itself.
+            When a page/hook disagrees with a derived type or service:
             - "Property 'x' does not exist on type 'YDto'" → rename x in the PAGE to the
               field the derived type actually declares (the error usually suggests it).
             - "'string | null' not assignable to 'string'" → add a null guard or fallback
@@ -242,7 +249,8 @@ public class ErrorFixAgent {
         log.info("[ErrorFixAgent] Seeded contract card: {} type file(s), {} route(s)",
                 card.typeFileCount(), card.routeCount());
 
-        return """
+        StringBuilder section = new StringBuilder();
+        section.append("""
 
                 %s
                 %s
@@ -252,7 +260,20 @@ public class ErrorFixAgent {
                 hand-written apiClient/axios request, and NEVER infer an endpoint path from a type
                 name. The routes above are the only ones the backend serves; a path absent from
                 them 404s at runtime even though it compiles.
-                """.formatted(ApiContractCard.PROMPT_KEY, card.toPromptSection());
+                """.formatted(ApiContractCard.PROMPT_KEY, card.toPromptSection()));
+
+        FrontendContractCard frontendCard = FrontendContractCard.build(workspace);
+        if (!frontendCard.isEmpty()) {
+            log.info("[ErrorFixAgent] Seeded frontend contract card: {} module(s)",
+                    frontendCard.moduleCount());
+            section.append("\nFRONTEND MODULE CONTRACTS ")
+                   .append("(extracted before this fix loop — reflects pre-fix state; ")
+                   .append("if you modify a module listed here, read_file to verify current state)\n")
+                   .append(frontendCard.toPromptSection())
+                   .append("\n");
+        }
+
+        return section.toString();
     }
 
     /**
@@ -268,14 +289,30 @@ public class ErrorFixAgent {
 
         // Seed the trigger with the actual error list — the old trigger made the model
         // spend its first round rediscovering errors we had already collected.
-        BuildToolService.BuildResult preCheck = check(fileType, compileDir);
+        // For frontend, use tsc --noEmit (npm run typecheck) for the seed so the agent
+        // receives the COMPLETE TypeScript error list without vite output mixed in.
+        // The 6000-char window on npm run build often truncated to 8 of 57 errors —
+        // the agent cannot cluster or bulk-fix errors it cannot see. autoVerify stays
+        // on npm run build to catch both tsc and vite issues during the fix loop.
+        BuildToolService.BuildResult preCheck = fileType == FileType.FRONTEND
+                ? buildTool.runTscCheck(compileDir)
+                : check(fileType, compileDir);
+
+        // Defensive: if the scaffold has no `typecheck` script (older projects, or the foundation
+        // not yet updated), `npm run typecheck` exits non-zero with an npm error and no tsc lines —
+        // fall back to the full build so the seed is a real error list, never an npm error.
+        if (fileType == FileType.FRONTEND && !preCheck.success()
+                && !CompileErrorClusterer.hasTscErrors(preCheck.output())) {
+            log.warn("[ErrorFixAgent] `npm run typecheck` produced no tsc errors — falling back to npm run build for the seed");
+            preCheck = buildTool.runNpmBuild(compileDir);
+        }
 
         if (preCheck.success()) {
             log.info("[ErrorFixAgent] {} already compiles — no fix loop needed", fileType);
             return true;
         }
 
-        String errors = prioritizeCompilerOutput(preCheck.output(), SEEDED_ERRORS_MAX_CHARS);
+        String errors = renderErrors(fileType, preCheck.output(), SEEDED_ERRORS_MAX_CHARS);
         log.warn("[ErrorFixAgent] {} errors before fix loop:\n{}", fileType, errors);
 
         String trigger = """
@@ -321,7 +358,7 @@ public class ErrorFixAgent {
         if (result.success()) {
             return "[auto-verify] COMPILATION PASSED — all errors resolved. You are done; stop calling tools.";
         }
-        String output = prioritizeCompilerOutput(result.output(), AUTO_VERIFY_MAX_CHARS);
+        String output = renderErrors(fileType, result.output(), AUTO_VERIFY_MAX_CHARS);
         return "[auto-verify] Compiler run after your changes — remaining errors:\n" + output;
     }
 
@@ -379,7 +416,21 @@ public class ErrorFixAgent {
 
         if (result.success()) return "COMPILATION PASSED — no errors.";
 
-        return prioritizeCompilerOutput(result.output(), 5000);
+        return renderErrors(isBackend ? FileType.BACKEND : FileType.FRONTEND, result.output(), 5000);
+    }
+
+    /**
+     * Frontend errors are clustered by root cause so the agent receives the COMPLETE set in a
+     * compact, groupable form — the input {@code bulk_str_replace} was designed for — instead of
+     * the derived-file-prioritized truncation that routinely showed "8 of 57". Backend (javac) and
+     * any non-tsc output (e.g. a vite-stage bundle failure) have no tsc error lines, so they fall
+     * back to {@link #prioritizeCompilerOutput}.
+     */
+    private static String renderErrors(FileType fileType, String output, int maxChars) {
+        if (fileType == FileType.FRONTEND && CompileErrorClusterer.hasTscErrors(output)) {
+            return CompileErrorClusterer.cluster(output, maxChars);
+        }
+        return prioritizeCompilerOutput(output, maxChars);
     }
 
     private static final Pattern TSC_ERROR_LINE =

@@ -120,7 +120,22 @@ regenerates the whole file) and routinely exceeds the LLM output budget.
 ## Step 3 — Baseline infra (ADDITIVE, never a substitute)
 Add to EVERY project in addition to Steps 1–2, never displacing a derived file:
 
-  Backend (PLAN THESE): SpaController, GlobalExceptionHandler, ErrorResponse.
+  Backend (PLAN THESE): GlobalExceptionHandler, ErrorResponse.
+  SpaController is PRE-SCAFFOLDED by the foundation — DO NOT PLAN it.
+
+  Frontend (PLAN THIS — exactly once, in the shared-frontend or core-ui feature):
+    src/config/siteConfig.ts — the site shell configuration. This file supplies the
+    SiteHeader and SiteFooter with ALL business-specific content and design tokens via props.
+    It is the ONLY place Header/Footer content is authored. Generate it as a named const
+    that exports a SiteConfig object (import type { SiteConfig } from '@/shell'):
+      header: { brandName, navLinks, ctaButton, bgClass, textClass, hoverClass, ctaClass }
+      footer: { brandName, tagline, address, phone, email, openingHours, quickLinks, socialLinks,
+                bgClass, textClass, accentClass }
+    navLinks must cover every public route in the plan. ctaButton should be the primary
+    conversion action (book table / order now / join / enquire). bgClass/textClass/accentClass
+    must use Tailwind classes that match the business's brand palette.
+    DO NOT generate Header.tsx, Footer.tsx, or Layout.tsx — these are pre-built in the
+    foundation at @/shell and are closed for modification.
 
   Backend AUTH SPINE — PRE-SCAFFOLDED, DO NOT PLAN. These files are written to disk
   deterministically by the build BEFORE you run and are NOT part of your manifest. Do NOT
@@ -284,10 +299,11 @@ same domain on backend and frontend are SEPARATE features.
   AdminPage.tsx + every Step 2a component belonging to those pages)
 - INFRA: ALL infra files (CI workflows, nginx.conf if any). Exactly one INFRA feature per
   project, named "infrastructure". No enrichment runs for it.
-- SHARED: cross-cutting backend utilities that are NOT pre-scaffolded — SpaController,
-  GlobalExceptionHandler, ErrorResponse. (The auth spine — User, Role, SecurityConfig,
-  PasswordEncoderConfig, JwtUtil, JwtAuthFilter, AuthController, Auth DTOs, UserRepository,
-  UserService, AdminInitializer — is pre-scaffolded per Step 3; never place it in a feature.)
+- SHARED: cross-cutting backend utilities — GlobalExceptionHandler, ErrorResponse.
+  (The foundation pre-scaffolds: SpaController, User, Role, SecurityConfig, PasswordEncoderConfig,
+  JwtUtil, JwtAuthFilter, AuthController, Auth DTOs, UserRepository, UserService, AdminInitializer,
+  and the full payment spine. None of these appear in SHARED or any feature — they are closed for
+  modification and open for extension: generated code imports/uses them, never reimplements them.)
 
 ## Size rule
 4–10 files per feature, NOT counting COMPONENT files. If a domain exceeds 10 non-component

@@ -11,6 +11,7 @@ import com.business.discovery.worker.util.NpmPackageFixer;
 import com.business.discovery.worker.util.TsxExportGuard;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
@@ -25,6 +26,12 @@ public class FrontendValidationNode implements WorkerNode {
 
     private final BuildToolService buildTool;
     private final ErrorFixAgent errorFixAgent;
+
+    /** Enforcement Point B strictness: false (default) = advisory report + warn; true = fail fast on
+     *  an unresolved local import. Keep advisory until missing-producer synthesis (Change 2) lands —
+     *  mirrors worker.smoke.flows-strict. */
+    @Value("${worker.completeness.import-closure-strict:false}")
+    private boolean importClosureStrict;
 
     @Override
     public void execute(WorkerContext ctx) {
@@ -69,8 +76,16 @@ public class FrontendValidationNode implements WorkerNode {
         boolean uiImportsFixed = com.business.discovery.worker.util.UiImportRewriter.fix(frontendSrc,
                 com.business.discovery.worker.util.UiComponentInventory.build(frontendDir));
         boolean svcImportsFixed = com.business.discovery.worker.util.ServiceImportRewriter.fix(frontendSrc);
+        //   6. TypeScriptImportFixer: registry-driven correction of wrong @/ and relative import
+        //      paths (resolved to where each symbol is actually exported) and default↔named
+        //      mismatches (TS2613/TS2614). Runs per-file during generation; re-applying it here on
+        //      the complete file set catches cross-file mismatches only visible once every file exists.
+        boolean tsImportsFixed = com.business.discovery.worker.util.TypeScriptImportFixer.fixAll(
+                frontendSrc, ctx.getWorkspaceDir(),
+                com.business.discovery.worker.util.TypeScriptExportRegistry.buildFromDisk(
+                        frontendSrc, ctx.getWorkspaceDir()));
 
-        if (exportsFixed || packagesFixed || jsxImportsFixed || uiImportsFixed || svcImportsFixed) {
+        if (exportsFixed || packagesFixed || jsxImportsFixed || uiImportsFixed || svcImportsFixed || tsImportsFixed) {
             BuildResult postFix = buildTool.runNpmBuild(frontendDir);
             if (postFix.success()) {
                 log.info("[FrontendValidationNode] npm build passed after mechanical fixes — skipping ErrorFixAgent");
@@ -78,6 +93,38 @@ public class FrontendValidationNode implements WorkerNode {
                 return;
             }
             log.info("[FrontendValidationNode] Mechanical fixes incomplete — handing off to ErrorFixAgent");
+        }
+
+        // Enforcement Point B (gen-time closure): after the deterministic path fixers above, every
+        // local import must resolve to a real file on disk. An unresolved one is a missing producer —
+        // exactly the class the ErrorFixAgent cannot author reliably (AdminLayout survived 3 attempts),
+        // and it catches modules invented only at generation (which the plan-time checks cannot see).
+        // Advisory by default (report + warn, then let the agent try); strict fails fast to avoid a
+        // doomed 30-round loop. Keep advisory until missing-producer synthesis lands.
+        java.util.List<com.business.discovery.worker.util.ImportClosureChecker.Unresolved> unresolved =
+                com.business.discovery.worker.util.ImportClosureChecker.check(frontendSrc);
+        if (!unresolved.isEmpty()) {
+            String report = com.business.discovery.worker.util.ImportClosureChecker.render(unresolved);
+            com.business.discovery.worker.util.ImportClosureChecker.writeReport(ctx.getWorkspaceDir(), report);
+            if (importClosureStrict) {
+                // Strict: surface loudly instead of auto-stubbing, for teams who want a real fix.
+                throw new WorkerException(FailureType.CODE,
+                        "Frontend import closure violated — modules referenced but never generated:\n" + report);
+            }
+            // Repair (Change 2 synthesis): write permissive placeholders so the imports resolve, then
+            // rebuild — a still-failing build now carries only residual type errors for the ErrorFixAgent.
+            int synthesized = com.business.discovery.worker.util.MissingModuleSynthesizer.synthesize(
+                    frontendSrc, unresolved);
+            log.warn("[FrontendValidationNode] Import closure — {} missing module(s); synthesized {} placeholder(s):\n{}",
+                    unresolved.size(), synthesized, report);
+            if (synthesized > 0) {
+                BuildResult postSynth = buildTool.runNpmBuild(frontendDir);
+                if (postSynth.success()) {
+                    log.info("[FrontendValidationNode] npm build passed after missing-module synthesis — skipping ErrorFixAgent");
+                    markFilesValidated(ctx);
+                    return;
+                }
+            }
         }
 
         log.warn("[FrontendValidationNode] npm run build failed — starting ErrorFixAgent loop");

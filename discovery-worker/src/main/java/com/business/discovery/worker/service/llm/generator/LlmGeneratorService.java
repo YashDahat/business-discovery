@@ -392,7 +392,13 @@ public abstract class LlmGeneratorService {
                                       String sharedContext) {
         boolean isUpdate = existingContent != null;
 
-        String system = PromptLoader.load(isUpdate ? "system/file_update.txt" : "system/file_generate.txt");
+        boolean isFrontend = filePath != null && (filePath.endsWith(".ts") || filePath.endsWith(".tsx"));
+        boolean isBackend  = filePath != null && filePath.endsWith(".java");
+        String system = PromptLoader.load(
+                isUpdate   ? "system/file_update.txt"
+              : isFrontend ? "system/file_generate_frontend.txt"
+              : isBackend  ? "system/file_generate_backend.txt"
+              :              "system/file_generate.txt");
         if (sharedContext != null && !sharedContext.isBlank()) {
             system = system + "\n\n" + sharedContext;
         }
@@ -473,6 +479,76 @@ public abstract class LlmGeneratorService {
                 .render();
 
         return stripMarkdown(callLlm(system, user));
+    }
+
+    /**
+     * Step 4 of the ARCHITECTURE.json completeness pass: upgrades detected-missing modules — backend
+     * (Java) OR frontend (React/TS) — from bare stubs into proper FileSpecs so the generator produces
+     * real files (a real admin layout, a real DTO), not placeholders. Stack-agnostic: each file's side
+     * is derived from its path. Best-effort — returns only the files it could spec (empty list on any
+     * failure); the caller falls back to a stub for anything not returned, so a miss always resolves.
+     *
+     * @param missingPaths       the referenced-but-absent workspace-relative paths (kept verbatim)
+     * @param referencingContext prose that named them (feature instructions + who referenced each)
+     * @param exemplar           an existing sibling file to mirror (e.g. SiteLayout); may be empty
+     * @param brief              business/category context
+     */
+    public List<FileSpec> specifyMissingFiles(List<String> missingPaths, String referencingContext,
+                                              String exemplar, BriefContext brief) {
+        if (missingPaths == null || missingPaths.isEmpty()) return List.of();
+
+        String system = PromptLoader.load("system/spec_missing_files.txt");
+        String user = PromptTemplate.from(PromptLoader.load("user/spec_missing_files.txt"))
+                .with("businessName",       brief.businessName())
+                .with("category",           brief.category())
+                .with("missingPaths",       String.join("\n", missingPaths))
+                .with("referencingContext", referencingContext == null ? "" : referencingContext)
+                .with("exemplar",           exemplar == null ? "" : exemplar)
+                .render();
+
+        try {
+            JsonNode result = LlmResponseParser.parseJsonObject(callLlm(system, user));
+            JsonNode files = result.path("files");
+            if (!files.isArray()) {
+                log.warn("[specifyMissingFiles] Response had no files[] array — caller will stub");
+                return List.of();
+            }
+            // Extract only the simple fields we need. Deliberately does NOT deserialize
+            // public_functions (a List<PublicFunction>): the model often emits it as free-form strings,
+            // which would fail whole-object binding and drop the file to a stub. The generator drives off
+            // `description` anyway, and imports_from below feeds the closure check.
+            List<FileSpec> out = new ArrayList<>();
+            for (JsonNode n : files) {
+                String path = n.path("file_path").asText(null);
+                if (path == null || path.isBlank()) continue;
+                String fileName = n.path("file_name").asText(
+                        path.contains("/") ? path.substring(path.lastIndexOf('/') + 1) : path);
+                // Stack-agnostic: file_type from the response, else inferred from the path — so a Java
+                // backend/… class and a React frontend/src/… module are both labelled correctly.
+                String fileType = n.path("file_type").asText(
+                        path.startsWith("backend/") ? "BACKEND" : "FRONTEND");
+                FileSpec.FileSpecBuilder b = FileSpec.builder()
+                        .fileName(fileName)
+                        .filePath(path)
+                        .fileType(fileType)
+                        .layer(n.path("layer").asText(null))
+                        .featureName(n.path("feature_name").asText(null))
+                        .description(n.path("description").asText(""))
+                        .status("PLANNED");
+                JsonNode imp = n.path("imports_from");
+                if (imp.isArray()) {
+                    List<String> importsFrom = new ArrayList<>();
+                    imp.forEach(x -> importsFrom.add(x.asText()));
+                    b.importsFrom(importsFrom);
+                }
+                out.add(b.build());
+            }
+            log.info("[specifyMissingFiles] Specced {}/{} missing file(s)", out.size(), missingPaths.size());
+            return out;
+        } catch (Exception e) {
+            log.warn("[specifyMissingFiles] Failed — caller will fall back to stubs: {}", e.getMessage());
+            return List.of();
+        }
     }
 
     /**

@@ -25,7 +25,13 @@ file in place — return its complete, updated contents.
    When the existing file already demonstrates a pattern, follow that pattern even if you
    would personally choose differently.
 
-3. ARCHITECTURE BOUNDARIES (non-negotiable):
+3. EXPLICIT RETURN TYPES ON ALL EXPORTED FUNCTIONS (frontend files only): if you add or modify
+   an exported function, it must carry an explicit return type annotation — never rely on inference.
+   If the existing file already has annotations, preserve them; if it lacks them on the functions
+   you touch, add them as part of your change. The return type is the cross-file contract that
+   downstream consumers depend on.
+
+4. ARCHITECTURE BOUNDARIES (non-negotiable):
    - All data models, entities, repositories, and SQL/JPQL queries live in the BACKEND only.
    - The FRONTEND communicates with the backend exclusively via REST API calls
      (fetch/axios to documented endpoints). Never embed SQL, direct DB access, or business
@@ -41,7 +47,7 @@ file in place — return its complete, updated contents.
    - If the requested change appears to violate this boundary, implement the correct-side
      version that satisfies the intent rather than the literal misplaced request.
 
-4. COMPLETENESS & CORRECTNESS: The returned file must be complete (no "// rest unchanged"
+5. COMPLETENESS & CORRECTNESS: The returned file must be complete (no "// rest unchanged"
    placeholders, no elisions) and must compile/run as-is — all referenced imports present,
    no dangling references, no syntax errors introduced.
 

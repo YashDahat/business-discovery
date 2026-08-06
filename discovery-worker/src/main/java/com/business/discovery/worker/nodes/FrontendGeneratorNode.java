@@ -83,6 +83,7 @@ public class FrontendGeneratorNode implements WorkerNode {
                 "noUnusedLocals": false,
                 "noUnusedParameters": false,
                 "noFallthroughCasesInSwitch": true,
+                "forceConsistentCasingInFileNames": true,
                 "paths": { "@/*": ["./src/*"] }
               },
               "include": ["src"]
@@ -300,7 +301,9 @@ public class FrontendGeneratorNode implements WorkerNode {
                     if (isFenced(entry.path(), spec, workspace)
                             || shouldSkip(spec, feature, requestedChangesMode, Files.exists(filePath))) {
                         if (Files.exists(filePath)) {
-                            exportRegistry.register(filePath, Files.readString(filePath));
+                            String skippedContent = Files.readString(filePath);
+                            exportRegistry.register(filePath, skippedContent);
+                            frontendContractCard.register(filePath, skippedContent);
                         }
                     }
                 }
@@ -385,7 +388,9 @@ public class FrontendGeneratorNode implements WorkerNode {
                     Path filePath = workspace.resolve(entry.path());
                     if (Files.exists(filePath)) {
                         try {
-                            exportRegistry.register(filePath, Files.readString(filePath));
+                            String generatedContent = Files.readString(filePath);
+                            exportRegistry.register(filePath, generatedContent);
+                            frontendContractCard.register(filePath, generatedContent);
                         } catch (IOException e) {
                             log.warn("[FrontendGeneratorNode] Could not register exports for {}: {}",
                                     entry.path(), e.getMessage());
@@ -426,6 +431,8 @@ public class FrontendGeneratorNode implements WorkerNode {
     private volatile com.business.discovery.worker.util.UiComponentInventory uiInventory;
     private volatile com.business.discovery.worker.util.ApiContractCard contractCard;
     private volatile String routeCardSection;
+    private com.business.discovery.worker.util.FrontendContractCard frontendContractCard =
+            new com.business.discovery.worker.util.FrontendContractCard();
 
     /**
      * Derives routes.ts + App.tsx from the plan's PAGE entries before any layer generates.
@@ -542,7 +549,7 @@ public class FrontendGeneratorNode implements WorkerNode {
                                   String fileRole, boolean requestedChangesMode,
                                   FeatureSpec feature, Set<String> manifestPaths,
                                   TypeScriptExportRegistry exportRegistry) throws IOException {
-        Map<String, String> depFiles = loadDependencyFiles(workspace, spec);
+        Map<String, String> depFiles = loadDependencyFiles(workspace, spec, exportRegistry);
         if (uiInventory != null && !uiInventory.isEmpty()) {
             depFiles.put("AVAILABLE UI IMPORTS (ground truth — import ONLY names listed here)",
                     uiInventory.toPromptSection());
@@ -574,6 +581,13 @@ public class FrontendGeneratorNode implements WorkerNode {
         if (routeCardSection != null) {
             contractSection = contractSection == null
                     ? routeCardSection : contractSection + "\n\n" + routeCardSection;
+        }
+        // Frontend contract card: hook return types, context signatures, local type field shapes
+        // extracted from all layers completed before this file's layer. Empty for the first layer;
+        // grows incrementally so each layer sees contracts from all prior layers.
+        if (!frontendContractCard.isEmpty()) {
+            String fcSection = "FRONTEND MODULE CONTRACTS\n" + frontendContractCard.toPromptSection();
+            contractSection = contractSection == null ? fcSection : contractSection + "\n\n" + fcSection;
         }
 
         String content = null;
@@ -669,7 +683,9 @@ public class FrontendGeneratorNode implements WorkerNode {
                     .filter(f -> !f.toString().contains("/components/ui/")) // shadcn handled by UiInventory
                     ::iterator) {
                 try {
-                    exportRegistry.register(p, Files.readString(p));
+                    String content = Files.readString(p);
+                    exportRegistry.register(p, content);
+                    frontendContractCard.register(p, content);
                     seeded++;
                 } catch (IOException ignored) {}
             }
@@ -1300,22 +1316,53 @@ public class FrontendGeneratorNode implements WorkerNode {
                 .collect(Collectors.toMap(FeatureSpec::getFeatureName, f -> f, (a, b) -> a));
     }
 
-    private Map<String, String> loadDependencyFiles(Path workspace, FileSpec spec) {
+    // Matches use* hook names in feature instructions — used to auto-resolve their source files.
+    private static final java.util.regex.Pattern USE_HOOK_NAME =
+            java.util.regex.Pattern.compile("\\b(use[A-Z]\\w+)\\b");
+
+    private Map<String, String> loadDependencyFiles(Path workspace, FileSpec spec,
+                                                     TypeScriptExportRegistry exportRegistry) {
         java.util.LinkedHashMap<String, String> deps = new java.util.LinkedHashMap<>();
         if (spec == null) return deps;
 
+        // 1. Spec-declared dependencies (importsFrom / dependsOn)
         List<String> depPaths = spec.getImportsFrom();
         if (depPaths == null || depPaths.isEmpty()) depPaths = spec.getDependsOn();
-        if (depPaths == null) return deps;
-
-        for (String depPath : depPaths) {
-            Path file = workspace.resolve(depPath);
-            if (Files.exists(file)) {
-                try {
-                    deps.put(depPath, Files.readString(file));
-                } catch (IOException ignored) {}
+        if (depPaths != null) {
+            for (String depPath : depPaths) {
+                Path file = workspace.resolve(depPath);
+                if (Files.exists(file)) {
+                    try { deps.put(depPath, Files.readString(file)); } catch (IOException ignored) {}
+                }
             }
         }
+
+        // 2. Auto-resolve use* hook names mentioned in the file's spec description.
+        // The planner frequently leaves imports_from empty even when a component clearly
+        // depends on a hook — this fills the gap so Flash gets the actual hook source
+        // (return type, field names) rather than only the compact contract card summary.
+        if (exportRegistry != null && spec.getFileRole() != null) {
+            String combined = (spec.getFileRole() != null ? spec.getFileRole() : "")
+                    + " " + (spec.getDescription() != null ? spec.getDescription() : "");
+            java.util.regex.Matcher m = USE_HOOK_NAME.matcher(combined);
+            java.util.Set<String> resolved = new java.util.HashSet<>();
+            while (m.find()) {
+                String hookName = m.group(1);
+                exportRegistry.resolveSpecifier(hookName).ifPresent(relNoExt -> {
+                    if (resolved.add(relNoExt) && !deps.containsKey(relNoExt)) {
+                        for (String ext : List.of(".ts", ".tsx")) {
+                            Path file = workspace.resolve(relNoExt + ext);
+                            if (Files.exists(file)) {
+                                try { deps.put(relNoExt + ext, Files.readString(file)); }
+                                catch (IOException ignored) {}
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
         return deps;
     }
 

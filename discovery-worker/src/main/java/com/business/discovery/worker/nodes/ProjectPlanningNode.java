@@ -18,6 +18,7 @@ import com.business.discovery.worker.service.GitService;
 import com.business.discovery.worker.service.SpringInitializrClient;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import com.business.discovery.worker.util.FeatureDependencyGraph;
+import com.business.discovery.worker.util.ManifestCompletenessChecker;
 import com.business.discovery.worker.util.SlugUtil;
 import com.business.discovery.worker.util.WorkspaceReader;
 import lombok.extern.slf4j.Slf4j;
@@ -216,7 +217,7 @@ public class ProjectPlanningNode implements WorkerNode {
         }
 
         // ── Cross-reference validation: add stub entries for missing imports ──
-        spec = validateCrossReferences(spec);
+        spec = validateCrossReferences(spec, workspace, briefCtx);
 
         // ── Merge: preserve VALIDATED status from prior run ───────────────────
         spec = mergeWithExisting(spec, workspace);
@@ -1289,7 +1290,7 @@ public class ProjectPlanningNode implements WorkerNode {
                 .toList();
     }
 
-    private ArchitectureSpec validateCrossReferences(ArchitectureSpec spec) {
+    private ArchitectureSpec validateCrossReferences(ArchitectureSpec spec, Path workspace, BriefContext briefCtx) {
         Set<String> knownPaths = spec.getFiles().stream()
                 .map(FileSpec::getFilePath)
                 .filter(Objects::nonNull)
@@ -1297,26 +1298,126 @@ public class ProjectPlanningNode implements WorkerNode {
 
         List<FileSpec> toAdd = new ArrayList<>();
 
-        for (FileSpec file : spec.getFiles()) {
-            if (file.getImportsFrom() == null) continue;
-            for (String importPath : file.getImportsFrom()) {
-                if (importPath == null || knownPaths.contains(importPath)) continue;
-                if (toAdd.stream().anyMatch(f -> importPath.equals(f.getFilePath()))) continue;
+        // Enforcement Point A: detect referenced-but-unplanned modules on each side (on-disk aware so a
+        // foundation file is never stubbed), then an LLM speccing pass (step 4) upgrades each miss into a
+        // proper FileSpec so the generator builds a real file. Anything the LLM can't spec falls back to a
+        // bare stub so the reference still resolves. See docs/architecture-json-completeness-plan.md.
+        //   Frontend: prose- + on-disk-aware (catches wrappers like AdminLayout named only in prose).
+        //   Backend:  imports_from path diff, on-disk aware (well-populated paths; no prose scan). Does
+        //             NOT catch classes invented only at generation time — that is a gen-time concern.
+        List<ManifestCompletenessChecker.MissingRef> missingFe =
+                pending(ManifestCompletenessChecker.findMissingFrontend(spec, workspace), knownPaths, toAdd);
+        if (!missingFe.isEmpty()) {
+            applyMissing(missingFe, specifyMissing(spec, workspace, missingFe, briefCtx,
+                    "frontend/src/shell/SiteLayout.tsx"), toAdd, knownPaths, "frontend");
+        }
 
-                log.warn("[ProjectPlanningNode] Missing manifest entry: {} (imported by {})",
-                        importPath, file.getFilePath());
-                toAdd.add(buildStubEntry(importPath));
-                knownPaths.add(importPath);
-            }
+        List<ManifestCompletenessChecker.MissingRef> missingBe =
+                pending(ManifestCompletenessChecker.findMissingBackend(spec, workspace), knownPaths, toAdd);
+        if (!missingBe.isEmpty()) {
+            applyMissing(missingBe, specifyMissing(spec, workspace, missingBe, briefCtx, null),
+                    toAdd, knownPaths, "backend");
         }
 
         if (!toAdd.isEmpty()) {
             List<FileSpec> all = new ArrayList<>(spec.getFiles());
             all.addAll(toAdd);
             spec.setFiles(all);
-            log.info("[ProjectPlanningNode] Added {} missing stub entries to manifest", toAdd.size());
+            log.info("[ProjectPlanningNode] Added {} missing manifest entries (specced or stubbed)", toAdd.size());
         }
         return spec;
+    }
+
+    /** Drops misses already known or queued, preserving detection order. */
+    private static List<ManifestCompletenessChecker.MissingRef> pending(
+            List<ManifestCompletenessChecker.MissingRef> found, Set<String> knownPaths, List<FileSpec> toAdd) {
+        return found.stream()
+                .filter(mr -> !knownPaths.contains(mr.importPath()))
+                .filter(mr -> toAdd.stream().noneMatch(f -> mr.importPath().equals(f.getFilePath())))
+                .collect(Collectors.toList());
+    }
+
+    /** Adds a proper spec per miss when the LLM produced one, else a bare stub; records the path. */
+    private void applyMissing(List<ManifestCompletenessChecker.MissingRef> missing,
+            Map<String, FileSpec> specced, List<FileSpec> toAdd, Set<String> knownPaths, String side) {
+        for (ManifestCompletenessChecker.MissingRef mr : missing) {
+            FileSpec entry = specced.get(mr.importPath());
+            if (entry != null) {
+                log.info("[ProjectPlanningNode] Specced missing {} file: {} (referenced by {})",
+                        side, mr.importPath(), mr.referencedBy());
+            } else {
+                log.warn("[ProjectPlanningNode] Missing {} file stubbed (LLM did not spec it): {} (referenced by {})",
+                        side, mr.importPath(), mr.referencedBy());
+                entry = buildStubEntry(mr.importPath());
+            }
+            toAdd.add(entry);
+            knownPaths.add(mr.importPath());
+        }
+    }
+
+    /**
+     * Step 4: asks the (Flash) LLM to turn detected-missing modules (frontend OR backend) into proper
+     * FileSpecs. Assembles the referencing context — who referenced each, the referencing files'
+     * descriptions (the consumer's intent), and the instructions of any feature that named a miss —
+     * plus an optional on-disk exemplar (e.g. SiteLayout) to mirror. Returns specced files keyed by
+     * path; failures yield an empty map so the caller stubs. Never throws.
+     */
+    private Map<String, FileSpec> specifyMissing(ArchitectureSpec spec, Path workspace,
+            List<ManifestCompletenessChecker.MissingRef> missing, BriefContext briefCtx, String exemplarRel) {
+        Map<String, FileSpec> byFilePath = new HashMap<>();
+        if (spec.getFiles() != null) {
+            for (FileSpec f : spec.getFiles()) if (f.getFilePath() != null) byFilePath.put(f.getFilePath(), f);
+        }
+
+        StringBuilder ctx = new StringBuilder();
+        for (ManifestCompletenessChecker.MissingRef mr : missing) {
+            ctx.append(mr.importPath()).append("  <- referenced by: ")
+               .append(String.join(", ", mr.referencedBy())).append('\n');
+            for (String ref : mr.referencedBy()) {                 // the consumer's intent
+                FileSpec rf = byFilePath.get(ref);
+                if (rf != null && rf.getDescription() != null && !rf.getDescription().isBlank()) {
+                    ctx.append("    [").append(rf.getFileName()).append("] ").append(rf.getDescription()).append('\n');
+                }
+            }
+        }
+        // Instructions of the features that referenced a miss — where shared wrappers like <AdminLayout>
+        // and their intent (nav, auth enforcement) are described.
+        Set<String> refFeatures = missing.stream()
+                .flatMap(mr -> mr.referencedBy().stream())
+                .filter(s -> s.startsWith("feature:"))
+                .map(s -> s.substring("feature:".length()))
+                .collect(Collectors.toSet());
+        if (spec.getFeatures() != null) {
+            for (FeatureSpec f : spec.getFeatures()) {
+                if (refFeatures.contains(f.getFeatureName())
+                        && f.getFeatureInstruction() != null && !f.getFeatureInstruction().isBlank()) {
+                    ctx.append("\n[feature ").append(f.getFeatureName()).append("]\n")
+                       .append(f.getFeatureInstruction()).append('\n');
+                }
+            }
+        }
+        String exemplar = exemplarRel == null ? "" : readExemplar(workspace, exemplarRel);
+        List<String> paths = missing.stream()
+                .map(ManifestCompletenessChecker.MissingRef::importPath).collect(Collectors.toList());
+
+        Map<String, FileSpec> byPath = new HashMap<>();
+        try {
+            for (FileSpec fs : enrichLlm.specifyMissingFiles(paths, ctx.toString(), exemplar, briefCtx)) {
+                if (fs.getFilePath() != null) byPath.put(fs.getFilePath(), fs);
+            }
+        } catch (Exception e) {
+            log.warn("[ProjectPlanningNode] specifyMissingFiles threw — falling back to stubs: {}", e.getMessage());
+        }
+        return byPath;
+    }
+
+    private String readExemplar(Path workspace, String rel) {
+        try {
+            Path p = workspace.resolve(rel);
+            return Files.exists(p) ? Files.readString(p) : "";
+        } catch (IOException e) {
+            return "";
+        }
     }
 
     private FileSpec buildStubEntry(String filePath) {
