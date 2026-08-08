@@ -5,6 +5,8 @@ import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -27,6 +29,11 @@ public final class JsxTypeImportFixer {
     private static final Pattern USES_JSX_NAMESPACE = Pattern.compile("\\bJSX\\.");
     private static final Pattern ALREADY_IMPORTS_JSX =
             Pattern.compile("import\\s+type\\s*\\{[^}]*\\bJSX\\b[^}]*}\\s*from\\s*['\"]react['\"]");
+    // Leading prologue the import must go AFTER, never displace: a module directive
+    // ('use client'/'use strict') or a fence/banner comment (e.g. // GENERATED foundation scaffold,
+    // whose position on line 1 FrontendGeneratorNode.isFenced() depends on).
+    private static final Pattern USE_DIRECTIVE =
+            Pattern.compile("['\"]use (client|strict)['\"];?");
 
     private JsxTypeImportFixer() {}
 
@@ -45,7 +52,7 @@ public final class JsxTypeImportFixer {
                     String content = Files.readString(file);
                     if (!USES_JSX_NAMESPACE.matcher(content).find()) continue;
                     if (ALREADY_IMPORTS_JSX.matcher(content).find()) continue;
-                    Files.writeString(file, "import type { JSX } from 'react';\n" + content);
+                    Files.writeString(file, withJsxImport(content));
                     changed[0] = true;
                     log.info("[JsxTypeImportFixer] Added JSX type import to {}", file.getFileName());
                 } catch (IOException e) {
@@ -56,5 +63,24 @@ public final class JsxTypeImportFixer {
             log.warn("[JsxTypeImportFixer] Walk failed: {}", e.getMessage());
         }
         return changed[0];
+    }
+
+    /**
+     * Inserts the JSX type import after any leading prologue — a {@code 'use client'}/{@code 'use strict'}
+     * directive, fence/banner {@code //} comments, or blank lines — so it never displaces the first line
+     * (which for a fenced file carries the marker {@code isFenced()} reads). Falls back to the top when
+     * there is no prologue.
+     */
+    static String withJsxImport(String content) {
+        List<String> lines = new ArrayList<>(Arrays.asList(content.split("\n", -1)));
+        int insertAt = 0;
+        while (insertAt < lines.size()) {
+            String t = lines.get(insertAt).strip();
+            boolean prologue = t.isEmpty() || t.startsWith("//") || USE_DIRECTIVE.matcher(t).matches();
+            if (!prologue) break;
+            insertAt++;
+        }
+        lines.add(insertAt, "import type { JSX } from 'react';");
+        return String.join("\n", lines);
     }
 }

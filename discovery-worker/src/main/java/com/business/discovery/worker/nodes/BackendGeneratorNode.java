@@ -63,6 +63,9 @@ public class BackendGeneratorNode implements WorkerNode {
     private static final Pattern CLASS_NAME_PATTERN = Pattern.compile("\\b([A-Z][A-Za-z0-9]+)\\b");
 
     private final LlmGeneratorService flashLlm;
+
+    /** Fenced foundation contract (User/Role/PaymentService/exceptions), loaded once per run; "" when absent. */
+    private volatile String foundationContractSection = "";
     private final GeneratedFileRepository fileRepo;
     private final GitService gitService;
 
@@ -90,6 +93,18 @@ public class BackendGeneratorNode implements WorkerNode {
         // Merge files already on disk (from previous attempts, exception classes not in spec, etc.)
         // so JavaImportResolver never strips their imports as "ghost imports"
         classRegistry.mergeFromFilesystem(backendDir.resolve("src/main/java"));
+
+        // Fenced foundation contract (User/Role/PaymentService/exceptions) — ground truth for the
+        // immutable Java spine, appended to the (cached) system prompt of every backend generation call.
+        this.foundationContractSection =
+                com.business.discovery.worker.util.FoundationContractCard.backendSection(workspace);
+        if (foundationContractSection.isEmpty()) {
+            log.warn("[BackendGeneratorNode] No backend/FOUNDATION_CONTRACT.md in workspace — "
+                    + "generating without the fenced foundation contract");
+        } else {
+            log.info("[BackendGeneratorNode] Loaded fenced foundation contract ({} chars)",
+                    foundationContractSection.length());
+        }
 
         preInjectDependencies(backendDir.resolve("pom.xml"), architectureSpec);
 
@@ -297,7 +312,8 @@ public class BackendGeneratorNode implements WorkerNode {
         Map<String, String> depFiles = loadDependencyFiles(workspace, spec,
                 featureInstruction, fileRole, standaloneClassImports);
         return flashLlm.generateFileContent(entry.path(), featureInstruction,
-                fileRole != null ? fileRole : "", depFiles, existingContent);
+                fileRole != null ? fileRole : "", depFiles, existingContent,
+                foundationContractSection);
     }
 
     private String existingContent(Path filePath, boolean requestedChangesMode, FeatureSpec feature) {

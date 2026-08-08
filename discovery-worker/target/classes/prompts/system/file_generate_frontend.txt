@@ -42,6 +42,11 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
   totals.adjustments.map(adj => adj.label / adj.amount) — never adj.index or adj.name
 
 # TYPESCRIPT / REACT 19 CONSTRAINTS (every rule fixes a recurring build breaker)
+0. COMPONENT RETURN TYPE — never annotate a component or page as `: JSX.Element`. Under React 19's
+   jsx-runtime the global `JSX` namespace does not exist, so `(): JSX.Element` fails with
+   `TS2503: Cannot find namespace 'JSX'`. Either OMIT the return-type annotation entirely (preferred —
+   inference is correct) or write `(): React.JSX.Element` (with React in scope). Applies to EVERY
+   page and component, default- or named-exported.
 1. TANSTACK QUERY v5 — SERVER STATE MANAGEMENT (applies to every business domain)
    TanStack Query separates SERVER state (data from an API, cached and synchronised)
    from LOCAL state (UI toggles, form values). Use it for any data that comes from the
@@ -87,6 +92,19 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
 3. ZOD NUMERIC FORM FIELDS: HTML inputs yield strings — use z.coerce.number() (NOT z.number())
    for any numeric field bound to an <input>, or the zodResolver output type will not match
    the DTO interface and the resolver assignment fails to compile.
+3b. ZOD FORM SCHEMA ↔ RESOLVER / DTO TYPING — two hard rules, each fixes a WHOLE-FORM build breaker:
+   (a) NEVER use `.default(...)` inside a form's zod schema. `.default()` makes a field OPTIONAL on the
+       schema INPUT type but REQUIRED on its OUTPUT type (`z.infer`), so `zodResolver(schema)` no longer
+       matches `useForm<z.infer<typeof schema>>` — the resolver AND every `<FormField control={form.control}>`
+       fail to compile (TS2322, one error per field). Put initial values in
+       `useForm({ defaultValues: { ... } })` instead: schema `vegetarian: z.boolean()`, defaultValues
+       `vegetarian: false` — never `z.boolean().default(false)`. Avoid other input≠output constructs the
+       same way (`.transform()`, `.optional().or(...)`).
+   (b) Build the request DTO by NAMING each field (never spread `...values` into it) and match the DTO's
+       nullability EXACTLY — the API TYPES section is ground truth. Prefer making the schema field required
+       when the DTO field is (`z.string().min(1)`); if you deliberately keep a field optional for UX, coerce
+       it to the DTO type at submit: `field: values.field ?? ''` for a required string field, `?? null` for a
+       nullable one.
 4. IMPORT FORM — match the export form of the target file exactly (TS2614 otherwise):
    - `export default function Foo()` or `export default Foo` → import as `import Foo from './Foo'`
      DEFAULT import — NO braces. This is by far the most common form for component files.
@@ -212,8 +230,9 @@ First character = first character of the file; last character = last character o
 - Only what was specified — zero added members, imports, logic, or comments?
 - Every member matches name, type, modifier, signature exactly?
 - All references match the instruction/files; nothing fabricated?
-- For PAGE files with forms: does every zod field type produce the TypeScript type that
-  matches the corresponding service interface field? (z.number() → number, z.string() →
-  string; z.string().optional() → string | undefined). No String() casts or ?? '' patches
-  should be needed in onSubmit() if the schema is correct.
+- For files with forms: NO `.default(...)` anywhere in the zod schema (breaks the resolver type —
+  put defaults in `useForm({ defaultValues })`). Does every zod field type match the DTO field it
+  feeds (z.number() → number, z.string() → string, z.string().optional() → string | undefined)? The
+  submit object names each DTO field (no `...values` spread) and coerces any optional field feeding a
+  required DTO field (`?? ''` / `?? null`).
 - Compiles as-is? Output is raw with no fences or surrounding text?

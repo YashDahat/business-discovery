@@ -1,6 +1,6 @@
 # Frontend Fix-Loop Convergence Plan
 
-**Status:** Change 1 (clustering) ✅, Change 3 (deterministic import pre-pass) ✅, and Change 2 (missing-producer) ✅ — all implemented + unit-tested. Change 2 converged with the completeness plan's **Point B** (`ImportClosureChecker` detection + `MissingModuleSynthesizer` synthesis); backend DTO synthesis is the one open item.
+**Status:** Change 1 (clustering) ✅, Change 3 (deterministic import pre-pass) ✅, and Change 2 (missing-producer) ✅ — all implemented + unit-tested. Change 2 converged with the completeness plan's **Point B** (`ImportClosureChecker` + `MissingModuleSynthesizer` for the frontend, `BackendClassSynthesizer` for the backend). Only the optional "targeted LLM gen" route (real content vs deterministic placeholder) remains.
 **Date:** 2026-08-04 (updated 2026-08-06)
 **Goal:** Reduce ErrorFixAgent rounds on the frontend. Today it exhausts all 30 rounds and resolves nothing (`620bb653` attempts 1 & 3). Target: deterministic pre-pass clears the mechanical classes, the LLM sees the **full** error set clustered by root cause, and converges in ≤5 rounds.
 
@@ -62,7 +62,9 @@ The key inversion: the agent now plans against **9 causes**, not a moving 8-of-5
 - **Detection** → `util/ImportClosureChecker.java` — scans the real generated imports, resolves each local specifier against the filesystem; catches gen-time inventions, not just manifest-declared refs.
 - **Synthesis** → `util/MissingModuleSynthesizer.java` — writes a permissive placeholder (default + every named symbol as value *and* type, children passed through so a synthesized layout never blanks the page) so the import resolves; residual type errors → ErrorFixAgent.
 
-Both run in `FrontendValidationNode` after the Change-3 path fixers, before the ErrorFixAgent. **Default repairs**; strict (`worker.completeness.import-closure-strict`) fails loud without stubbing. This supersedes the `MissingModuleGenerator` sketch below (kept for rationale). Differences from the sketch: a maximal-compat permissive stub (not a `SiteLayout`-template clone); it does **not** repoint importers (the placeholder is created at the path consumers already import); the "targeted LLM gen for non-layouts" route is deferred — Point A already produces proper specs for planned/prose misses, so Point B's residual (gen-time inventions) gets the deterministic stub. **Open:** backend `OrderItemResponse` synthesis (`javac` detects it; the DTO synthesis is the remaining item).
+Both run in `FrontendValidationNode` after the Change-3 path fixers, before the ErrorFixAgent. **Default repairs**; strict (`worker.completeness.import-closure-strict`) fails loud without stubbing. This supersedes the `MissingModuleGenerator` sketch below (kept for rationale). Differences from the sketch: a maximal-compat permissive stub (not a `SiteLayout`-template clone); it does **not** repoint importers (the placeholder is created at the path consumers already import); the "targeted LLM gen for non-layouts" route is deferred — Point A already produces proper specs for planned/prose misses, so Point B's residual (gen-time inventions) gets the deterministic stub.
+
+**Backend parity (2026-08-06): ✅** — `util/BackendClassSynthesizer.java` does the same for the backend, driven off `javac`'s "cannot find symbol: class X" (the `OrderItemResponse` case): writes a minimal placeholder class at the import-resolved (else referencer's) package, wired into `BackendValidationNode`. Resolves the missing type; residual member errors → ErrorFixAgent. The only remaining item is the optional "targeted LLM gen" route (a real DTO vs an empty placeholder).
 
 **Problem it fixes:** GAP 2 (`AdminLayout` / `OrderItemResponse` never generated).
 
@@ -100,7 +102,7 @@ Both run in `FrontendValidationNode` after the Change-3 path fixers, before the 
 
 1. **Change 1 first** — ✅ done. Biggest converge-rate win, unblocks the agent's existing `bulk_str_replace`, no dependency on the others.
 2. **Change 3 second** — ✅ done. Removes the import/path/binding classes from the loop entirely.
-3. **Change 2 last** — ✅ done, as **Point B** (`ImportClosureChecker` detection + `MissingModuleSynthesizer` synthesis; see `architecture-json-completeness-plan.md` §8). Backend DTO synthesis still open.
+3. **Change 2 last** — ✅ done, as **Point B** (frontend: `ImportClosureChecker` + `MissingModuleSynthesizer`; backend: `BackendClassSynthesizer`; see `architecture-json-completeness-plan.md` §8).
 
 After all three, the expected loop shape: **pre-pass clears imports/paths/bindings/missing-files (0 LLM rounds) → agent receives the full residual clustered by root cause → ≤5 `bulk_str_replace` rounds on genuine semantic divergence (nullability, prop reshaping, hook-API).**
 

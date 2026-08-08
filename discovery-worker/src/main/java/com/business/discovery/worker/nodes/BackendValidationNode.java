@@ -10,6 +10,7 @@ import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import com.business.discovery.worker.util.EnvVarScanner;
 import com.business.discovery.worker.util.MavenDependencyInjector;
 import com.business.discovery.worker.util.AuthExceptionHandlerPatcher;
+import com.business.discovery.worker.util.BackendClassSynthesizer;
 import com.business.discovery.worker.util.MissingBeanPatcher;
 import com.business.discovery.worker.util.RepositoryMethodInjector;
 import com.business.discovery.worker.util.JpaBidirectionalSavePatcher;
@@ -91,9 +92,10 @@ public class BackendValidationNode implements WorkerNode {
         boolean methodsInjected = RepositoryMethodInjector.injectMissingMethods(
                 backendDir, initial.output());
 
+        BuildResult latest = initial;
         if (depsInjected || methodsInjected) {
-            BuildResult postInjection = buildTool.runMvnCompile(backendDir);
-            if (postInjection.success()) {
+            latest = buildTool.runMvnCompile(backendDir);
+            if (latest.success()) {
                 log.info("[BackendValidationNode] mvn compile passed after mechanical injection — skipping ErrorFixAgent");
                 rescanValueBindings(ctx);
                 markFilesValidated(ctx);
@@ -102,6 +104,22 @@ public class BackendValidationNode implements WorkerNode {
             log.info("[BackendValidationNode] Mechanical injection incomplete — handing off remaining errors to ErrorFixAgent");
         } else {
             log.warn("[BackendValidationNode] mvn compile failed — starting ErrorFixAgent loop");
+        }
+
+        // Enforcement Point B (backend gen-time closure): synthesize a minimal placeholder for every
+        // "cannot find symbol: class X" where X is a project class that was never generated — the
+        // OrderItemResponse case. javac is the detector; this resolves the missing-TYPE error, and any
+        // residual member errors (getters/ctors) become a tractable in-file task for the ErrorFixAgent.
+        int synthesized = BackendClassSynthesizer.synthesize(backendSrcJava, latest.output());
+        if (synthesized > 0) {
+            BuildResult postSynth = buildTool.runMvnCompile(backendDir);
+            if (postSynth.success()) {
+                log.info("[BackendValidationNode] mvn compile passed after synthesizing {} missing class(es) — skipping ErrorFixAgent", synthesized);
+                rescanValueBindings(ctx);
+                markFilesValidated(ctx);
+                return;
+            }
+            log.info("[BackendValidationNode] Synthesized {} missing class(es) — residual errors to ErrorFixAgent", synthesized);
         }
 
         boolean fixed = errorFixAgent.fix(FileType.BACKEND, ctx);

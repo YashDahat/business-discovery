@@ -74,8 +74,13 @@ public class FrontendValidationNode implements WorkerNode {
         boolean packagesFixed = NpmPackageFixer.fix(frontendDir, initial.output(), buildTool);
         boolean jsxImportsFixed = com.business.discovery.worker.util.JsxTypeImportFixer.fix(frontendSrc);
         boolean uiImportsFixed = com.business.discovery.worker.util.UiImportRewriter.fix(frontendSrc,
-                com.business.discovery.worker.util.UiComponentInventory.build(frontendDir));
+                com.business.discovery.worker.util.UiComponentInventory.build(frontendDir),
+                com.business.discovery.worker.util.NodeModuleExportRegistry.build(frontendDir));
         boolean svcImportsFixed = com.business.discovery.worker.util.ServiceImportRewriter.fix(frontendSrc);
+        //   5b. ProcessEnvPatcher: process.env.X (Next/CRA habit) → import.meta.env.VITE_X (Vite).
+        //   5c. TanStackImportFixer: add a react-query hook that's used but never imported (TS2304).
+        boolean envFixed = com.business.discovery.worker.util.ProcessEnvPatcher.fix(frontendSrc);
+        boolean tanstackFixed = com.business.discovery.worker.util.TanStackImportFixer.fix(frontendSrc);
         //   6. TypeScriptImportFixer: registry-driven correction of wrong @/ and relative import
         //      paths (resolved to where each symbol is actually exported) and default↔named
         //      mismatches (TS2613/TS2614). Runs per-file during generation; re-applying it here on
@@ -85,7 +90,8 @@ public class FrontendValidationNode implements WorkerNode {
                 com.business.discovery.worker.util.TypeScriptExportRegistry.buildFromDisk(
                         frontendSrc, ctx.getWorkspaceDir()));
 
-        if (exportsFixed || packagesFixed || jsxImportsFixed || uiImportsFixed || svcImportsFixed || tsImportsFixed) {
+        if (exportsFixed || packagesFixed || jsxImportsFixed || uiImportsFixed || svcImportsFixed
+                || envFixed || tanstackFixed || tsImportsFixed) {
             BuildResult postFix = buildTool.runNpmBuild(frontendDir);
             if (postFix.success()) {
                 log.info("[FrontendValidationNode] npm build passed after mechanical fixes — skipping ErrorFixAgent");

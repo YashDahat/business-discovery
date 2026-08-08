@@ -23,6 +23,7 @@ import java.nio.file.Files;
 import com.business.discovery.worker.util.ApiContractCard;
 import com.business.discovery.worker.util.CompileErrorClusterer;
 import com.business.discovery.worker.util.FrontendContractCard;
+import com.business.discovery.worker.util.FoundationContractCard;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -239,17 +240,31 @@ public class ErrorFixAgent {
      * The card was already on disk the whole time — it was simply never handed over.
      */
     private String buildContractSection(FileType fileType, Path workspace) {
-        if (fileType != FileType.FRONTEND) return "";
+        StringBuilder section = new StringBuilder();
+
+        // Fenced foundation contract — the immutable spine the fix agent cannot edit but must match
+        // at every call site (User/Role/PaymentService for backend; useAuth/useCheckout/shell for
+        // frontend). This is exactly the ground truth whose absence sent the agent reverse-engineering
+        // foundation files round after round until the 30-round budget ran out.
+        String foundation = fileType == FileType.BACKEND
+                ? FoundationContractCard.backendSection(workspace)
+                : FoundationContractCard.frontendSection(workspace);
+        if (!foundation.isEmpty()) {
+            log.info("[ErrorFixAgent] Seeded fenced foundation contract ({} chars) for {}",
+                    foundation.length(), fileType);
+            section.append("\n").append(foundation).append("\n");
+        }
+
+        if (fileType != FileType.FRONTEND) return section.toString();
 
         ApiContractCard card = ApiContractCard.build(workspace);
         if (card.isEmpty()) {
             log.warn("[ErrorFixAgent] No derived API contract on disk — fixing without wire ground truth");
-            return "";
+            return section.toString();
         }
         log.info("[ErrorFixAgent] Seeded contract card: {} type file(s), {} route(s)",
                 card.typeFileCount(), card.routeCount());
 
-        StringBuilder section = new StringBuilder();
         section.append("""
 
                 %s

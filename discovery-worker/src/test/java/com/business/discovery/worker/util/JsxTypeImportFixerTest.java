@@ -49,4 +49,32 @@ class JsxTypeImportFixerTest {
         assertThat(changed).isFalse();
         assertThat(Files.readString(file)).isEqualTo(content);
     }
+
+    @Test
+    void insertsBelowUseClientDirective() throws Exception {
+        Path file = src.resolve("CheckoutPage.tsx");
+        Files.writeString(file, "'use client';\nexport default function C(): JSX.Element { return <div/> }\n");
+
+        boolean changed = JsxTypeImportFixer.fix(src);
+
+        assertThat(changed).isTrue();
+        // directive stays on line 1; import goes on line 2 — never displaced off the top.
+        assertThat(Files.readString(file))
+                .startsWith("'use client';\nimport type { JSX } from 'react';\n");
+    }
+
+    @Test
+    void insertsBelowFoundationFenceMarker() throws Exception {
+        Path file = src.resolve("shell/Fenced.tsx");
+        Files.createDirectories(file.getParent());
+        Files.writeString(file,
+                "// GENERATED foundation scaffold — do not edit\nexport const F = (): JSX.Element => <div/>\n");
+
+        boolean changed = JsxTypeImportFixer.fix(src);
+
+        assertThat(changed).isTrue();
+        // fence marker MUST remain the first line so FrontendGeneratorNode.isFenced() still sees it.
+        assertThat(Files.readString(file))
+                .startsWith("// GENERATED foundation scaffold — do not edit\nimport type { JSX } from 'react';\n");
+    }
 }

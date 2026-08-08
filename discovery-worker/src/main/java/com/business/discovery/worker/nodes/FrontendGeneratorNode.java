@@ -273,6 +273,18 @@ public class FrontendGeneratorNode implements WorkerNode {
                         contractCard.typeFileCount(), contractCard.routeCount());
             }
 
+            // Fenced foundation contract (auth/cart/checkout/shell) — ground truth for the immutable
+            // spine, deterministic + byte-identical every run so it rides the system-prompt prefix cache.
+            this.foundationContractSection =
+                    com.business.discovery.worker.util.FoundationContractCard.frontendSection(workspace);
+            if (foundationContractSection.isEmpty()) {
+                log.warn("[FrontendGeneratorNode] No frontend/FOUNDATION_CONTRACT.md in workspace — "
+                        + "generating without the fenced foundation contract");
+            } else {
+                log.info("[FrontendGeneratorNode] Loaded fenced foundation contract ({} chars)",
+                        foundationContractSection.length());
+            }
+
             // Ground-truth navigation contract: routes.ts + App.tsx derived from the plan's
             // PAGE entries BEFORE any layer generates, so every component is shown the legal
             // link destinations (circuit-house: Flash-written App.tsx registered 1 admin route
@@ -434,6 +446,9 @@ public class FrontendGeneratorNode implements WorkerNode {
     private com.business.discovery.worker.util.FrontendContractCard frontendContractCard =
             new com.business.discovery.worker.util.FrontendContractCard();
 
+    /** Fenced foundation contract (auth/cart/checkout/shell), loaded once per run; "" when absent. */
+    private volatile String foundationContractSection = "";
+
     /**
      * Derives routes.ts + App.tsx from the plan's PAGE entries before any layer generates.
      * Both are re-derived every attempt (idempotent) and marked VALIDATED so shouldSkip
@@ -588,6 +603,13 @@ public class FrontendGeneratorNode implements WorkerNode {
         if (!frontendContractCard.isEmpty()) {
             String fcSection = "FRONTEND MODULE CONTRACTS\n" + frontendContractCard.toPromptSection();
             contractSection = contractSection == null ? fcSection : contractSection + "\n\n" + fcSection;
+        }
+        // Fenced foundation contract goes FIRST so the immutable spine (useAuth, useCheckout(steps),
+        // shell props) is the leading, byte-identical prefix of every generation call this run.
+        if (!foundationContractSection.isEmpty()) {
+            contractSection = contractSection == null
+                    ? foundationContractSection
+                    : foundationContractSection + "\n\n" + contractSection;
         }
 
         String content = null;
