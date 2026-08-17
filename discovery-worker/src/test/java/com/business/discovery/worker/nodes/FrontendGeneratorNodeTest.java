@@ -103,9 +103,10 @@ class FrontendGeneratorNodeTest {
         lenient().when(buildToolService.runNpmInstallDevPackages(any(), any(String[].class)))
                 .thenReturn(new BuildToolService.BuildResult(0, ""));
 
-        String appPath = "frontend/src/App.tsx";
-        writeSpec(tempDir, specEntry(appPath, "FRONTEND", "PLANNED", "instruction App"));
-        when(ctx.getFileManifest()).thenReturn(List.of(new FileEntry(appPath, FileType.FRONTEND, "Root")));
+        // A regular component (App.tsx is the fenced shell and would never reach Flash).
+        String appPath = "frontend/src/components/Hero.tsx";
+        writeSpec(tempDir, specEntry(appPath, "FRONTEND", "PLANNED", "instruction Hero"));
+        when(ctx.getFileManifest()).thenReturn(List.of(new FileEntry(appPath, FileType.FRONTEND, "Hero")));
         when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
@@ -151,7 +152,8 @@ class FrontendGeneratorNodeTest {
 
     @Test
     void llmThrowsInfraException_propagates() throws Exception {
-        String filePath = "frontend/src/App.tsx";
+        // A regular component — App.tsx is the fenced shell and never round-trips through Flash.
+        String filePath = "frontend/src/components/Hero.tsx";
         writeSpec(tempDir, specEntry(filePath, "FRONTEND", "PLANNED", "instruction"));
 
         when(ctx.getFileManifest()).thenReturn(List.of(
@@ -246,7 +248,9 @@ class FrontendGeneratorNodeTest {
 
     @Test
     void requestedChangesMode_changeRequiredTrue_regeneratesFile() throws Exception {
-        String filePath = "frontend/src/App.tsx";
+        // A genuinely editable component — App.tsx is now the frozen shell and is fenced, so it
+        // would never round-trip through Flash regardless of changeRequired.
+        String filePath = "frontend/src/components/ThemeToggle.tsx";
         Path existing = tempDir.resolve(filePath);
         Files.createDirectories(existing.getParent());
         Files.writeString(existing, "// old");

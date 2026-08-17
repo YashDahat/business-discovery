@@ -36,6 +36,13 @@ class RouteManifestGeneratorTest {
     }
 
     @Test
+    void signupPageDerivesToSignupRouteNoNav() {
+        RouteManifest m = manifest("SignupPage");
+        assertThat(route(m, "SignupPage")).isEqualTo("/signup");
+        assertThat(entry(m, "SignupPage").nav()).isFalse();
+    }
+
+    @Test
     void navFlagsFollowConvention() {
         RouteManifest m = manifest("HomePage", "LoginPage", "AdminOrdersPage", "MenuItemDetailPage",
                 "NotFoundPage");
@@ -80,57 +87,93 @@ class RouteManifestGeneratorTest {
                 .contains("importPath: './pages/AdminOrdersPage'");
     }
 
-    // ── App.tsx ───────────────────────────────────────────────────────────
+    // ── App.tsx shell (frozen) ──────────────────────────────────────────────
 
     @Test
-    void appTsxWiresProvidersRoutesAndProtection() {
-        RouteManifest m = manifest("HomePage", "AdminOrdersPage");
-        String app = RouteManifestGenerator.emitAppTsx(m,
+    void appShellWiresProviderTreeAroundAppRoutes() {
+        String shell = RouteManifestGenerator.emitAppShell(
                 new RouteManifestGenerator.Flags(true, true, true, java.util.List.of()));
 
-        assertThat(app).startsWith(RouteManifestGenerator.APP_HEADER);
-        // nesting: BrowserRouter outermost, then query, then auth
-        int router = app.indexOf("<BrowserRouter>");
-        int query = app.indexOf("<QueryClientProvider");
-        int auth = app.indexOf("<AuthProvider>");
-        int routes = app.indexOf("<Routes>");
+        assertThat(shell).startsWith(RouteManifestGenerator.APP_HEADER);
+        // nesting: BrowserRouter outermost, then query, then auth, then AppProviders, then AppRoutes
+        int router = shell.indexOf("<BrowserRouter>");
+        int query = shell.indexOf("<QueryClientProvider");
+        int auth = shell.indexOf("<AuthProvider>");
+        int providers = shell.indexOf("<AppProviders>");
+        int routes = shell.indexOf("<AppRoutes />");
         assertThat(router).isLessThan(query);
         assertThat(query).isLessThan(auth);
-        assertThat(auth).isLessThan(routes);
+        assertThat(auth).isLessThan(providers);
+        assertThat(providers).isLessThan(routes);
 
-        assertThat(app).contains("import HomePage from './pages/HomePage';")
+        // the shell holds NO route table — that lives in AppRoutes.tsx
+        assertThat(shell).doesNotContain("<Route ").doesNotContain("<Routes>")
+                .contains("import AppProviders from './AppProviders'")
+                .contains("import AppRoutes from './AppRoutes'");
+    }
+
+    @Test
+    void appShellOmitsProvidersWhenAbsent() {
+        String shell = RouteManifestGenerator.emitAppShell(
+                new RouteManifestGenerator.Flags(false, false, false, java.util.List.of()));
+
+        assertThat(shell).doesNotContain("QueryClientProvider")
+                .doesNotContain("AuthProvider")
+                // AppProviders + AppRoutes are always mounted regardless of flags
+                .contains("<AppProviders>")
+                .contains("<AppRoutes />");
+    }
+
+    // ── AppRoutes.tsx (derived) ─────────────────────────────────────────────
+
+    @Test
+    void appRoutesEmitsRouteTableWithProtectionAndMarker() {
+        RouteManifest m = manifest("HomePage", "AdminOrdersPage");
+        String routes = RouteManifestGenerator.emitAppRoutes(m,
+                new RouteManifestGenerator.Flags(true, true, true, java.util.List.of()));
+
+        assertThat(routes).startsWith(RouteManifest.PLAN_MARKER);
+        assertThat(routes).contains("export default function AppRoutes()")
+                .contains("import HomePage from './pages/HomePage';")
                 .contains("<Route path=\"/\" element={<HomePage />} />")
                 .contains("<Route path=\"/admin/orders\" element={<ProtectedRoute><AdminOrdersPage /></ProtectedRoute>} />");
     }
 
     @Test
-    void appTsxOmitsProvidersWhenAbsent() {
-        String app = RouteManifestGenerator.emitAppTsx(manifest("HomePage", "AdminOrdersPage"),
+    void appRoutesOmitsProtectionWhenAbsent() {
+        String routes = RouteManifestGenerator.emitAppRoutes(manifest("HomePage", "AdminOrdersPage"),
                 new RouteManifestGenerator.Flags(false, false, false, java.util.List.of()));
 
-        assertThat(app).doesNotContain("QueryClientProvider")
-                .doesNotContain("AuthProvider")
-                .doesNotContain("ProtectedRoute")
+        assertThat(routes).doesNotContain("ProtectedRoute")
                 .contains("<Route path=\"/admin/orders\" element={<AdminOrdersPage />} />");
     }
 
+    // ── AppProviders.tsx (derived) ──────────────────────────────────────────
+
     @Test
-    void appTsxMountsDiscoveredContextProviders() {
-        RouteManifest m = manifest("HomePage", "OrderPage");
+    void appProvidersMountsDiscoveredContextProvidersInOrder() {
         var providers = java.util.List.of(
                 new RouteManifestGenerator.ProviderRef("CartProvider", "./context/CartContext"));
-        String app = RouteManifestGenerator.emitAppTsx(m,
+        String app = RouteManifestGenerator.emitAppProviders(
                 new RouteManifestGenerator.Flags(true, false, true, providers));
 
-        assertThat(app).contains("import { CartProvider } from './context/CartContext'");
-        // mounted inside AuthProvider, still wrapping <Routes> — so useCart() never throws
-        int auth = app.indexOf("<AuthProvider>");
+        assertThat(app).startsWith(RouteManifest.PLAN_MARKER);
+        assertThat(app).contains("import { CartProvider } from './context/CartContext'")
+                .contains("export default function AppProviders(");
+        // wraps {children} so useCart() never throws for any routed page
         int cartOpen = app.indexOf("<CartProvider>");
-        int routes = app.indexOf("<Routes>");
+        int children = app.indexOf("{children}");
         int cartClose = app.indexOf("</CartProvider>");
-        assertThat(auth).isLessThan(cartOpen);
-        assertThat(cartOpen).isLessThan(routes);
-        assertThat(routes).isLessThan(cartClose);
+        assertThat(cartOpen).isLessThan(children);
+        assertThat(children).isLessThan(cartClose);
+    }
+
+    @Test
+    void appProvidersPassesThroughWhenNoneDiscovered() {
+        String app = RouteManifestGenerator.emitAppProviders(
+                new RouteManifestGenerator.Flags(true, false, true, java.util.List.of()));
+
+        assertThat(app).contains("<>{children}</>");
     }
 
     @Test

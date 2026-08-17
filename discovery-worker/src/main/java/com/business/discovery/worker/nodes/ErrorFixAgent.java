@@ -533,7 +533,9 @@ public class ErrorFixAgent {
         // end-runs), with services/local/ as the model-writable escape hatch.
         boolean inServices = p.startsWith("frontend/src/services/")
                 && !p.startsWith("frontend/src/services/local/") && p.endsWith(".ts");
-        boolean isRoutes   = p.equals("frontend/src/routes.ts");
+        boolean isRoutes   = p.equals("frontend/src/routes.ts")
+                || p.equals("frontend/src/AppRoutes.tsx")
+                || p.equals("frontend/src/AppProviders.tsx");
 
         if (Files.exists(target)) {
             try {

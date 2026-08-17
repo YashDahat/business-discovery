@@ -25,11 +25,17 @@ import java.util.stream.Stream;
 public final class RouteManifestGenerator {
 
     /**
-     * First line of the templated App.tsx. Deliberately NOT {@link RouteManifest#PLAN_MARKER}
-     * — ErrorFixAgent keeps its escape hatch on App.tsx, and every attempt re-derives it anyway.
+     * First line of the templated App.tsx <em>shell</em>. The shell is written write-if-missing
+     * and then frozen — it mounts the provider tree and renders {@code <AppRoutes/>}, nothing more.
+     * All the churn (route table, discovered providers) lives in AppRoutes.tsx / AppProviders.tsx,
+     * so an update run with a partial plan can never drop the cart route or a provider mount by
+     * re-deriving App.tsx wholesale (abs-fitness: cart + admin dropped on regeneration).
+     *
+     * Deliberately NOT {@link RouteManifest#PLAN_MARKER} — ErrorFixAgent keeps its escape hatch on
+     * the shell (there is nothing derived left in it to clobber).
      */
     public static final String APP_HEADER =
-            "// Assembled from routes.ts by the route registry — re-derived every attempt.";
+            "// Application shell — provider tree + <AppRoutes/>. Written once; the route table lives in AppRoutes.tsx.";
 
     /**
      * A React context provider the LLM authored under src/context (or src/providers) that App.tsx must
@@ -135,33 +141,43 @@ public final class RouteManifestGenerator {
         return sb.toString();
     }
 
-    // ── App.tsx ───────────────────────────────────────────────────────────
+    // ── App.tsx shell (frozen) ──────────────────────────────────────────────
 
     /**
-     * Provider nesting identical to what AppRouteSynthesizer proved out on multifit-aundh:
-     * BrowserRouter OUTERMOST (contexts calling router hooks must sit inside it), then
-     * QueryClientProvider, then AuthProvider, then Routes.
+     * Writes the frozen App.tsx shell only when it is missing or stale. A shell that already
+     * delegates to {@code <AppRoutes/>} is left untouched — freezing it is the whole point, so a
+     * flag flip or a partial-plan update run can never churn the provider tree. Anything else (the
+     * scaffold's {@code return <div/>} stub, or a legacy monolithic App.tsx with an inline
+     * {@code <Routes>}) is migrated to the shell exactly once.
      */
-    public static String emitAppTsx(RouteManifest manifest, Flags flags) {
+    public static void ensureAppShell(Path frontendSrc, Flags flags) throws IOException {
+        Path appTsx = frontendSrc.resolve("App.tsx");
+        boolean stale = true;
+        if (Files.exists(appTsx)) {
+            stale = !Files.readString(appTsx).contains("<AppRoutes");
+        }
+        if (stale) Files.writeString(appTsx, emitAppShell(flags));
+    }
+
+    /**
+     * The stable shell: provider nesting identical to what AppRouteSynthesizer proved out on
+     * multifit-aundh — BrowserRouter OUTERMOST (contexts calling router hooks must sit inside it),
+     * then QueryClientProvider, then AuthProvider — wrapping {@code <AppProviders>} (discovered
+     * context providers) around {@code <AppRoutes/>} (the route table). Everything here is decided
+     * from the plan up front and rarely changes; the two things that DO change per attempt live in
+     * the derived children.
+     */
+    public static String emitAppShell(Flags flags) {
         StringBuilder sb = new StringBuilder();
         sb.append(APP_HEADER).append('\n');
         sb.append("import './index.css'\n");
-        sb.append("import { BrowserRouter, Routes, Route, Outlet } from 'react-router-dom'\n");
+        sb.append("import { BrowserRouter } from 'react-router-dom'\n");
         if (flags.hasQuery()) {
             sb.append("import { QueryClient, QueryClientProvider } from '@tanstack/react-query'\n");
         }
         if (flags.hasAuth()) sb.append("import { AuthProvider } from './context/AuthContext'\n");
-        if (flags.hasProtected()) sb.append("import ProtectedRoute from './components/ProtectedRoute'\n");
-        for (ProviderRef p : flags.contextProviders()) {
-            sb.append("import { ").append(p.name()).append(" } from '").append(p.importPath()).append("'\n");
-        }
-        // Foundation shell — SiteLayout wraps all public routes; admin routes use their own layout
-        sb.append("import { SiteLayout } from '@/shell'\n");
-        sb.append("import siteConfig from '@/config/siteConfig'\n");
-        sb.append('\n');
-        for (RouteManifest.Entry e : manifest.entries()) {
-            sb.append("import ").append(e.page()).append(" from '").append(e.importPath()).append("';\n");
-        }
+        sb.append("import AppProviders from './AppProviders'\n");
+        sb.append("import AppRoutes from './AppRoutes'\n");
         sb.append('\n');
         if (flags.hasQuery()) sb.append("const queryClient = new QueryClient()\n\n");
 
@@ -174,21 +190,84 @@ public final class RouteManifestGenerator {
             close.add(0, "</QueryClientProvider>");
         }
         if (flags.hasAuth()) { open.add("<AuthProvider>"); close.add(0, "</AuthProvider>"); }
-        for (ProviderRef p : flags.contextProviders()) {
-            open.add("<" + p.name() + ">");
-            close.add(0, "</" + p.name() + ">");
-        }
+        open.add("<AppProviders>"); close.add(0, "</AppProviders>");
 
         String indent = "    ";
         for (int k = 0; k < open.size(); k++) {
             sb.append(indent).append("  ".repeat(k)).append(open.get(k)).append('\n');
         }
-        String routesIndent = indent + "  ".repeat(open.size());
+        sb.append(indent).append("  ".repeat(open.size())).append("<AppRoutes />\n");
+        for (int k = 0; k < close.size(); k++) {
+            sb.append(indent).append("  ".repeat(open.size() - 1 - k)).append(close.get(k)).append('\n');
+        }
+        sb.append("  )\n}\n");
+        return sb.toString();
+    }
 
-        // Split routes into admin and public.
-        // Admin routes keep their AdminLayout (generated page components include it).
-        // Public routes are wrapped in <SiteLayout config={siteConfig}> so Header + Footer
-        // appear globally without every page component needing to import Layout individually.
+    // ── AppProviders.tsx (derived) ──────────────────────────────────────────
+
+    /**
+     * Wraps every discovered {@code *Provider} (Cart, Theme, Toast, ...) around its children.
+     * Re-derived every attempt from disk discovery, so a newly-authored provider still gets
+     * mounted even though the App.tsx shell is frozen. Carries {@link RouteManifest#PLAN_MARKER}
+     * so both the generator fence and ErrorFixAgent refuse to hand-edit it.
+     */
+    public static String emitAppProviders(Flags flags) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(RouteManifest.PLAN_MARKER).append('\n');
+        sb.append("// Every discovered React context provider (Cart, Theme, ...), mounted around the\n");
+        sb.append("// app. Re-derived every attempt from src/context, src/providers, src/cart.\n\n");
+        sb.append("import { ReactNode } from 'react'\n");
+        for (ProviderRef p : flags.contextProviders()) {
+            sb.append("import { ").append(p.name()).append(" } from '").append(p.importPath()).append("'\n");
+        }
+        sb.append('\n');
+        sb.append("export default function AppProviders({ children }: { children: ReactNode }) {\n");
+        sb.append("  return (\n");
+        java.util.List<ProviderRef> ps = flags.contextProviders();
+        if (ps.isEmpty()) {
+            sb.append("    <>{children}</>\n");
+        } else {
+            String indent = "    ";
+            for (int k = 0; k < ps.size(); k++) {
+                sb.append(indent).append("  ".repeat(k)).append("<").append(ps.get(k).name()).append(">\n");
+            }
+            sb.append(indent).append("  ".repeat(ps.size())).append("{children}\n");
+            for (int k = ps.size() - 1; k >= 0; k--) {
+                sb.append(indent).append("  ".repeat(k)).append("</").append(ps.get(k).name()).append(">\n");
+            }
+        }
+        sb.append("  )\n}\n");
+        return sb.toString();
+    }
+
+    // ── AppRoutes.tsx (derived) ─────────────────────────────────────────────
+
+    /**
+     * The route table — every page mounted at its path. Admin routes stand alone (their page
+     * components carry AdminLayout); public routes are wrapped in the foundation SiteLayout so
+     * Header + Footer render globally. Re-derived every attempt from the reconciled manifest, and
+     * carries {@link RouteManifest#PLAN_MARKER} so it is never hand-edited or LLM-rewritten.
+     */
+    public static String emitAppRoutes(RouteManifest manifest, Flags flags) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(RouteManifest.PLAN_MARKER).append('\n');
+        sb.append("// The complete route table, derived from the plan. Rendered by the App.tsx shell\n");
+        sb.append("// inside the provider tree. Re-derived every attempt — never edit by hand.\n\n");
+        sb.append("import { Routes, Route, Outlet } from 'react-router-dom'\n");
+        if (flags.hasProtected()) sb.append("import ProtectedRoute from './components/ProtectedRoute'\n");
+        // Foundation shell — SiteLayout wraps all public routes; admin routes use their own layout
+        sb.append("import { SiteLayout } from '@/shell'\n");
+        sb.append("import siteConfig from '@/config/siteConfig'\n");
+        sb.append('\n');
+        for (RouteManifest.Entry e : manifest.entries()) {
+            sb.append("import ").append(e.page()).append(" from '").append(e.importPath()).append("';\n");
+        }
+        sb.append('\n');
+
+        sb.append("export default function AppRoutes() {\n  return (\n");
+        String routesIndent = "    ";
+
         java.util.List<RouteManifest.Entry> adminRoutes = manifest.entries().stream()
                 .filter(RouteManifest.Entry::admin).toList();
         java.util.List<RouteManifest.Entry> publicRoutes = manifest.entries().stream()
@@ -216,9 +295,6 @@ public final class RouteManifestGenerator {
         }
 
         sb.append(routesIndent).append("</Routes>\n");
-        for (int k = 0; k < close.size(); k++) {
-            sb.append(indent).append("  ".repeat(open.size() - 1 - k)).append(close.get(k)).append('\n');
-        }
         sb.append("  )\n}\n");
         return sb.toString();
     }

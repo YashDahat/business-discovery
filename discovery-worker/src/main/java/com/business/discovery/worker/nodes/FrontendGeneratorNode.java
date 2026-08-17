@@ -479,14 +479,21 @@ public class FrontendGeneratorNode implements WorkerNode {
         Files.createDirectories(frontendSrc);
         Files.writeString(frontendSrc.resolve("routes.ts"),
                 com.business.discovery.worker.util.RouteManifestGenerator.emitRoutesTs(manifest));
-        Files.writeString(frontendSrc.resolve("App.tsx"),
-                com.business.discovery.worker.util.RouteManifestGenerator.emitAppTsx(manifest, flags));
-        log.info("[FrontendGeneratorNode] Route registry derived — {} routes into routes.ts + App.tsx",
-                manifest.entries().size());
+        // App.tsx is the frozen shell (write-if-missing); the churn lives in the derived children
+        // AppRoutes.tsx (route table) + AppProviders.tsx (discovered providers), re-emitted here.
+        com.business.discovery.worker.util.RouteManifestGenerator.ensureAppShell(frontendSrc, flags);
+        Files.writeString(frontendSrc.resolve("AppRoutes.tsx"),
+                com.business.discovery.worker.util.RouteManifestGenerator.emitAppRoutes(manifest, flags));
+        Files.writeString(frontendSrc.resolve("AppProviders.tsx"),
+                com.business.discovery.worker.util.RouteManifestGenerator.emitAppProviders(flags));
+        log.info("[FrontendGeneratorNode] Route registry derived — {} routes into routes.ts + "
+                + "AppRoutes.tsx (App.tsx shell frozen)", manifest.entries().size());
 
         manifestPaths.add("frontend/src/routes.ts");
         markDerived(ctx, workspace, "frontend/src/routes.ts", true);
         markDerived(ctx, workspace, "frontend/src/App.tsx", false);
+        markDerived(ctx, workspace, "frontend/src/AppRoutes.tsx", true);
+        markDerived(ctx, workspace, "frontend/src/AppProviders.tsx", true);
 
         this.routeCardSection = com.business.discovery.worker.util.RouteManifest.PROMPT_KEY
                 + "\n" + manifest.toPromptSection();
@@ -531,9 +538,13 @@ public class FrontendGeneratorNode implements WorkerNode {
      */
     private boolean isFenced(String path, FileSpec spec, Path workspace) {
         String p = path.replace('\\', '/');
-        if (p.equals("frontend/src/routes.ts") || p.equals("frontend/src/App.tsx")) {
-            // Only fenced once the registry exists — an empty-plan run leaves App.tsx to Flash.
-            return routeCardSection != null;
+        if (p.equals("frontend/src/routes.ts") || p.equals("frontend/src/App.tsx")
+                || p.equals("frontend/src/AppRoutes.tsx") || p.equals("frontend/src/AppProviders.tsx")) {
+            // The route registry (routes.ts, App.tsx shell, AppRoutes, AppProviders) is worker-owned.
+            // Fence by ON-DISK EXISTENCE, not just "did synthesis run this attempt" — an empty-plan
+            // update run leaves the registry in place, and un-fencing it there is exactly how a
+            // partial re-derivation dropped the cart route and admin pages.
+            return routeCardSection != null || Files.exists(workspace.resolve(p));
         }
         boolean inServices = p.startsWith("frontend/src/services/")
                 && !p.startsWith("frontend/src/services/local/") && p.endsWith(".ts");

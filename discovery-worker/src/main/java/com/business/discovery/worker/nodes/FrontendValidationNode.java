@@ -166,20 +166,35 @@ public class FrontendValidationNode implements WorkerNode {
      */
     private void assertAppHasRouting(java.nio.file.Path workspace) {
         java.nio.file.Path appTsx = workspace.resolve("frontend/src/App.tsx");
+        // The route table lives in AppRoutes.tsx (the App.tsx shell just mounts <AppRoutes/> inside
+        // the provider tree); a blank SPA now shows up as a missing/empty AppRoutes.tsx.
+        java.nio.file.Path appRoutes = workspace.resolve("frontend/src/AppRoutes.tsx");
         try {
             if (!java.nio.file.Files.exists(appTsx)) {
                 throw new WorkerException(FailureType.CODE,
                         "frontend/src/App.tsx is missing — the SPA entry point was never generated");
             }
-            String content = java.nio.file.Files.readString(appTsx);
-            boolean hasRouting = content.contains("<Route")
-                    || content.contains("createBrowserRouter")
-                    || content.contains("RouterProvider");
-            if (!hasRouting) {
+            String shell = java.nio.file.Files.readString(appTsx);
+            boolean shellMountsRouter = (shell.contains("<AppRoutes") && shell.contains("BrowserRouter"))
+                    || shell.contains("createBrowserRouter")
+                    || shell.contains("RouterProvider")
+                    || shell.contains("<Route");
+            if (!shellMountsRouter) {
                 throw new WorkerException(FailureType.CODE,
-                        "frontend/src/App.tsx contains no router wiring (no <Route>/createBrowserRouter) — "
-                        + "the built SPA would render a blank page. App.tsx must declare BrowserRouter + "
-                        + "Routes for every page per the architecture spec's FRONTEND ROUTING section.");
+                        "frontend/src/App.tsx has no router wiring (expected BrowserRouter + <AppRoutes/>) — "
+                        + "the built SPA would render a blank page.");
+            }
+            // Legacy monolithic App.tsx (inline <Route>) is still valid; only require a non-empty
+            // AppRoutes.tsx when the shell delegates to it.
+            if (shell.contains("<AppRoutes")) {
+                boolean hasRoutes = java.nio.file.Files.exists(appRoutes)
+                        && java.nio.file.Files.readString(appRoutes).contains("<Route");
+                if (!hasRoutes) {
+                    throw new WorkerException(FailureType.CODE,
+                            "frontend/src/AppRoutes.tsx is missing or declares no <Route> — the App.tsx "
+                            + "shell mounts <AppRoutes/> but the route table is empty, so every page is a "
+                            + "blank screen. The route registry must derive one route per page.");
+                }
             }
         } catch (IOException e) {
             throw new WorkerException(FailureType.CODE,
