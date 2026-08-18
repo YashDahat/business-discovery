@@ -2,6 +2,7 @@
 package com.business.discovery.worker.nodes;
 
 import com.business.discovery.worker.constants.FailureType;
+import com.business.discovery.worker.constants.PlatformStack;
 import com.business.discovery.worker.context.WorkerContext;
 import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.model.ArchitectBrief;
@@ -38,6 +39,12 @@ public class DataLoaderNode implements WorkerNode {
         ContainerTask task = taskRepo.findById(ctx.getTaskId())
                 .orElseThrow(() -> new WorkerException(FailureType.INFRA,
                         "ContainerTask not found: " + ctx.getTaskId()));
+
+        // F6: pin the brief's tech stack to the fixed platform stack at ingestion. In-memory only —
+        // the loaded entity is detached (no @Transactional here), so this never flushes to the DB.
+        // Every downstream consumer (planning, enrichment, docs, PR) now reads the platform stack, so a
+        // brief-supplied framework like "Next.js (React)" can no longer mis-seed generation or the docs.
+        brief.setRecommendedTechStack(PlatformStack.STACK);
 
         ctx.setBrief(brief);
         ctx.setBusiness(business);

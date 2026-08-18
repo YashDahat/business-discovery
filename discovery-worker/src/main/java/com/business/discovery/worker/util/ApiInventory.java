@@ -53,7 +53,13 @@ public final class ApiInventory {
     private static final java.util.Set<String> FOUNDATION_CONTROLLERS = java.util.Set.of(
             "AuthController.java",
             "PaymentController.java",
-            "SpaController.java"
+            "SpaController.java",
+            // Gallery + media library are foundation-owned (ship types + SDK + admin UI). Skip so the
+            // worker never derives a competing gallery/media SDK. (Gallery is a public view over the
+            // media library; admin management lives in AdminMediaController.)
+            "GalleryController.java",
+            "MediaController.java",
+            "AdminMediaController.java"
     );
 
     private final List<Endpoint> endpoints;

@@ -388,6 +388,136 @@ class FrontendContractCardTest {
         assertThat(section).endsWith("──────────────────────────────────────────────────────────────────────────────");
     }
 
+    // ── F1: brace-aware hook capture (Gap B nested return, Gap A unannotated) ─────
+
+    @Test
+    void nestedMutationHookReturnSurvivesBraceMatching() throws Exception {
+        // abs-fitness Gap B: the old regex truncated at the first inner '{', so the arity the page
+        // needed (mutate takes ONE object arg) was in the chopped-off part → 9× TS2554.
+        write("frontend/src/hooks/useBookings.ts", """
+                export function useUpdateBooking(): { mutate: (vars: { id: string; body: BookingUpdate }) => void; mutateAsync: (vars: { id: string; body: BookingUpdate }) => Promise<BookingDto>; isPending: boolean; isError: boolean } {
+                  const { mutate, mutateAsync, isPending, isError } = useMutation({ mutationFn: ({ id, body }: { id: string; body: BookingUpdate }) => updateBooking(id, body) });
+                  return { mutate, mutateAsync, isPending, isError };
+                }
+                """);
+
+        String section = FrontendContractCard.build(workspace).toPromptSection();
+
+        assertThat(section).contains("useUpdateBooking()");
+        // The nested vars object AND every field after it survive (old regex stopped at "mutate: (vars:")
+        assertThat(section).contains("mutate: (vars: { id: string; body: BookingUpdate }) => void");
+        assertThat(section).contains("mutateAsync: (vars: { id: string; body: BookingUpdate }) => Promise<BookingDto>");
+        assertThat(section).contains("isPending: boolean");
+        assertThat(section).contains("isError: boolean");
+    }
+
+    @Test
+    void unannotatedHookShapeRecoveredFromReturnLiteral() throws Exception {
+        // abs-fitness Gap A: a hook that omits its return type was invisible → consumers guessed
+        // { data, mutate(x,y) }. Recover the field names from the return literal instead.
+        write("frontend/src/hooks/useInquiry.ts", """
+                export function useInquiries() {
+                  const { data, isLoading, isError, error } = useQuery({ queryKey: ['inquiries'], queryFn: getAllInquiries });
+                  return { data, isLoading, isError, error };
+                }
+                """);
+
+        String section = FrontendContractCard.build(workspace).toPromptSection();
+
+        assertThat(section).contains("useInquiries()");
+        assertThat(section).contains("data");
+        assertThat(section).contains("isLoading");
+        assertThat(section).contains("annotate the hook return type");   // nudge back toward rule 2
+    }
+
+    @Test
+    void canonicalQueryHookWithDataFieldIsCaptured() throws Exception {
+        // The F1 canonical shape: query hooks return { data, ... } — never the domain noun.
+        write("frontend/src/hooks/useMemberships.ts", """
+                export function useMemberships(): { data: MembershipDto[] | undefined; isLoading: boolean; isError: boolean; error: Error | null } {
+                  const { data, isLoading, isError, error } = useQuery({ queryKey: ['memberships'], queryFn: getAllMemberships });
+                  return { data, isLoading, isError, error };
+                }
+                """);
+
+        String section = FrontendContractCard.build(workspace).toPromptSection();
+
+        assertThat(section).contains("useMemberships()");
+        assertThat(section).contains("data: MembershipDto[] | undefined");
+        assertThat(section).contains("error: Error | null");
+    }
+
+    // ── F5: brace-aware *Props capture (Gap B nested prop, Gap A inline props) ─────
+
+    @Test
+    void nestedPropTypeSurvivesInNamedPropsInterface() throws Exception {
+        // abs-fitness row 9 (Gap B): onSubmit: (data: {…}) => void was chopped at the first inner '}'.
+        write("frontend/src/components/admin/trainers/TrainerForm.tsx", """
+                interface TrainerFormProps {
+                  initialData?: TrainerDto;
+                  onSubmit: (data: { name: string; specialty: string; bio: string }) => void;
+                  isSubmitting: boolean;
+                }
+                export default function TrainerForm({ initialData, onSubmit, isSubmitting }: TrainerFormProps) {
+                  return <form />;
+                }
+                """);
+
+        String section = FrontendContractCard.build(workspace).toPromptSection();
+
+        assertThat(section).contains("TrainerFormProps");
+        assertThat(section).contains("onSubmit: (data: { name: string; specialty: string; bio: string }) => void");
+        assertThat(section).contains("isSubmitting: boolean");            // survives past the nested type
+        assertThat(section).contains("initialData?: TrainerDto");
+    }
+
+    @Test
+    void inlineDestructuredPropsAreRecoveredWhenNoNamedType() throws Exception {
+        // abs-fitness row 5 (Gap A): inline props → no named *Props → nothing captured → children dropped.
+        write("frontend/src/components/classes/DeleteFitnessClassDialog.tsx", """
+                export default function DeleteFitnessClassDialog({ classId, onConfirm, children }: { classId: string; onConfirm: () => void; children: React.ReactNode }) {
+                  return <div>{children}</div>;
+                }
+                """);
+
+        String section = FrontendContractCard.build(workspace).toPromptSection();
+
+        assertThat(section).contains("DeleteFitnessClassDialogProps");
+        assertThat(section).contains("classId: string");
+        assertThat(section).contains("onConfirm: () => void");
+        assertThat(section).contains("children: React.ReactNode");        // the dropped prop is now present
+    }
+
+    @Test
+    void propsFromTypeAliasFormAreCaptured() throws Exception {
+        write("frontend/src/components/gallery/GalleryCard.tsx", """
+                type GalleryCardProps = { imageUrl: string; caption?: string };
+                export default function GalleryCard({ imageUrl, caption }: GalleryCardProps) {
+                  return <img src={imageUrl} alt={caption} />;
+                }
+                """);
+
+        String section = FrontendContractCard.build(workspace).toPromptSection();
+
+        assertThat(section).contains("GalleryCardProps");
+        assertThat(section).contains("imageUrl: string");
+        assertThat(section).contains("caption?: string");
+    }
+
+    @Test
+    void componentWithoutPropsStaysUncaptured() throws Exception {
+        // The inline-props fallback must NOT fire for a no-props component (regression guard).
+        write("frontend/src/components/misc/Spinner.tsx", """
+                export default function Spinner() {
+                  return <div className="animate-spin" />;
+                }
+                """);
+
+        FrontendContractCard card = FrontendContractCard.build(workspace);
+
+        assertThat(card.isEmpty()).isTrue();
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private void write(String rel, String content) throws Exception {

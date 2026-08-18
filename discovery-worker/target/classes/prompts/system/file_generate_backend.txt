@@ -49,6 +49,19 @@ JPA BIDIRECTIONAL SAVE — set the child's owning-side reference BEFORE saving t
       orderItems.forEach(i -> i.setOrder(order));   // REQUIRED before the save
       orderRepository.save(order);                  // cascade now writes a valid order_id
 
+ENTITY PRIMARY KEYS = Long IDENTITY — every domain @Entity declares its @Id EXACTLY as:
+      @Id
+      @GeneratedValue(strategy = GenerationType.IDENTITY)
+      private Long id;
+  NEVER use UUID for a primary key or ANY id field: no `private UUID id`, no
+  GenerationType.UUID, no GenerationType.AUTO, no UUID.randomUUID()/UUID.nameUUIDFromBytes for ids.
+  Reference another domain entity by its Long id — a foreign-key field is `private Long <entity>Id;`
+  (e.g. orderId, planId, classId), a @PathVariable is `Long id`, and a DTO's id field is `Long id`
+  (the entity, its DTO, and the frontend type MUST all agree on the id type). Fenced foundation spine
+  is the ONLY exception and is left as-is: User.id is Integer, Payment.id is Long, and the platform
+  user is referenced by `Integer userId` (see the CURRENT USER rule below). UUID may appear only for
+  an external gateway/correlation token, never for a row's own identity.
+
 JPA SEEDING — never assign an @Id that is @GeneratedValue. In a CommandLineRunner/seeder,
   construct each entity with the no-arg constructor + setters (or a builder) and leave the id
   null so Hibernate generates it. Passing an explicit id (e.g. new Trainer(UUID.randomUUID(), …))
@@ -56,10 +69,13 @@ JPA SEEDING — never assign an @Id that is @GeneratedValue. In a CommandLineRun
   matches zero rows — the seeder crashes at boot with ObjectOptimisticLockingFailureException and
   the app restart-loops. Seed every entity the way its siblings do: no id argument.
 
-PRINCIPAL IS NOT AN ID — @AuthenticationPrincipal UserDetails.getUsername() is the login subject
-  (the email/username), NOT a UUID or numeric id. Never UUID.fromString(userDetails.getUsername())
-  or otherwise parse it as an entity id. Resolve the user through the repository
-  (userRepository.findByEmail(userDetails.getUsername())) and use that entity's id.
+CURRENT USER = userId, via @CurrentUser — inject the current user with `@CurrentUser Integer userId`
+  (foundation resolver; = User.id, null for a guest). NEVER parse the principal as a UUID (no
+  UUID.fromString(...), no nameUUIDFromBytes, no hardcoded id). A domain model references the user by
+  an `Integer userId` field (= User.id) set from @CurrentUser — NEVER a UUID, and never email/phone
+  stored as the link. For the current user's own rows, filter the repository by `userId` (do not
+  expose an id path param). Email/phone are login + lookup keys only: when you must find a user by
+  them use UserRepository.findByEmail(...) / findByPhone(...).
 
 # OUTPUT
 Return ONLY raw file content — no fences, language tag, explanation, or preamble.

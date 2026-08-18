@@ -74,6 +74,15 @@ public class BackendValidationNode implements WorkerNode {
         // maps the BadCredentialsException thrown inside the login controller to a server error.
         AuthExceptionHandlerPatcher.fix(backendSrcJava);
 
+        // Phase 4 safety net (DETECTION, advisory): surface residual foundation impedance the
+        // reconciler/prompts did not prevent — identity hacks (nameUUIDFromBytes / hardcoded UUID),
+        // a leftover UUID userId surrogate key, a stale Role.CUSTOMER. Writes docs/FOUNDATION_AUDIT.md
+        // and warns; does not rewrite (auto-rewrite arrives with the Phase 3 identity primitive).
+        com.business.discovery.worker.util.FoundationImpedanceAudit.audit(
+                backendSrcJava, com.business.discovery.worker.util.FoundationImpedanceAudit.Layer.BACKEND,
+                ctx.getWorkspaceDir(),
+                com.business.discovery.worker.util.FoundationSymbolRegistry.buildFromWorkspace(ctx.getWorkspaceDir()));
+
         BuildResult initial = buildTool.runMvnCompile(backendDir);
 
         if (initial.success()) {
@@ -106,20 +115,21 @@ public class BackendValidationNode implements WorkerNode {
             log.warn("[BackendValidationNode] mvn compile failed — starting ErrorFixAgent loop");
         }
 
-        // Enforcement Point B (backend gen-time closure): synthesize a minimal placeholder for every
-        // "cannot find symbol: class X" where X is a project class that was never generated — the
-        // OrderItemResponse case. javac is the detector; this resolves the missing-TYPE error, and any
-        // residual member errors (getters/ctors) become a tractable in-file task for the ErrorFixAgent.
-        int synthesized = BackendClassSynthesizer.synthesize(backendSrcJava, latest.output());
-        if (synthesized > 0) {
+        // Enforcement Point B (backend gen-time closure): deterministically resolve every "cannot find
+        // symbol: class X" — inject a JDK import (LocalTime/BigDecimal), point a referencer at the one
+        // canonical project package, or synthesize a single placeholder class/enum where none exists (the
+        // OrderItemResponse case). javac is the detector; this keeps the residual manifest shrinking so
+        // any leftover member errors (getters/ctors) become a tractable in-file task for the ErrorFixAgent.
+        int resolved = BackendClassSynthesizer.synthesize(backendSrcJava, latest.output());
+        if (resolved > 0) {
             BuildResult postSynth = buildTool.runMvnCompile(backendDir);
             if (postSynth.success()) {
-                log.info("[BackendValidationNode] mvn compile passed after synthesizing {} missing class(es) — skipping ErrorFixAgent", synthesized);
+                log.info("[BackendValidationNode] mvn compile passed after resolving {} missing type(s) — skipping ErrorFixAgent", resolved);
                 rescanValueBindings(ctx);
                 markFilesValidated(ctx);
                 return;
             }
-            log.info("[BackendValidationNode] Synthesized {} missing class(es) — residual errors to ErrorFixAgent", synthesized);
+            log.info("[BackendValidationNode] Resolved {} missing type(s) — residual errors to ErrorFixAgent", resolved);
         }
 
         boolean fixed = errorFixAgent.fix(FileType.BACKEND, ctx);

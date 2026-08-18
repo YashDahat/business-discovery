@@ -2,6 +2,7 @@ package com.business.discovery.worker.nodes;
 
 import com.business.discovery.worker.constants.FailureType;
 import com.business.discovery.worker.constants.FileType;
+import com.business.discovery.worker.constants.PlatformStack;
 import com.business.discovery.worker.context.WorkerContext;
 import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.model.ArchitectBrief;
@@ -76,10 +77,9 @@ public class ProjectPlanningNode implements WorkerNode {
     // The platform stack is fixed — briefs describe the business, never the technology.
     // A brief-supplied stack (e.g. "Next.js frontend") once reached the planning prompt and
     // made the model return an empty spec; see docs/llm evidence on multifit-aundh attempt 1-4.
-    private static final Map<String, String> PLATFORM_TECH_STACK = Map.of(
-            "frontend", "React 19 + TypeScript on Vite, react-router-dom, Tailwind CSS",
-            "backend", "Spring Boot 3 (Java 17) + Spring Data JPA",
-            "database", "PostgreSQL");
+    // Single source of truth in PlatformStack (F6) — also pinned onto the brief at ingestion by
+    // DataLoaderNode, so this substitution is now belt-and-suspenders rather than the only guard.
+    private static final Map<String, String> PLATFORM_TECH_STACK = PlatformStack.STACK;
 
     // Frameworks that conflict with the platform stack — never installed even if the spec asks
     private static final Set<String> FORBIDDEN_NPM_PACKAGES = Set.of(
@@ -144,6 +144,12 @@ public class ProjectPlanningNode implements WorkerNode {
             }
         }
 
+        // ── Phase 1: structured fenced-symbol registry — parsed from the foundation contract cards
+        //    now on disk. Fed to the planner below as a closed fenced-symbol list and reused by the
+        //    Phase 2 reconciler. Empty (no-op) when the foundation predates the contract cards. ──
+        var foundationSymbols =
+                com.business.discovery.worker.util.FoundationSymbolRegistry.buildFromWorkspace(workspace);
+
         // ── Decide what to skip ───────────────────────────────────────────────
         boolean hasChanges = briefCtx.requestedChanges() != null && !briefCtx.requestedChanges().isBlank();
         // Load existing spec whenever it exists — even for requestedChanges runs.
@@ -197,7 +203,7 @@ public class ProjectPlanningNode implements WorkerNode {
         if (!skipGeneration) {
             com.business.discovery.worker.util.WorkspaceReader reader =
                     new com.business.discovery.worker.util.WorkspaceReader(workspace);
-            spec = llm.generateArchitectureSpec(briefCtx, slug, reader);
+            spec = llm.generateArchitectureSpec(briefCtx, slug, reader, foundationSymbols.renderForPlanner());
             int fileCount = spec.getFiles() == null ? 0 : spec.getFiles().size();
             // Belt-and-suspenders: the retry loop already guards this
             if (fileCount == 0) {
@@ -225,6 +231,11 @@ public class ProjectPlanningNode implements WorkerNode {
         // ── Strip scaffold-owned files (auth spine, ...) so the generator never shadows the
         //    pre-written scaffold. Runs on every attempt; idempotent. ──
         stripScaffoldOwnedFiles(spec);
+
+        // ── Phase 2: deterministic foundation reconciler — strip fenced re-declarations, rewrite
+        //    domain user/payment references to the foundation handle, drop dangling foundation imports.
+        //    Runs before the manifest is built so generators never see a reconciled-away file. ──
+        com.business.discovery.worker.util.FoundationRefReconciler.reconcile(spec, foundationSymbols);
 
         ctx.setFileManifest(toManifest(spec));
 

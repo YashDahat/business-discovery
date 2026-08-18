@@ -38,14 +38,13 @@ public final class FrontendContractCard {
 
     // ── Extraction patterns ───────────────────────────────────────────────────
 
-    // export function useFoo(...): ReturnType {
-    private static final Pattern HOOK_FN = Pattern.compile(
-            "^export\\s+(?:default\\s+)?function\\s+(use\\w+)\\s*\\([^)]*\\)\\s*:\\s*(.+?)\\s*\\{",
-            Pattern.MULTILINE);
-
-    // export const useFoo = (...): ReturnType =>
-    private static final Pattern HOOK_ARROW = Pattern.compile(
-            "^export\\s+const\\s+(use\\w+)\\s*=\\s*\\([^)]*\\)\\s*:\\s*(.+?)\\s*=>",
+    // Hook / context accessor declaration — function or arrow-const form. Matches only up to
+    // the params' opening '(' ; the return type (which may itself contain nested { } — a mutation
+    // result object) is read by brace matching from just past the params, NOT by regex, so nested
+    // shapes survive (Gap B) and an unannotated hook is still captured from its return literal (Gap A).
+    private static final Pattern HOOK_DECL = Pattern.compile(
+            "^export\\s+(?:default\\s+)?(?:function\\s+(use\\w+)"
+          + "|const\\s+(use\\w+)\\s*=\\s*(?:async\\s*)?)\\s*\\(",
             Pattern.MULTILINE);
 
     // export interface Foo { ... }
@@ -58,12 +57,26 @@ public final class FrontendContractCard {
             "^export\\s+type\\s+(\\w+)\\s*=\\s*\\{([^}]+)\\}",
             Pattern.MULTILINE | Pattern.DOTALL);
 
-    // interface FooProps { ... } — export keyword optional; components rarely export their props type
-    private static final Pattern PROPS_INTERFACE = Pattern.compile(
-            "^(?:export\\s+)?interface\\s+(\\w+Props)\\s*\\{([^}]+)\\}",
-            Pattern.MULTILINE | Pattern.DOTALL);
+    // *Props declaration — `interface FooProps {` OR `type FooProps = {` (export optional; components
+    // rarely export their props type). Locates the DECLARATION only; the body is read by brace matching
+    // so a nested prop type (e.g. onSubmit: (v: {…}) => void) survives instead of truncating (Gap B).
+    private static final Pattern PROPS_DECL = Pattern.compile(
+            "(?:export\\s+)?(?:interface\\s+(\\w+Props)|type\\s+(\\w+Props)\\s*=)\\s*\\{",
+            Pattern.MULTILINE);
 
-    // fieldName?: Type  or  fieldName: Type
+    // Component signature — recovers inline props when there is no named *Props type (Gap A).
+    private static final Pattern COMPONENT_SIG = Pattern.compile(
+            "^export\\s+(?:default\\s+)?(?:function\\s+([A-Z]\\w*)|const\\s+([A-Z]\\w*)\\b[^=]*=)",
+            Pattern.MULTILINE);
+
+    // name?: FullType  — one member of a props/return body (DOTALL so multi-line function/object types survive).
+    private static final Pattern MEMBER = Pattern.compile(
+            "^(\\w+)\\s*(\\??)\\s*:\\s*(.+)$", Pattern.DOTALL);
+
+    // Leading identifier of a return-literal member (`data`, `isLoading: x`, `mutate: create.mutate`).
+    private static final Pattern LEADING_IDENT = Pattern.compile("^([A-Za-z_$][\\w$]*)");
+
+    // fieldName?: Type  or  fieldName: Type  (used only by extractTypes/renderFields — the type path is unchanged)
     private static final Pattern FIELD = Pattern.compile(
             "^\\s*(\\w+)(\\?)?\\s*:\\s*([^;\\n,}]+)",
             Pattern.MULTILINE);
@@ -254,25 +267,12 @@ public final class FrontendContractCard {
         List<String> sigs = new ArrayList<>();
 
         if ("hook".equals(kind) || "context".equals(kind) || "immutable-context".equals(kind)) {
-            Matcher fn = HOOK_FN.matcher(content);
-            while (fn.find()) {
-                sigs.add(fn.group(1) + "(): " + fn.group(2).trim());
-            }
-            Matcher arrow = HOOK_ARROW.matcher(content);
-            while (arrow.find()) {
-                // Avoid duplicates if both patterns hit the same function
-                String sig = arrow.group(1) + "(): " + arrow.group(2).trim();
-                if (!sigs.contains(sig)) sigs.add(sig);
-            }
+            extractHookSignatures(content, sigs);
         }
 
-        // Components and shell: extract *Props interfaces (export optional — components rarely export them)
+        // Components and shell: extract *Props — brace-aware (nested types survive), with an inline-props fallback.
         if ("component".equals(kind) || "shell".equals(kind)) {
-            Matcher pm = PROPS_INTERFACE.matcher(content);
-            while (pm.find()) {
-                String fields = renderFields(pm.group(2));
-                if (!fields.isBlank()) sigs.add(pm.group(1) + ": { " + fields + " }");
-            }
+            extractProps(content, sigs);
         }
 
         // Hooks/types/contexts/shell: extract exported interfaces and type aliases
@@ -287,6 +287,199 @@ public final class FrontendContractCard {
 
         return sigs;
     }
+
+    // ── Hook return-type extraction (brace-aware — closes Gap B, plus Gap A fallback) ──────────
+
+    /**
+     * Extracts every `useX` hook's public shape as `useX(): <return type>`. The return type is read
+     * by brace matching from just past the params so a nested object type (a mutation-result object
+     * like `{ mutate: (v: {…}) => void; isPending }`) is captured whole instead of truncating at the
+     * first inner `{` (Gap B). When a hook omits its return annotation (a rule-2 violation), its shape
+     * is recovered from the `return { … }` literal's field names (Gap A) so consumers still get a
+     * contract instead of guessing the standard TanStack `{ data, mutate(x,y) }` shape.
+     */
+    private static void extractHookSignatures(String content, List<String> sigs) {
+        Matcher m = HOOK_DECL.matcher(content);
+        while (m.find()) {
+            String name = m.group(1) != null ? m.group(1) : m.group(2);
+            int paramOpen = m.end() - 1;                       // pattern ends on the params' '('
+            int paramClose = matchDelims(content, paramOpen, '(', ')');
+            if (paramClose < 0) continue;
+
+            int i = skipWs(content, paramClose + 1);
+            String sig;
+            if (i < content.length() && content.charAt(i) == ':') {
+                // Explicit return annotation.
+                i = skipWs(content, i + 1);
+                if (i < content.length() && content.charAt(i) == '{') {          // object return type
+                    String body = matchBraces(content, i);
+                    if (body == null) continue;
+                    sig = name + "(): { " + collapse(body) + " }";
+                } else {                                                          // named/generic return type
+                    String rt = readReturnType(content, i);
+                    if (rt == null || rt.isBlank()) continue;
+                    sig = name + "(): " + collapse(rt);
+                }
+            } else {
+                // Gap A — no annotation; recover the shape from the return literal (names only).
+                String shape = extractReturnLiteralShape(content, paramClose + 1);
+                if (shape == null) continue;
+                sig = name + "(): " + shape;
+            }
+            if (!sigs.contains(sig)) sigs.add(sig);
+        }
+    }
+
+    /** Reads a named/generic return type from `start` until the function body `{` or arrow `=>` at depth 0. */
+    private static String readReturnType(String s, int start) {
+        int depth = 0;
+        for (int i = start; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '<' || c == '(' || c == '[') depth++;
+            else if (c == '>' || c == ')' || c == ']') depth = Math.max(0, depth - 1);
+            else if (depth == 0) {
+                if (c == '{') return s.substring(start, i);
+                if (c == '=' && i + 1 < s.length() && s.charAt(i + 1) == '>') return s.substring(start, i);
+            }
+        }
+        return null;
+    }
+
+    /** Names-only shape from the last `return { … }` literal — the Gap-A backstop for an unannotated hook. */
+    private static String extractReturnLiteralShape(String content, int fromIdx) {
+        String shape = null;
+        int r = content.indexOf("return", fromIdx);
+        while (r >= 0) {
+            int j = skipWs(content, r + "return".length());
+            if (j < content.length() && content.charAt(j) == '{') {
+                String body = matchBraces(content, j);
+                if (body != null) {
+                    List<String> keys = new ArrayList<>();
+                    for (String member : topLevelMembers(body)) {
+                        Matcher id = LEADING_IDENT.matcher(member);
+                        if (id.find()) keys.add(id.group(1));
+                    }
+                    if (!keys.isEmpty()) {
+                        shape = "{ " + String.join("; ", keys)
+                                + " }  /* fields only — annotate the hook return type (rule 2) */";
+                    }
+                }
+            }
+            r = content.indexOf("return", r + 1);
+        }
+        return shape;
+    }
+
+    // ── Component *Props extraction (brace-aware — closes Gap B, plus inline-props Gap A fallback) ──
+
+    /**
+     * Extracts a component's `*Props` shape. Reads the body by brace matching so a nested prop type
+     * (`onSubmit: (v: {…}) => void`) survives (Gap B); if the component declares no named `*Props` type
+     * but destructures an inline props literal (`function Foo({ a, children }: { … })`), the shape is
+     * recovered from that literal (Gap A) so props like `children` are not silently dropped.
+     */
+    private static void extractProps(String content, List<String> sigs) {
+        boolean captured = false;
+        Matcher d = PROPS_DECL.matcher(content);
+        while (d.find()) {
+            String name = d.group(1) != null ? d.group(1) : d.group(2);
+            String body = matchBraces(content, d.end() - 1);            // pattern ends on the '{'
+            String line = (body == null) ? null : renderProps(name, body);
+            if (line != null) { sigs.add(line); captured = true; }
+        }
+        if (!captured) {                                                // Gap A: no named *Props → read inline props
+            String[] inline = extractInlineProps(content);
+            if (inline != null) {
+                String line = renderProps(inline[0], inline[1]);
+                if (line != null) sigs.add(line);
+            }
+        }
+    }
+
+    /** Recovers the inline type literal annotating a destructured props param: Foo({…}: { HERE }). */
+    private static String[] extractInlineProps(String content) {
+        Matcher m = COMPONENT_SIG.matcher(content);
+        if (!m.find()) return null;
+        String comp = m.group(1) != null ? m.group(1) : m.group(2);
+        int paren = content.indexOf('(', m.end());
+        if (paren < 0) return null;
+        int destructure = content.indexOf('{', paren);
+        int close = content.indexOf(')', paren);
+        if (destructure < 0 || (close >= 0 && destructure > close)) return null;   // param not destructured
+        String param = matchBraces(content, destructure);
+        if (param == null) return null;
+        int afterParam = destructure + param.length() + 2;                         // past the '}' of { … }
+        int typeBrace = content.indexOf('{', afterParam);
+        close = content.indexOf(')', afterParam);
+        if (typeBrace < 0 || (close >= 0 && typeBrace > close)) return null;        // named type → PROPS_DECL handles it
+        String body = matchBraces(content, typeBrace);
+        return body == null ? null : new String[]{ comp + "Props", body };
+    }
+
+    private static String renderProps(String name, String body) {
+        List<String> fields = new ArrayList<>();
+        for (String member : topLevelMembers(body)) {
+            String r = renderMember(member);
+            if (r != null) fields.add(r);
+        }
+        return fields.isEmpty() ? null : name + ": { " + String.join("; ", fields) + " }";
+    }
+
+    private static String renderMember(String member) {
+        Matcher m = MEMBER.matcher(member.trim());
+        if (!m.find()) return null;                                    // skip call/index sigs, comments
+        boolean opt = !m.group(2).isEmpty();
+        String type = collapse(m.group(3));
+        boolean nullable = type.contains("| null") || type.contains("null |");
+        return m.group(1) + (opt ? "?" : "") + ": " + type + (nullable && !opt ? "  /* null-guard required */" : "");
+    }
+
+    // ── Brace / delimiter matching (shared by the hook and props paths) ───────────────────────
+
+    /** Body between the '{' at openIdx and its matching '}', nesting-aware. null if unbalanced. */
+    private static String matchBraces(String s, int openIdx) {
+        int depth = 0;
+        for (int i = openIdx; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == '{') depth++;
+            else if (c == '}' && --depth == 0) return s.substring(openIdx + 1, i);
+        }
+        return null;
+    }
+
+    /** Index of the matching close delimiter for the open delimiter at openIdx (nesting-aware); -1 if none. */
+    private static int matchDelims(String s, int openIdx, char open, char close) {
+        int depth = 0;
+        for (int i = openIdx; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (c == open) depth++;
+            else if (c == close && --depth == 0) return i;
+        }
+        return -1;
+    }
+
+    /** Split a body into members on ';'/newline, but only at brace/paren/angle depth 0. */
+    private static List<String> topLevelMembers(String body) {
+        List<String> out = new ArrayList<>();
+        int depth = 0, start = 0;
+        for (int i = 0; i < body.length(); i++) {
+            char c = body.charAt(i);
+            if (c == '{' || c == '(' || c == '<' || c == '[') depth++;
+            else if (c == '}' || c == ')' || c == '>' || c == ']') depth = Math.max(0, depth - 1);
+            else if ((c == ';' || c == ',' || c == '\n') && depth == 0) { addTrimmed(out, body.substring(start, i)); start = i + 1; }
+        }
+        addTrimmed(out, body.substring(start));
+        return out;
+    }
+
+    private static void addTrimmed(List<String> out, String m) { m = m.trim(); if (!m.isEmpty()) out.add(m); }
+
+    private static int skipWs(String s, int i) {
+        while (i < s.length() && Character.isWhitespace(s.charAt(i))) i++;
+        return i;
+    }
+
+    private static String collapse(String s) { return s.trim().replaceAll("\\s+", " "); }
 
     private static void extractTypes(String content, List<String> sigs) {
         for (Pattern p : List.of(INTERFACE, TYPE_ALIAS)) {

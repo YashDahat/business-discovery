@@ -53,10 +53,25 @@ import java.util.stream.Collectors;
 @Slf4j
 public class ErrorFixAgent {
 
+    // Round count should track RESIDUAL-error depth, not file count (F3). With the errors clustered
+    // and every named file pre-read into the trigger, the FIRST response should apply every edit, a
+    // single recompile reveals only genuine follow-ons, and each later pass is strictly smaller — so a
+    // healthy run finishes in a handful of rounds. The cap stays generous (30) as a safety ceiling, not
+    // a target: batching into one pass is STEERED (pre-assembly + one-pass prompt), not code-enforced,
+    // so the extra headroom keeps a run that legitimately needs deeper residual passes from being cut
+    // off. Lowering the cap is not the lever that makes the loop deterministic — the pre-assembly is.
     static final int MAX_TOOL_ROUNDS = 30;
 
-    private static final int SEEDED_ERRORS_MAX_CHARS = 6000;
-    private static final int AUTO_VERIFY_MAX_CHARS = 4000;
+    // The compiler feed must be COMPLETE (F3 precondition). The old ~5-6K windows truncated large error
+    // sets ("8 of 57"), and the agent cannot fix what it was never shown, so it silently fell back to
+    // exploration. The clusterer keeps EVERY root cause represented, so a generous window carries the
+    // full clustered manifest to the seed, run_compiler, and auto-verify alike.
+    private static final int COMPILER_FEED_MAX_CHARS = 24000;
+
+    // Deterministic input assembly (F3): every file named in the errors is read up-front into the
+    // trigger, so the agent never spends rounds on read_file/list_files exploration.
+    private static final int NAMED_FILE_MAX_CHARS  = 8000;    // per file
+    private static final int NAMED_FILES_MAX_CHARS = 48000;   // total across all named files
 
     private static final Set<String> MUTATING_TOOLS =
             Set.of("write_file", "str_replace", "bulk_str_replace", "run_npm_install");
@@ -101,18 +116,22 @@ public class ErrorFixAgent {
             error list without having just changed something.
 
             The current compiler errors are provided in the first message — do not re-run
-            the compiler to discover them.
+            the compiler to discover them. The FILES NAMED IN THOSE ERRORS ARE ALSO PROVIDED
+            in that message, already read for you — do NOT read_file them again.
 
-            YOUR ROUND BUDGET IS LIMITED — BATCH AGGRESSIVELY:
-            Each of your responses costs one round regardless of how many tool calls it
-            contains, and you may make MANY tool calls in a single response. Never spend a
-            round on a single read_file or a single str_replace:
-            - Reconnaissance: ONE response that read_file's EVERY file appearing in the
-              error list (plus the types files they import). Ten reads in one response
-              costs one round; ten rounds of one read each wastes a third of your budget.
-            - Fixing: apply EVERY confident str_replace in the same response — group all
-              edits for all files you have already read. A response with 8 edits across
-              4 files is normal and desired.
+            ONE DETERMINISTIC, EXHAUSTIVE PASS — the compiler already told you everything:
+            The clustered error list is the COMPLETE manifest — every error, its file, its line.
+            There is nothing to discover and no reason to iterate file-by-file. The named files are
+            pre-read in the trigger, so your FIRST response must apply EVERY edit across EVERY file,
+            organized by root-cause cluster:
+            - Do NOT open with a reconnaissance round of read_file / list_files — the files are already
+              in front of you. Reading them again just burns a round.
+            - Fix by CLUSTER, not by file: for a pattern that repeats across files, one bulk_str_replace;
+              for unique defects, str_replace — many in the SAME response. A response with 12 edits
+              across 8 files is normal and desired; one file per response is a defect.
+            - After you submit that pass the harness recompiles once and hands you the result. Only then
+              address errors NEWLY REVEALED by that recompile (a genuine follow-on) — never re-explore.
+              A run whose errors all resolve on the first pass is done in one round.
 
             WHEN TO USE bulk_str_replace (MANDATORY — saves 5-10 rounds per run):
             When you see the SAME wrong pattern in the error list across multiple files,
@@ -157,7 +176,7 @@ public class ErrorFixAgent {
             THE RULE: if the SAME string needs changing in 2+ files, bulk_str_replace.
             str_replace is for unique, file-specific fixes only.
 
-            STRATEGY:
+            STRATEGY (single exhaustive pass):
             1. Group the provided errors by ROOT CAUSE, not by file. One missing export can
                produce ten downstream errors — fix the source, not the symptoms.
             2. For each root cause, classify:
@@ -165,14 +184,15 @@ public class ErrorFixAgent {
                  "Cannot find module X" — the fix belongs in the SOURCE file (add the export/type)
                  or, for a missing npm library, run_npm_install.
                - SELF-CONTAINED: syntax error, wrong return type, bad import — fix the file itself.
-            3. Investigate briskly: read only the files you intend to change plus the involved
-               contract (read_architecture_spec) — in as few responses as possible. Do not
-               re-read files you have already seen.
-            4. Patch with str_replace: minimal old_string (with enough context to be unique)
-               and minimal new_string. One str_replace per distinct defect, many per response.
-               Use write_file only to CREATE a file that should exist but doesn't.
-            5. React to the automatic verification after each change: fixed errors disappear,
-               new ones mean your patch was wrong — revert or adjust before moving on.
+            3. The files you need are already provided (pre-read) — you rarely need read_file at all.
+               Only read a file NOT in the provided set, or an architecture spec (read_architecture_spec)
+               when a contract is genuinely unclear. Never re-read a provided file.
+            4. In ONE response, emit ALL edits: bulk_str_replace for a pattern repeated across files,
+               str_replace for unique defects (minimal, unique old_string; minimal new_string), grouped
+               by cluster so one fix pattern lands across its whole file set at once. write_file only to
+               CREATE a file that should exist but doesn't.
+            5. React to the automatic verification: only errors NEWLY REVEALED by the recompile warrant a
+               second pass; a new error you caused means a patch was wrong — fix it. Do not re-explore.
             6. Stop calling tools when the automatic verification reports the compiler passes,
                or you have exhausted every fix you can apply.
 
@@ -327,18 +347,24 @@ public class ErrorFixAgent {
             return true;
         }
 
-        String errors = renderErrors(fileType, preCheck.output(), SEEDED_ERRORS_MAX_CHARS);
+        String errors = renderErrors(fileType, preCheck.output(), COMPILER_FEED_MAX_CHARS);
         log.warn("[ErrorFixAgent] {} errors before fix loop:\n{}", fileType, errors);
 
+        // Deterministic input assembly (F3): read the union of files named in the errors up-front so the
+        // agent patches from ground truth in one pass instead of spending rounds on read_file exploration.
+        String namedFiles = assembleNamedFiles(fileType, preCheck.output(), workspace);
+
         String trigger = """
-                Fix the %s compilation. Current compiler errors:
+                Fix the %s compilation. Current compiler errors (COMPLETE — clustered by root cause):
 
                 %s
                 %s
-                Group these by root cause, investigate the minimum necessary, and patch with
-                str_replace. The harness auto-compiles after each of your changes.
+                %s
+                In ONE response, apply EVERY edit across EVERY file above, grouped by cluster
+                (bulk_str_replace for a pattern repeated across files; str_replace for unique defects).
+                The harness auto-compiles after your changes; then address only errors it newly reveals.
                 """.formatted(fileType == FileType.BACKEND ? "backend (Java)" : "frontend (TypeScript)",
-                              errors, buildContractSection(fileType, workspace));
+                              errors, namedFiles, buildContractSection(fileType, workspace));
 
         log.info("[ErrorFixAgent] Starting fix loop for {} — max {} tool rounds", fileType, MAX_TOOL_ROUNDS);
 
@@ -373,7 +399,7 @@ public class ErrorFixAgent {
         if (result.success()) {
             return "[auto-verify] COMPILATION PASSED — all errors resolved. You are done; stop calling tools.";
         }
-        String output = renderErrors(fileType, result.output(), AUTO_VERIFY_MAX_CHARS);
+        String output = renderErrors(fileType, result.output(), COMPILER_FEED_MAX_CHARS);
         return "[auto-verify] Compiler run after your changes — remaining errors:\n" + output;
     }
 
@@ -431,7 +457,8 @@ public class ErrorFixAgent {
 
         if (result.success()) return "COMPILATION PASSED — no errors.";
 
-        return renderErrors(isBackend ? FileType.BACKEND : FileType.FRONTEND, result.output(), 5000);
+        return renderErrors(isBackend ? FileType.BACKEND : FileType.FRONTEND, result.output(),
+                COMPILER_FEED_MAX_CHARS);
     }
 
     /**
@@ -510,6 +537,112 @@ public class ErrorFixAgent {
         List<List<String>> out = new ArrayList<>(a);
         out.addAll(b);
         return out;
+    }
+
+    // ── Deterministic input assembly (F3) ─────────────────────────────────────
+
+    /** tsc diagnostic first line — {@code path(line,col): error TSxxxx}. Group 1 = the file path. */
+    private static final Pattern FRONTEND_ERROR_FILE =
+            Pattern.compile("^(\\S.*?)\\(\\d+,\\d+\\): error TS\\d+", Pattern.MULTILINE);
+    /** Any {@code .java} path token in mvn/javac output (absolute or relative). */
+    private static final Pattern JAVA_FILE_TOKEN =
+            Pattern.compile("([\\w./$-]+\\.java)");
+
+    /**
+     * The union of files named in the compiler errors, as workspace-relative paths in first-seen order.
+     * Frontend tsc paths ({@code src/...}) are prefixed with {@code frontend/}; backend {@code .java}
+     * paths are normalized to their {@code backend/} prefix. Derived files ARE included — the assembly
+     * lists them as read-only reference so the agent knows to fix their consumers, not them.
+     */
+    static List<String> extractErrorFiles(FileType fileType, String output) {
+        if (output == null || output.isBlank()) return List.of();
+        java.util.LinkedHashSet<String> files = new java.util.LinkedHashSet<>();
+        if (fileType == FileType.FRONTEND) {
+            Matcher m = FRONTEND_ERROR_FILE.matcher(output);
+            while (m.find()) {
+                String f = m.group(1).trim().replace('\\', '/');
+                files.add(f.startsWith("frontend/") ? f : "frontend/" + f);
+            }
+        } else {
+            Matcher m = JAVA_FILE_TOKEN.matcher(output);
+            while (m.find()) {
+                String rel = toBackendRelative(m.group(1).replace('\\', '/'));
+                if (rel != null) files.add(rel);
+            }
+        }
+        return new ArrayList<>(files);
+    }
+
+    /** Normalizes a raw .java path (absolute or relative) to a {@code backend/}-rooted relative path. */
+    private static String toBackendRelative(String raw) {
+        int idx = raw.indexOf("backend/");
+        if (idx >= 0) return raw.substring(idx);
+        return raw.endsWith(".java") && !raw.startsWith("/") ? raw : null;
+    }
+
+    /** Derived / plan-owned frontend modules the fix agent may not edit (mirrors {@link #derivedFileGuard}). */
+    static boolean isDerivedPath(String rel) {
+        String p = rel.replace('\\', '/');
+        boolean inTypes    = p.startsWith("frontend/src/types/") && !p.startsWith("frontend/src/types/local/");
+        boolean inServices = p.startsWith("frontend/src/services/")
+                && !p.startsWith("frontend/src/services/local/") && p.endsWith(".ts");
+        // routes.ts + the derived route registry (AppRoutes/AppProviders). The App.tsx shell stays
+        // editable — it is write-if-missing, so an agent edit persists rather than being clobbered.
+        boolean isRoutes   = p.equals("frontend/src/routes.ts")
+                || p.equals("frontend/src/AppRoutes.tsx")
+                || p.equals("frontend/src/AppProviders.tsx");
+        return inTypes || inServices || isRoutes;
+    }
+
+    /**
+     * Reads every editable file named in the errors into one prompt block, so the agent patches from
+     * ground truth without a read_file exploration round. Derived/immutable files are listed by name
+     * only (they cannot be edited — their consumers must be fixed). Bounded per file and in total.
+     */
+    private String assembleNamedFiles(FileType fileType, String output, Path workspace) {
+        List<String> files = extractErrorFiles(fileType, output);
+        if (files.isEmpty()) return "";
+
+        StringBuilder bodies = new StringBuilder();
+        List<String> derived = new ArrayList<>();
+        int total = 0, included = 0, omitted = 0;
+
+        for (String rel : files) {
+            Path p = workspace.resolve(rel).normalize();
+            if (!p.startsWith(workspace) || !Files.exists(p) || !Files.isRegularFile(p)) continue;
+            if (fileType == FileType.FRONTEND && isDerivedPath(rel)) { derived.add(rel); continue; }
+            if (total >= NAMED_FILES_MAX_CHARS) { omitted++; continue; }
+            try {
+                String content = Files.readString(p);
+                if (content.length() > NAMED_FILE_MAX_CHARS) {
+                    content = content.substring(0, NAMED_FILE_MAX_CHARS)
+                            + "\n/* …truncated — read_file for the rest… */";
+                }
+                bodies.append("\n----- ").append(rel).append(" -----\n").append(content).append('\n');
+                total += content.length();
+                included++;
+            } catch (IOException ignored) {
+                // unreadable — skip
+            }
+        }
+
+        if (included == 0 && derived.isEmpty()) return "";
+
+        StringBuilder out = new StringBuilder();
+        out.append("\nFILES NAMED IN THE ERRORS — already read for you; DO NOT read_file these again. ")
+           .append("Make every edit across all of them in your FIRST response, grouped by the clusters above.\n");
+        if (!derived.isEmpty()) {
+            out.append("(Derived/immutable — NOT editable; fix their consumers to match. Listed for reference: ")
+               .append(String.join(", ", derived)).append(")\n");
+        }
+        out.append(bodies);
+        if (omitted > 0) {
+            out.append("\n[+").append(omitted)
+               .append(" more named file(s) omitted for size — read_file if needed]\n");
+        }
+        log.info("[ErrorFixAgent] Assembled {} named file(s) into the trigger ({} chars); {} derived, {} omitted",
+                included, total, derived.size(), omitted);
+        return out.toString();
     }
 
     /** Marker line stamped by TsTypeGenerator/TsSdkGenerator on every derived file. */

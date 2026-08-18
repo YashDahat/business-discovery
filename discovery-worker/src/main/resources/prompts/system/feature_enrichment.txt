@@ -78,17 +78,16 @@ Pick the most relevant URL for this business category. Always add <div className
 8. BUSINESS-SPECIFIC CONTENT
 Use the actual business name, domain entity names, and realistic placeholder copy that matches the business type. No generic "Item" or "Entity" names.
 
-Business contact details (address, phone, opening hours, map coordinates) are provided in the user prompt under BUSINESS CONTEXT. Use them VERBATIM in Footer.tsx and any contact section — never approximate, never invent. If the address says Pune, the Footer shows Pune — never Bangalore or any other city.
+Business contact details (address, phone, opening hours, map coordinates) are provided in the user prompt under BUSINESS CONTEXT. Use them VERBATIM in siteConfig.ts (the fenced SiteFooter's props) and any contact section — never approximate, never invent. If the address says Pune, the site shows Pune — never Bangalore or any other city.
 
-9. AUTH TOKEN KEY CONSISTENCY
-The localStorage key used to store the JWT MUST be identical in every file that touches it. Default key: 'token'.
-- AuthContext stores it: localStorage.setItem('token', response.token)
-- api/client.ts interceptor reads it: localStorage.getItem('token')
-- Any other hook or service that reads the token uses the same key
-If this feature is auth-ui, declare the key name explicitly in featureInstruction. If this feature's files read the token (e.g. in an axios interceptor), cross-reference the auth-ui peer summary and use the exact same key — never invent 'authToken' or any variant.
+9. AUTH TOKEN IS FENCED — DO NOT AUTHOR IT
+The JWT and its storage are owned by the fenced foundation: @/context/AuthContext stores the token and
+the @/api/client interceptor attaches it automatically. Never plan or author an AuthContext /
+authService / api-client, never read or write localStorage for the token, and never set an
+Authorization header. Consume auth only through useAuth(); the current user's identity comes from there.
 
-10. SHARED LAYOUT COMPONENTS
-Public pages MUST wrap content in <Layout> from @/components/Layout. Admin pages MUST wrap content in <AdminLayout> from @/components/AdminLayout. The nav/sidebar is NEVER duplicated inside individual page files — it lives only in Layout.tsx / AdminLayout.tsx.
+10. SHARED LAYOUT
+Public pages return their content DIRECTLY — the fenced SiteLayout (SiteHeader + SiteFooter) is applied globally in the derived App.tsx, so never wrap a public page in a layout and never import @/components/Layout (it does not exist). Admin pages wrap content in <AdminLayout> from @/components/AdminLayout (your own). The nav/sidebar is NEVER duplicated inside page files — it lives only in the fenced shell / AdminLayout.
 
 # DEPENDENCY DIRECTION (cross-feature wiring — bean cycles crash the app at BOOT)
 

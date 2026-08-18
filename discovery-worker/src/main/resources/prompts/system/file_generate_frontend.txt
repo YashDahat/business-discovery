@@ -78,6 +78,29 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    - ALWAYS invalidate the relevant queryKey in onSuccess so the UI refreshes.
    - queryKey should match the domain noun: ['menuItems'], ['reservations'], ['orders'],
      ['trainers'], ['blogPosts'], ['galleryImages'] — consistent naming prevents stale cache.
+
+   CUSTOM HOOK CONTRACT — FIXED SHAPE (mandatory whenever you wrap useQuery/useMutation in a hook,
+   for ANY domain entity — orders, menu items, bookings, posts, properties, patients, invoices,
+   whatever this business uses). The consuming page binds to a CONSTANT shape, so it must never
+   guess — return EXACTLY these fields, EXACTLY these names. (`Entity` below is a placeholder for
+   the real entity; substitute the actual type/function names from your dependency context.)
+   - QUERY hook → return `{ data, isLoading, isError, error }`. NEVER rename `data` to the domain
+     noun (NOT `{ orders }`, NOT `{ items }`, NOT `{ posts }`). The caller aliases at the call site:
+     `const { data: orders, isLoading } = useOrders()`.
+       export function useEntities(): { data: EntityDto[] | undefined; isLoading: boolean; isError: boolean; error: Error | null } {
+         const { data, isLoading, isError, error } = useQuery({ queryKey: ['entities'], queryFn: getAllEntities });
+         return { data, isLoading, isError, error };
+       }
+   - MUTATION hook → return `{ mutate, mutateAsync, isPending, isError, error }`, and `mutate`
+     takes EXACTLY ONE argument. For a multi-field mutation, that one argument is a single object —
+     NEVER a two-arg `mutate(id, body)`. Wrap the mutationFn to destructure the object.
+       export function useUpdateEntity(): { mutate: (vars: { id: string; body: EntityUpdate }) => void; mutateAsync: (vars: { id: string; body: EntityUpdate }) => Promise<EntityDto>; isPending: boolean; isError: boolean; error: Error | null } {
+         const { mutate, mutateAsync, isPending, isError, error } = useMutation({ mutationFn: ({ id, body }: { id: string; body: EntityUpdate }) => updateEntity(id, body) });
+         return { mutate, mutateAsync, isPending, isError, error };
+       }
+     Call site: `updateEntity.mutate({ id, body })` — one object argument, never `mutate(id, body)`.
+   - This fixed shape is the WHOLE point of rule 2 below: it is the cross-file contract consumers
+     bind to. Do not expose `useQuery`/`useMutation` internals beyond these fields.
 2. EXPLICIT RETURN TYPES ON ALL EXPORTED FUNCTIONS (mandatory — never omit): every exported
    function or const must declare an explicit return type annotation:
      export function getLabel(id: string): string { ... }
@@ -88,7 +111,10 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    contract — downstream files import and call this function based solely on what is declared here.
    Without the annotation the shape is invisible to static extraction and consumers will invent the
    interface. This applies to every exported symbol: hooks, utilities, formatters, context accessors,
-   and any other named export that crosses a file boundary.
+   and any other named export that crosses a file boundary. For TanStack hooks the annotation is not
+   free-form: it MUST be the FIXED SHAPE from rule 1's CUSTOM HOOK CONTRACT — query → `{ data,
+   isLoading, isError, error }`, mutation → `{ mutate, mutateAsync, isPending, isError, error }` with
+   a one-argument `mutate` — so the annotated shape and the consumer's assumption cannot drift apart.
 3. ZOD NUMERIC FORM FIELDS: HTML inputs yield strings — use z.coerce.number() (NOT z.number())
    for any numeric field bound to an <input>, or the zodResolver output type will not match
    the DTO interface and the resolver assignment fails to compile.
@@ -200,6 +226,27 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    (<Route path="/checkout/:id">). A mismatch fetches with an empty id, loads no data, and renders
    the error/empty state.
 
+# AUTH & ROLES — TWO ROLES (USER, ADMIN), GUEST-FIRST (each rule fixes a real wiring defect)
+1. TWO ROLES ONLY: `user.role` is the string `'USER'` or `'ADMIN'` (never an array, never other values).
+   Everyone who signs up is a USER; the single ADMIN is seeded server-side — never build an "admin signup".
+2. GUEST-FIRST — NEVER GATE PUBLIC FLOWS: browsing, add-to-cart, checkout, ordering and booking MUST work
+   for anonymous visitors. Never wrap a public page, a cart/checkout page, or a booking flow in a login
+   redirect, and never call `login`/require a token to submit an order or booking. An account is OPTIONAL.
+   If a checkout form needs contact details, collect them as plain fields — do not force sign-in.
+3. ONE ProtectedRoute, TWO USES (you generate it — it is NOT in the foundation): a single component that
+   reads `useAuth()`, redirects to `/login` when `!isAuthenticated`, and — when an `allowedRoles?: string[]`
+   prop is given — redirects home when `user?.role` is not in it. Use `<ProtectedRoute allowedRoles={['ADMIN']}>`
+   for every `/admin/*` route and bare `<ProtectedRoute>` for signed-in-only user routes (`/profile`, `/orders`).
+   Read auth state synchronously (rule 9 above) so a refresh on a gated route does not bounce to /login.
+4. ADMIN ENTRY IS IN THE SHELL — DO NOT REBUILD IT: the foundation `SiteHeader` already renders the account
+   dropdown and shows an **Admin** link to `/admin` when `user?.role === 'ADMIN'`, plus Login/Sign-up when
+   logged out. Do NOT add your own admin nav link, login/logout button, or role check to any header/nav/menu,
+   and do NOT generate a header component — it is fenced in `@/shell`. Your job is only the *routes* + `/admin` pages.
+5. SIGNUP PAGE → register(): the `/signup` page calls `const { register } = useAuth();` then
+   `await register({ name, email, phone, password })` (one object; email and phone are optional but collect at
+   least one). register() logs the user in on success — navigate home/back after; never call `login()` after it.
+   The `/login` page calls `login(emailOrPhone, password)` — the identifier may be an email OR a phone number.
+
 # UI QUALITY STANDARDS (PAGE and COMPONENT files only — skip for config/service/hook/types files)
 1. LAYOUT WRAPPER:
    - Public Page.tsx returns its content DIRECTLY — no Layout wrapper needed. The foundation's
@@ -211,6 +258,12 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
      and SiteFooter with the business's brand name, nav links, CTA, contact details, social links,
      and Tailwind design tokens (bgClass, textClass, accentClass etc.). Import SiteConfig type from
      '@/shell'. This file is the ONLY place business-specific shell content lives.
+     ACCESSING siteConfig — NESTED, not flat. `SiteConfig` is `{ header, footer }`; reading a field
+     directly off `siteConfig` fails with TS2339 (`siteConfig.phone` DOES NOT EXIST). Contact details
+     live under footer: `siteConfig.footer.phone` / `.email` / `.address` / `.openingHours`, plus
+     `.tagline` / `.quickLinks` / `.socialLinks`. Branding/nav live under header:
+     `siteConfig.header.brandName` / `.navLinks` / `.ctaButton`. The WhatsApp number is
+     `siteConfig.footer.phone` (or the `siteConfig.footer.socialLinks` entry with `platform === 'whatsapp'`).
 2. SECTION CONTAINERS: <section className="py-16 px-4"><div className="max-w-7xl mx-auto">…</div></section> — content never touches viewport edge.
 3. RESPONSIVE GRIDS: grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 — never fixed column counts on mobile.
 4. RESPONSIVE TYPOGRAPHY: hero h1 = text-4xl md:text-6xl font-bold; section headings = text-2xl md:text-3xl font-semibold.

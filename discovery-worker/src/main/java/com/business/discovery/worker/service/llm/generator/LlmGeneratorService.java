@@ -65,9 +65,23 @@ public abstract class LlmGeneratorService {
      */
     public ArchitectureSpec generateArchitectureSpec(BriefContext brief, String slug,
                                                      com.business.discovery.worker.util.WorkspaceReader workspace) {
+        return generateArchitectureSpec(brief, slug, workspace, null);
+    }
+
+    /**
+     * @param fencedSymbolBlock optional closed fenced-symbol list
+     *        ({@code FoundationSymbolRegistry.renderForPlanner()}), appended to the system prompt as
+     *        authoritative ground truth so the planner binds to exact foundation shapes. Ignored when blank.
+     */
+    public ArchitectureSpec generateArchitectureSpec(BriefContext brief, String slug,
+                                                     com.business.discovery.worker.util.WorkspaceReader workspace,
+                                                     String fencedSymbolBlock) {
         boolean isUpdate = brief.requestedChanges() != null && !brief.requestedChanges().isBlank();
 
         String system = PromptLoader.load("system/arch_outline.txt");
+        if (fencedSymbolBlock != null && !fencedSymbolBlock.isBlank()) {
+            system = system + "\n\n" + fencedSymbolBlock;
+        }
         String user   = buildArchSpecUserPrompt(brief, slug, isUpdate);
 
         Exception lastError = null;

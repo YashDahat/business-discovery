@@ -50,6 +50,14 @@ public class FrontendValidationNode implements WorkerNode {
         com.business.discovery.worker.util.ApiContractChecker.fixAndReport(
                 frontendSrc, ctx.getWorkspaceDir().resolve("backend/src/main/java"));
 
+        // Phase 4 safety net (DETECTION, advisory): surface residual foundation impedance in generated
+        // frontend code — ad-hoc token parsing outside the fenced auth spine, a re-declared user shape.
+        // Writes docs/FOUNDATION_AUDIT.md and warns; does not rewrite. Fenced modules are skipped.
+        com.business.discovery.worker.util.FoundationImpedanceAudit.audit(
+                frontendSrc, com.business.discovery.worker.util.FoundationImpedanceAudit.Layer.FRONTEND,
+                ctx.getWorkspaceDir(),
+                com.business.discovery.worker.util.FoundationSymbolRegistry.buildFromWorkspace(ctx.getWorkspaceDir()));
+
         BuildResult install = buildTool.runNpmInstall(frontendDir);
         if (!install.success()) throw new WorkerException(FailureType.INFRA,
                 "npm install failed:\n" + install.output());
@@ -81,6 +89,15 @@ public class FrontendValidationNode implements WorkerNode {
         //   5c. TanStackImportFixer: add a react-query hook that's used but never imported (TS2304).
         boolean envFixed = com.business.discovery.worker.util.ProcessEnvPatcher.fix(frontendSrc);
         boolean tanstackFixed = com.business.discovery.worker.util.TanStackImportFixer.fix(frontendSrc);
+        //   5d. FrameworkNavigationPatcher: Theme-C framework leaks — normalize non-platform router
+        //       imports (Next.js useRouter, Remix, bare react-router) to the platform react-router-dom.
+        //       (The react-day-picker v10 initialFocus leak is fixed at the foundation Calendar component
+        //       instead of per-file — see F2 in docs/frontend-error-patterns-abs-fitness.md.)
+        boolean frameworkNavFixed = com.business.discovery.worker.util.FrameworkNavigationPatcher.fix(frontendSrc);
+        //   5e. SiteConfigAccessPatcher: Theme-D fenced-type access leak — flat siteConfig.phone
+        //       (SiteConfig is nested { header, footer }) → siteConfig.footer.phone, for fields that
+        //       live in exactly one section (see F4 in docs/frontend-error-patterns-abs-fitness.md).
+        boolean siteConfigFixed = com.business.discovery.worker.util.SiteConfigAccessPatcher.fix(frontendSrc);
         //   6. TypeScriptImportFixer: registry-driven correction of wrong @/ and relative import
         //      paths (resolved to where each symbol is actually exported) and default↔named
         //      mismatches (TS2613/TS2614). Runs per-file during generation; re-applying it here on
@@ -91,7 +108,7 @@ public class FrontendValidationNode implements WorkerNode {
                         frontendSrc, ctx.getWorkspaceDir()));
 
         if (exportsFixed || packagesFixed || jsxImportsFixed || uiImportsFixed || svcImportsFixed
-                || envFixed || tanstackFixed || tsImportsFixed) {
+                || envFixed || tanstackFixed || frameworkNavFixed || siteConfigFixed || tsImportsFixed) {
             BuildResult postFix = buildTool.runNpmBuild(frontendDir);
             if (postFix.success()) {
                 log.info("[FrontendValidationNode] npm build passed after mechanical fixes — skipping ErrorFixAgent");
