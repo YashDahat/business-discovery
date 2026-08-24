@@ -64,13 +64,16 @@ admin management); frontend = types/<domain>.ts + service.ts + use<Feature>.ts +
 Every FRONTEND feature that has a service.ts MUST include a companion types file:
   frontend/src/types/<domain>.ts   (layer: UTIL, same feature as the rest of the frontend domain)
 
-The service.ts, hook.ts, and Page.tsx in the same feature MUST list this types file in
+The service.ts and Page.tsx in the same feature MUST list this types file in
 their imports_from arrays so the cross-reference validator can detect it.
 
-NOTE — these types and service files are DERIVED FROM THE BACKEND at build time
-(not LLM-generated): still plan them in the manifest with imports_from wiring —
-the manifest paths tell the derivation where to emit. Pages and hooks import from
-them exactly as planned.
+NOTE — types, service, AND hook files are DERIVED FROM THE BACKEND at build time
+(not LLM-generated). Types and services: still plan them in the manifest with
+imports_from wiring — the manifest paths tell the derivation where to emit. HOOKS:
+do NOT plan them at all, and do NOT list a hook in any imports_from — the build emits
+one frontend/src/hooks/<domain>Hooks.ts per service (a TanStack hook wrapping every
+service function) and pages/components resolve it from the module registry at generation
+time. Never author a hook file.
 
 ## Step 1b — Service Files: ONE per domain, NOTHING else (MANDATORY)
 Plan exactly ONE frontend/src/services/<domain>Service.ts per backend domain, and NO
@@ -275,9 +278,9 @@ so the derived route is the intended one:
 For each domain entity the owner manages (e.g. MenuItem, Reservation, Order):
   backend/.../controller/Admin{Domain}Controller.java   (CONTROLLER)
   frontend/src/pages/Admin{Domain}Page.tsx               (PAGE)
-The admin page's hook and components list frontend/src/services/<domain>Service.ts in
+The admin page and its components list frontend/src/services/<domain>Service.ts in
 imports_from — admin CRUD functions live in the derived domain SDK (see Step 1b), never
-in a separate admin service file.
+in a separate admin service file. (The admin hook is derived — never planned.)
 
 # JAVA TYPE RULES (these create file entries — apply while listing files)
 Every Java enum and record MUST be its own top-level .java file — never a nested type.
@@ -310,8 +313,8 @@ floating CTA + UPI badge + Google Maps embed (any Indian business), prominent
 testimonials section (4.5+ rated businesses).
 
 **Hard constraint:** every creative addition must follow the same derivation rules as
-Step 1. A new frontend feature needs service.ts + hook + types/<domain>.ts + Page.tsx.
-A new backend feature needs Model + Repository + Service + Controller. Never add a
+Step 1. A new frontend feature needs service.ts + types/<domain>.ts + Page.tsx (the hook
+is DERIVED — never plan it). A new backend feature needs Model + Repository + Service + Controller. Never add a
 partial set — an incomplete feature causes generation failures downstream.
 
 # OUTLINE RULES
@@ -334,8 +337,8 @@ same domain on backend and frontend are SEPARATE features.
 
 ## Feature type rules
 - BACKEND: all Java files for one business domain (model + repo + service + controller + DTOs)
-- FRONTEND: all TypeScript/TSX files for one domain (service.ts + hook + Page.tsx +
-  AdminPage.tsx + every Step 2a component belonging to those pages)
+- FRONTEND: all TypeScript/TSX files for one domain (service.ts + Page.tsx +
+  AdminPage.tsx + every Step 2a component belonging to those pages; the hook is derived, never planned)
 - INFRA: ALL infra files (CI workflows, nginx.conf if any). Exactly one INFRA feature per
   project, named "infrastructure". No enrichment runs for it.
 - SHARED: cross-cutting backend utilities — GlobalExceptionHandler, ErrorResponse.
@@ -367,7 +370,7 @@ keys).
 
 # SELF-CHECK (do not output)
 - Every mustHaveFeature has backend Model + Repository + Service + Controller?
-- Every recommendedPage has a Page.tsx; every data-loading page has service.ts + hook + types file?
+- Every recommendedPage has a Page.tsx; every data-loading page has service.ts + types file? (the hook is derived — never planned)
 - Every page with a form, table, or dialog decomposed per Step 2a — shell page + one
   COMPONENT file per concern, components in the SAME feature as their page?
 - Every path in every imports_from list exists as a file_path entry?

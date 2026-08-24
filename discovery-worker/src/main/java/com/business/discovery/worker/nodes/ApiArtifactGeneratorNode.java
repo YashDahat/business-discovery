@@ -9,6 +9,7 @@ import com.business.discovery.worker.repository.GeneratedFileRepository;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.util.ApiInventory;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.FrontendHookGenerator;
 import com.business.discovery.worker.util.ServicePlanPruner;
 import com.business.discovery.worker.util.TsSdkGenerator;
 import com.business.discovery.worker.util.TsTypeGenerator;
@@ -19,6 +20,7 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -102,9 +104,20 @@ public class ApiArtifactGeneratorNode implements WorkerNode {
         Map<String, String> serviceFiles =
                 TsSdkGenerator.generate(inventory, typeResult.typeToPath(), plannedServicePaths);
 
+        // One TanStack hook file per service — hooks are a derived surface (arch_outline no longer
+        // plans them). Emitted with the same GENERATED marker so FrontendGeneratorNode.shouldSkip
+        // excludes them from LLM generation, and seeded into the export registry + contract card at
+        // frontend-gen start so components/pages import them by their real names.
+        // See docs/frontend-hook-generation-and-prompt-segregation.md §3.
+        Map<String, String> hookFiles = new LinkedHashMap<>();
+        serviceFiles.forEach((path, content) ->
+                FrontendHookGenerator.generate(path, content)
+                        .ifPresent(h -> hookFiles.put(h.path(), h.content())));
+
         try {
             writeAll(ctx, workspace, typeResult.files());
             writeAll(ctx, workspace, serviceFiles);
+            writeAll(ctx, workspace, hookFiles);
         } catch (IOException e) {
             throw new WorkerException(FailureType.INFRA,
                     "Failed writing derived API artifacts: " + e.getMessage(), e);
@@ -122,8 +135,8 @@ public class ApiArtifactGeneratorNode implements WorkerNode {
                     + "from the manifest: {}", stripped.size(), stripped);
         }
 
-        log.info("[ApiArtifactGeneratorNode] Derived {} type + {} service file(s) from {} endpoints / {} types",
-                typeResult.files().size(), serviceFiles.size(),
+        log.info("[ApiArtifactGeneratorNode] Derived {} type + {} service + {} hook file(s) from {} endpoints / {} types",
+                typeResult.files().size(), serviceFiles.size(), hookFiles.size(),
                 inventory.endpoints().size(), inventory.types().size());
     }
 

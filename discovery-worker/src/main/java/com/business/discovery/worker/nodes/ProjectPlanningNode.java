@@ -9,6 +9,7 @@ import com.business.discovery.worker.model.ArchitectBrief;
 import com.business.discovery.worker.model.BusinessEntity;
 import com.business.discovery.worker.service.llm.ArchitectureSpec;
 import com.business.discovery.worker.service.llm.BriefContext;
+import com.business.discovery.worker.service.llm.FeatureCard;
 import com.business.discovery.worker.service.llm.FeatureSpec;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.FileSpec;
@@ -18,6 +19,8 @@ import com.business.discovery.worker.scaffold.ScaffoldModule;
 import com.business.discovery.worker.service.GitService;
 import com.business.discovery.worker.service.SpringInitializrClient;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.ContractReconciler;
+import com.business.discovery.worker.util.EnrichmentCardUtil;
 import com.business.discovery.worker.util.FeatureDependencyGraph;
 import com.business.discovery.worker.util.ManifestCompletenessChecker;
 import com.business.discovery.worker.util.SlugUtil;
@@ -55,6 +58,13 @@ import java.util.zip.ZipInputStream;
 public class ProjectPlanningNode implements WorkerNode {
 
     private static final int PROCESS_TIMEOUT_MINUTES = 5;
+
+    // Cycle self-heal budget: how many times to clear + re-enrich the back-edge owner IN-RUN,
+    // feeding it the exact cycle it just formed, before giving up and failing hard for a container
+    // retry. Each attempt is one Flash enrichment call, so this is a deliberately small ceiling —
+    // not a target. A container retry would only replay the same advisory prompt, so the in-run
+    // heal (which names the concrete cycle) is where a different attempt actually happens.
+    private static final int MAX_CYCLE_HEAL_ATTEMPTS = 2;
 
     // "mail" is included by default: briefs routinely produce Notification/Lead features whose
     // services autowire JavaMailSender — without the starter the app compiles but fails to boot
@@ -215,15 +225,59 @@ public class ProjectPlanningNode implements WorkerNode {
         // ── Enrich: one Pro call per feature — bounded output, resumable per-feature ──
         if (!skipEnrichment) {
             enrichFeatures(spec, briefCtx, workspace, ctx.getGithubBranch());
+        }
+
+        // ── Cross-reference validation: add missing referenced files to the spec (on-disk foundation/
+        //    scaffold guard) AND attach each to its referencing feature. Runs BEFORE reconciliation so
+        //    every backfilled file receives a reconciled ground-truth contract and an enrichment card;
+        //    unconditional so skip/resume runs still repair the manifest. ──
+        spec = validateCrossReferences(spec, workspace, briefCtx);
+
+        if (!skipEnrichment) {
+            // Reconcile cross-file contracts (Pro) into one ground truth BOTH generators bind to —
+            // after enrichment (interfaces now exist), before generation. Writes the reconciled
+            // interface into fileRole (read by both generators) + the structured fields. Best-effort:
+            // a failure keeps the planned interfaces. Idempotent, so it re-runs safely on retry.
+            try {
+                List<com.business.discovery.worker.service.llm.ContractRecord> contractRecords = new ArrayList<>();
+                int reconciled = ContractReconciler.reconcile(spec, llm,
+                        com.business.discovery.worker.util.FoundationContractCard.backendSection(workspace),
+                        com.business.discovery.worker.util.FoundationContractCard.frontendSection(workspace),
+                        contractRecords);
+                if (reconciled > 0) {
+                    log.info("[ProjectPlanningNode] Contract reconciliation set {} file contract(s)", reconciled);
+                    ArchitectureJsonUtil.write(workspace, spec);
+                    try {
+                        com.business.discovery.worker.util.ContractsDoc.write(workspace, contractRecords);
+                        log.info("[ProjectPlanningNode] CONTRACTS.json written — {} reconciled contract(s)",
+                                contractRecords.size());
+                    } catch (IOException e) {
+                        log.warn("[ProjectPlanningNode] Could not write CONTRACTS.json: {}", e.getMessage());
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("[ProjectPlanningNode] Contract reconciliation skipped — keeping planned interfaces: {}",
+                        e.getMessage());
+            }
+
             try {
                 writeEnrichmentDoc(workspace, spec, ctx.getAttemptNumber());
             } catch (IOException e) {
                 log.warn("[ProjectPlanningNode] Could not write enrichment doc: {}", e.getMessage());
             }
-        }
 
-        // ── Cross-reference validation: add stub entries for missing imports ──
-        spec = validateCrossReferences(spec, workspace, briefCtx);
+            // Machine-readable twin: docs/ENRICHMENT.json as Map<featureName, FeatureCard>. The
+            // generator nodes load this and inject each file's whole-feature context (siblings +
+            // roles + instruction) into its generation prompt, keyed by FileSpec.featureName.
+            try {
+                Map<String, FeatureCard> cards = EnrichmentCardUtil.build(spec);
+                EnrichmentCardUtil.write(workspace, cards);
+                log.info("[ProjectPlanningNode] ENRICHMENT.json written to docs/ — {} feature card(s)",
+                        cards.size());
+            } catch (IOException e) {
+                log.warn("[ProjectPlanningNode] Could not write ENRICHMENT.json: {}", e.getMessage());
+            }
+        }
 
         // ── Merge: preserve VALIDATED status from prior run ───────────────────
         spec = mergeWithExisting(spec, workspace);
@@ -1184,52 +1238,96 @@ public class ProjectPlanningNode implements WorkerNode {
                 gitService.commitEnrichmentCheckpoint(workspace, feature.getFeatureName(), branch);
             }
         }
-        enforceAcyclicFeatureDependencies(spec, ordered, workspace);
+        enforceAcyclicFeatureDependencies(spec, ordered, workspace, briefCtx,
+                filesByFeature, workspaceReader, branch);
 
         log.info("[ProjectPlanningNode] Feature enrichment complete — {} features processed", features.size());
     }
 
     /**
      * Safety net behind the per-feature direction constraint: if the enriched spec still contains a
-     * dependency cycle, fail HERE — at planning time, before a single Java file is generated —
+     * dependency cycle, resolve it HERE — at planning time, before a single Java file is generated —
      * rather than letting it surface at container boot four stages later (codegen → compile →
      * image build → smoke), which is what a Spring bean cycle costs when it escapes.
      *
-     * <p>Before throwing, the back-edge feature's enrichment is cleared and checkpointed so a
-     * container retry re-enriches just that feature. On the retry its dependent is still enriched
-     * and still declares the forward edge, so the direction constraint is now injected into the
-     * prompt that previously had none — the retry gets a genuinely different attempt rather than
-     * replaying the same failure until the task is marked FAILED.
+     * <p><b>In-run self-heal (Option B).</b> On a cycle we clear and re-enrich ONLY the back-edge
+     * owner — the cycle member enriched LAST, since the earlier ones could not have seen it to
+     * depend on it — feeding the exact cycle path into its prompt. A bare container retry would
+     * replay the same advisory constraint the model already ignored (a coin-flip); naming the
+     * concrete cycle turns the replay into a genuinely different attempt. This repeats up to
+     * {@link #MAX_CYCLE_HEAL_ATTEMPTS} times, re-checking after each pass and naturally following the
+     * back-edge owner if a different cycle surfaces.
+     *
+     * <p>Every heal pass checkpoints the spec (and pushes it on a branch) so that if the loop still
+     * cannot converge, the terminal hard-fail below leaves the back-edge owner cleared — a container
+     * retry then resumes and re-enriches just it, preserving the prior fail-fast contract as the
+     * last resort.
      */
     private void enforceAcyclicFeatureDependencies(ArchitectureSpec spec,
                                                    List<FeatureSpec> ordered,
-                                                   Path workspace) {
+                                                   Path workspace,
+                                                   BriefContext briefCtx,
+                                                   Map<String, List<FileSpec>> filesByFeature,
+                                                   WorkspaceReader workspaceReader,
+                                                   String branch) {
         List<FeatureSpec> features = spec.getFeatures();
-        List<String> cycle = FeatureDependencyGraph.findCycle(features);
-        if (cycle.isEmpty()) return;
-
-        String path = String.join(" → ", cycle);
 
         Map<String, Integer> enrichmentOrder = new HashMap<>();
         for (int i = 0; i < ordered.size(); i++) {
             enrichmentOrder.put(ordered.get(i).getFeatureName(), i);
         }
-        // The back edge belongs to whichever feature in the cycle was enriched LAST — the earlier
-        // ones could not have seen it to depend on it.
-        String backEdgeOwner = cycle.stream()
-                .distinct()
-                .max(Comparator.comparingInt(name -> enrichmentOrder.getOrDefault(name, -1)))
-                .orElse(null);
 
-        log.error("[ProjectPlanningNode] Feature dependency cycle: {} — back edge owned by '{}'",
-                path, backEdgeOwner);
+        List<String> cycle = FeatureDependencyGraph.findCycle(features);
+        for (int heal = 1; heal <= MAX_CYCLE_HEAL_ATTEMPTS && !cycle.isEmpty(); heal++) {
+            String path = String.join(" → ", cycle);
+            String backEdgeOwner = lastEnrichedInCycle(cycle, enrichmentOrder);
+            FeatureSpec owner = findFeature(features, backEdgeOwner);
+            List<FileSpec> ownerFiles = filesByFeature.getOrDefault(backEdgeOwner, List.of());
 
-        for (FeatureSpec f : features) {
-            if (f.getFeatureName() != null && f.getFeatureName().equals(backEdgeOwner)) {
-                f.setFeatureInstruction(null);
-                f.setDependsOnFeatures(null);
-                break;
+            // Nothing re-enrichable (unknown owner or no files) — drop to the terminal hard-fail.
+            if (owner == null || ownerFiles.isEmpty()) break;
+
+            log.warn("[ProjectPlanningNode] Feature dependency cycle (self-heal {}/{}): {} — "
+                    + "clearing and re-enriching back-edge owner '{}' with the cycle named in its prompt",
+                    heal, MAX_CYCLE_HEAL_ATTEMPTS, path, backEdgeOwner);
+
+            owner.setFeatureInstruction(null);
+            owner.setDependsOnFeatures(null);
+
+            Set<String> dependents = FeatureDependencyGraph.dependentsOf(backEdgeOwner, features);
+            Map<String, Object> peerSummaries = buildPeerSummariesExcluding(
+                    buildAllPeerSummaries(features, filesByFeature), backEdgeOwner);
+
+            try {
+                enrichLlm.enrichFeature(owner, ownerFiles, peerSummaries, briefCtx,
+                        workspaceReader, dependents, path);
+            } catch (WorkerException e) {
+                log.warn("[ProjectPlanningNode] Self-heal re-enrichment of '{}' failed on attempt {}: {}",
+                        backEdgeOwner, heal, e.getMessage());
+                break;   // leave owner cleared; terminal hard-fail handles the retry handoff
             }
+
+            checkpointHealedFeature(spec, workspace, branch, backEdgeOwner);
+            cycle = FeatureDependencyGraph.findCycle(features);
+        }
+
+        if (cycle.isEmpty()) {
+            log.info("[ProjectPlanningNode] Feature dependency graph is acyclic — enforcement passed");
+            return;
+        }
+
+        // Did not converge within the heal budget: clear the current back-edge owner and fail hard
+        // so a container retry re-enriches just it, resuming from the last checkpoint written above.
+        String path = String.join(" → ", cycle);
+        String backEdgeOwner = lastEnrichedInCycle(cycle, enrichmentOrder);
+
+        log.error("[ProjectPlanningNode] Feature dependency cycle unresolved after {} self-heal attempt(s): "
+                + "{} — back edge owned by '{}'", MAX_CYCLE_HEAL_ATTEMPTS, path, backEdgeOwner);
+
+        FeatureSpec owner = findFeature(features, backEdgeOwner);
+        if (owner != null) {
+            owner.setFeatureInstruction(null);
+            owner.setDependsOnFeatures(null);
         }
         try {
             ArchitectureJsonUtil.write(workspace, spec);
@@ -1241,8 +1339,45 @@ public class ProjectPlanningNode implements WorkerNode {
         throw new WorkerException(FailureType.CODE,
                 "Feature dependency cycle: " + path + ". '" + backEdgeOwner + "' wires back into a"
                 + " feature that already depends on it, which is a Spring bean cycle that crashes the"
-                + " app at boot. Cleared its enrichment for retry — it must return its result to the"
-                + " shared controller (or publish an event) instead of calling back.");
+                + " app at boot. Self-heal re-enriched it " + MAX_CYCLE_HEAL_ATTEMPTS + "x with the"
+                + " cycle named in its prompt and it still wired back; cleared its enrichment for retry"
+                + " — it must return its result to the shared controller (or publish an event) instead"
+                + " of calling back.");
+    }
+
+    /**
+     * The cycle member enriched LAST owns the back edge — the earlier ones could not have seen it to
+     * depend on it. {@code distinct()} because a cycle path repeats its start node at the end.
+     */
+    private static String lastEnrichedInCycle(List<String> cycle, Map<String, Integer> enrichmentOrder) {
+        return cycle.stream()
+                .distinct()
+                .max(Comparator.comparingInt(name -> enrichmentOrder.getOrDefault(name, -1)))
+                .orElse(null);
+    }
+
+    private static FeatureSpec findFeature(List<FeatureSpec> features, String featureName) {
+        if (featureName == null) return null;
+        return features.stream()
+                .filter(f -> featureName.equals(f.getFeatureName()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    /** Persist + push after a self-heal re-enrich, mirroring the per-feature enrichment checkpoint. */
+    private void checkpointHealedFeature(ArchitectureSpec spec, Path workspace,
+                                         String branch, String featureName) {
+        try {
+            ArchitectureJsonUtil.write(workspace, spec);
+            log.info("[ProjectPlanningNode] Checkpoint written after self-heal re-enrich: {}", featureName);
+        } catch (IOException e) {
+            throw new WorkerException(FailureType.INFRA,
+                    "Checkpoint write failed after self-heal re-enrich of " + featureName
+                    + ": " + e.getMessage(), e);
+        }
+        if (branch != null && !branch.isBlank()) {
+            gitService.commitEnrichmentCheckpoint(workspace, featureName, branch);
+        }
     }
 
     /** BACKEND and SHARED enrich before FRONTEND so frontend sees real backend API summaries. */
@@ -1320,14 +1455,14 @@ public class ProjectPlanningNode implements WorkerNode {
                 pending(ManifestCompletenessChecker.findMissingFrontend(spec, workspace), knownPaths, toAdd);
         if (!missingFe.isEmpty()) {
             applyMissing(missingFe, specifyMissing(spec, workspace, missingFe, briefCtx,
-                    "frontend/src/shell/SiteLayout.tsx"), toAdd, knownPaths, "frontend");
+                    "frontend/src/shell/SiteLayout.tsx"), toAdd, knownPaths, "frontend", spec);
         }
 
         List<ManifestCompletenessChecker.MissingRef> missingBe =
                 pending(ManifestCompletenessChecker.findMissingBackend(spec, workspace), knownPaths, toAdd);
         if (!missingBe.isEmpty()) {
             applyMissing(missingBe, specifyMissing(spec, workspace, missingBe, briefCtx, null),
-                    toAdd, knownPaths, "backend");
+                    toAdd, knownPaths, "backend", spec);
         }
 
         if (!toAdd.isEmpty()) {
@@ -1335,6 +1470,19 @@ public class ProjectPlanningNode implements WorkerNode {
             all.addAll(toAdd);
             spec.setFiles(all);
             log.info("[ProjectPlanningNode] Added {} missing manifest entries (specced or stubbed)", toAdd.size());
+        }
+
+        // Symbol-level hook check: a useXxx named in enrichment prose that no service backs, no file
+        // declares, and the foundation does not ship — the abs-fitness useCreateGymClass defect. A
+        // service-backed hook is NOT flagged (the mechanical generator will emit it). Warn only: the
+        // remedy is capability-only enrichment prose, not a stub file (a hook wrapping nothing is worse
+        // than the dangling reference). See docs/frontend-hook-generation-and-prompt-segregation.md §5b.
+        List<ManifestCompletenessChecker.DanglingHook> danglingHooks =
+                ManifestCompletenessChecker.findDanglingHooks(spec, workspace);
+        for (ManifestCompletenessChecker.DanglingHook dh : danglingHooks) {
+            log.warn("[ProjectPlanningNode] Dangling hook '{}' named in enrichment prose but no service backs it, "
+                    + "no file declares it, and the foundation does not ship it — referenced by {}. Enrichment must "
+                    + "name the capability, not a hook symbol (feature_enrichment.txt).", dh.hookName(), dh.referencedBy());
         }
         return spec;
     }
@@ -1350,7 +1498,16 @@ public class ProjectPlanningNode implements WorkerNode {
 
     /** Adds a proper spec per miss when the LLM produced one, else a bare stub; records the path. */
     private void applyMissing(List<ManifestCompletenessChecker.MissingRef> missing,
-            Map<String, FileSpec> specced, List<FileSpec> toAdd, Set<String> knownPaths, String side) {
+            Map<String, FileSpec> specced, List<FileSpec> toAdd, Set<String> knownPaths, String side,
+            ArchitectureSpec spec) {
+        Map<String, FileSpec> byPath = new HashMap<>();
+        Map<String, FeatureSpec> featuresByName = new HashMap<>();
+        if (spec.getFiles() != null) {
+            for (FileSpec f : spec.getFiles()) if (f.getFilePath() != null) byPath.put(f.getFilePath(), f);
+        }
+        if (spec.getFeatures() != null) {
+            for (FeatureSpec f : spec.getFeatures()) if (f.getFeatureName() != null) featuresByName.put(f.getFeatureName(), f);
+        }
         for (ManifestCompletenessChecker.MissingRef mr : missing) {
             FileSpec entry = specced.get(mr.importPath());
             if (entry != null) {
@@ -1361,9 +1518,59 @@ public class ProjectPlanningNode implements WorkerNode {
                         side, mr.importPath(), mr.referencedBy());
                 entry = buildStubEntry(mr.importPath());
             }
+            // G2: attach the added file to its referencing feature so the reconciler — which iterates
+            // feature.filePaths — gives it a ground-truth contract and the enrichment card includes it.
+            attachToFeature(entry, mr, byPath, featuresByName);
             toAdd.add(entry);
             knownPaths.add(mr.importPath());
         }
+    }
+
+    /**
+     * Assigns a backfilled file to an owning feature and registers its path in that feature's
+     * {@code filePaths}, so ContractReconciler (which only iterates {@code feature.getFilePaths()})
+     * reconciles it and EnrichmentCardUtil emits a card for it. Owner precedence: an explicit
+     * {@code feature:<name>} referrer, else the {@code featureName} of the first referencing FileSpec
+     * that carries one. No-op when neither resolves — the file is still added to the spec, just
+     * outside any feature (the pre-G2 behavior). Does not overwrite a featureName the speccing LLM
+     * already set.
+     */
+    private void attachToFeature(FileSpec entry, ManifestCompletenessChecker.MissingRef mr,
+            Map<String, FileSpec> byPath, Map<String, FeatureSpec> featuresByName) {
+        String owner = null;
+        for (String ref : mr.referencedBy()) {
+            if (ref.startsWith("feature:")) { owner = ref.substring("feature:".length()); break; }
+        }
+        if (owner == null) {
+            for (String ref : mr.referencedBy()) {
+                FileSpec rf = byPath.get(ref);
+                if (rf != null && rf.getFeatureName() != null) { owner = rf.getFeatureName(); break; }
+            }
+        }
+        if (owner == null) return;
+
+        if (entry.getFeatureName() == null || entry.getFeatureName().isBlank()) {
+            entry.setFeatureName(owner);
+        }
+        FeatureSpec feature = featuresByName.get(owner);
+        if (feature == null) return;
+
+        List<String> paths = feature.getFilePaths();
+        if (paths == null) {
+            paths = new ArrayList<>();
+            feature.setFilePaths(paths);
+        }
+        if (!paths.contains(entry.getFilePath())) {
+            try {
+                paths.add(entry.getFilePath());
+            } catch (UnsupportedOperationException immutable) {   // Jackson can hand back a fixed list
+                List<String> mutable = new ArrayList<>(paths);
+                mutable.add(entry.getFilePath());
+                feature.setFilePaths(mutable);
+            }
+        }
+        log.info("[ProjectPlanningNode] Attached backfilled file {} to feature '{}' "
+                + "(reconciler + enrichment card will now include it)", entry.getFilePath(), owner);
     }
 
     /**

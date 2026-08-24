@@ -75,7 +75,7 @@ class BackendGeneratorNodeTest {
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(1);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), any(), any(), any()))
                 .thenReturn("public class Placeholder {}");
 
         node.execute(ctx);
@@ -126,7 +126,7 @@ class BackendGeneratorNodeTest {
         when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), any(), any(), any()))
                 .thenThrow(new WorkerException(FailureType.INFRA, "LLM timeout"));
 
         assertThatThrownBy(() -> node.execute(ctx))
@@ -154,14 +154,16 @@ class BackendGeneratorNodeTest {
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(1);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), any(), any(), any()))
                 .thenReturn("public class Placeholder {}");
 
         node.execute(ctx);
 
         InOrder inOrder = inOrder(flashLlm);
-        inOrder.verify(flashLlm).generateFileContent(anyString(), eq("INSTRUCTION_ENTITY"), anyString(), anyMap(), any());
-        inOrder.verify(flashLlm).generateFileContent(anyString(), eq("INSTRUCTION_SERVICE"), anyString(), anyMap(), any());
+        inOrder.verify(flashLlm).generateFileContent(anyString(), anyString(), anyMap(), any(), any(),
+                argThat(fc -> fc != null && fc.contains("INSTRUCTION_ENTITY")));
+        inOrder.verify(flashLlm).generateFileContent(anyString(), anyString(), anyMap(), any(), any(),
+                argThat(fc -> fc != null && fc.contains("INSTRUCTION_SERVICE")));
     }
 
     @Test
@@ -182,7 +184,7 @@ class BackendGeneratorNodeTest {
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(1);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), any(), any(), any()))
                 .thenReturn("public class Placeholder {}");
 
         node.execute(ctx);
@@ -271,12 +273,13 @@ class BackendGeneratorNodeTest {
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(2);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), eq("// old content")))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), eq("// old content"), any(), any()))
                 .thenReturn("// updated content");
 
         node.execute(ctx);
 
-        verify(flashLlm).generateFileContent(anyString(), eq("update instruction"), anyString(), anyMap(), eq("// old content"));
+        verify(flashLlm).generateFileContent(anyString(), anyString(), anyMap(), eq("// old content"), any(),
+                argThat(fc -> fc != null && fc.contains("update instruction")));
         assertThat(Files.readString(existing)).isEqualTo("// updated content");
     }
 

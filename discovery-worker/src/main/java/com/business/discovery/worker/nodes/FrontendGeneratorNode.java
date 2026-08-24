@@ -8,13 +8,16 @@ import com.business.discovery.worker.model.GeneratedFile;
 import com.business.discovery.worker.repository.GeneratedFileRepository;
 import com.business.discovery.worker.service.BuildToolService;
 import com.business.discovery.worker.service.llm.ArchitectureSpec;
+import com.business.discovery.worker.service.llm.FeatureCard;
 import com.business.discovery.worker.service.llm.FeatureSpec;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.util.ApiContractCard;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.EnrichmentCardUtil;
 import com.business.discovery.worker.util.EslintCycleParser;
+import com.business.discovery.worker.util.FileContractCard;
 import com.business.discovery.worker.util.LayerOrderUtil;
 import com.business.discovery.worker.util.TruncationDetector;
 import com.business.discovery.worker.util.TypeScriptExportRegistry;
@@ -273,6 +276,34 @@ public class FrontendGeneratorNode implements WorkerNode {
                         contractCard.typeFileCount(), contractCard.routeCount());
             }
 
+            // Planned component prop contracts — the transport of the ground truth reconciled at
+            // planning time (ContractReconciler in ProjectPlanningNode), read back off the spec here
+            // and injected into component/page prompts so both sides bind field-for-field.
+            this.plannedPropsCard =
+                    com.business.discovery.worker.util.PlannedComponentPropsCard.build(architectureSpec.getFiles());
+            log.info("[FrontendGeneratorNode] Planned component props: {} component/page contract(s)",
+                    plannedPropsCard.moduleCount());
+
+            // Frontend twin of BackendContractCard: planned/reconciled interfaces of NON-component
+            // modules (hooks/services/types), so a same-layer consumer binds to their signatures
+            // instead of inventing them.
+            this.frontendPlannedContractCard =
+                    com.business.discovery.worker.util.FrontendPlannedContractCard.build(architectureSpec.getFiles());
+            log.info("[FrontendGeneratorNode] Planned frontend module contracts: {} hook/service/type interface(s)",
+                    frontendPlannedContractCard.moduleCount());
+            if (!plannedPropsCard.componentsWithoutProps().isEmpty()) {
+                log.warn("[FrontendGeneratorNode] {} component/page file(s) have NO props in the plan "
+                        + "(parents cannot bind their contract): {}",
+                        plannedPropsCard.componentsWithoutProps().size(),
+                        plannedPropsCard.componentsWithoutProps());
+            }
+            if (!plannedPropsCard.componentsWithOpaqueProps().isEmpty()) {
+                log.warn("[FrontendGeneratorNode] {} component/page file(s) still have OPAQUE props "
+                        + "(<Name>Props ref, not fields) after reconciliation — these will drift: {}",
+                        plannedPropsCard.componentsWithOpaqueProps().size(),
+                        plannedPropsCard.componentsWithOpaqueProps());
+            }
+
             // Fenced foundation contract (auth/cart/checkout/shell) — ground truth for the immutable
             // spine, deterministic + byte-identical every run so it rides the system-prompt prefix cache.
             this.foundationContractSection =
@@ -283,6 +314,18 @@ public class FrontendGeneratorNode implements WorkerNode {
             } else {
                 log.info("[FrontendGeneratorNode] Loaded fenced foundation contract ({} chars)",
                         foundationContractSection.length());
+            }
+
+            // Per-feature context cards (docs/ENRICHMENT.json) — each file's generation prompt gets its
+            // whole feature's identity + sibling files/roles, keyed by FileSpec.featureName. Empty when
+            // ENRICHMENT.json is absent; the effective instruction still flows via buildFeatureContext.
+            try {
+                this.enrichmentCards = EnrichmentCardUtil.read(workspace);
+                log.info("[FrontendGeneratorNode] Loaded {} enrichment feature card(s)", enrichmentCards.size());
+            } catch (IOException e) {
+                log.warn("[FrontendGeneratorNode] Could not read ENRICHMENT.json — generating without feature "
+                        + "cards: {}", e.getMessage());
+                this.enrichmentCards = Map.of();
             }
 
             // Ground-truth navigation contract: routes.ts + App.tsx derived from the plan's
@@ -442,12 +485,17 @@ public class FrontendGeneratorNode implements WorkerNode {
     // Set once per execute() before the parallel generation block; read-only afterwards.
     private volatile com.business.discovery.worker.util.UiComponentInventory uiInventory;
     private volatile com.business.discovery.worker.util.ApiContractCard contractCard;
+    private volatile com.business.discovery.worker.util.PlannedComponentPropsCard plannedPropsCard;
+    private volatile com.business.discovery.worker.util.FrontendPlannedContractCard frontendPlannedContractCard;
     private volatile String routeCardSection;
     private com.business.discovery.worker.util.FrontendContractCard frontendContractCard =
             new com.business.discovery.worker.util.FrontendContractCard();
 
     /** Fenced foundation contract (auth/cart/checkout/shell), loaded once per run; "" when absent. */
     private volatile String foundationContractSection = "";
+
+    /** docs/ENRICHMENT.json feature cards, keyed by featureName; loaded once per run, empty when absent. */
+    private volatile Map<String, FeatureCard> enrichmentCards = Map.of();
 
     /**
      * Derives routes.ts + App.tsx from the plan's PAGE entries before any layer generates.
@@ -575,7 +623,11 @@ public class FrontendGeneratorNode implements WorkerNode {
                                   String fileRole, boolean requestedChangesMode,
                                   FeatureSpec feature, Set<String> manifestPaths,
                                   TypeScriptExportRegistry exportRegistry) throws IOException {
-        Map<String, String> depFiles = loadDependencyFiles(workspace, spec, exportRegistry);
+        // Registry-only referencing (§3.6): the interface of every dependency comes from the export
+        // catalog (names/paths, below) + the contract cards (signatures, in contractSection) — we no
+        // longer paste full dependency file bodies. The bodies were method/JSX noise a consumer never
+        // needs, cost tokens on every call, and depended on the ~27%-empty imports_from.
+        Map<String, String> depFiles = new java.util.LinkedHashMap<>();
         if (uiInventory != null && !uiInventory.isEmpty()) {
             depFiles.put("AVAILABLE UI IMPORTS (ground truth — import ONLY names listed here)",
                     uiInventory.toPromptSection());
@@ -615,6 +667,20 @@ public class FrontendGeneratorNode implements WorkerNode {
             String fcSection = "FRONTEND MODULE CONTRACTS\n" + frontendContractCard.toPromptSection();
             contractSection = contractSection == null ? fcSection : contractSection + "\n\n" + fcSection;
         }
+        // Planned component prop contracts — only for files that ARE / RENDER components (component, page).
+        // From the static plan, so it is available up front and byte-identical per run (prefix-caches).
+        // Solves the same-layer sibling-prop drift the incremental FrontendContractCard cannot.
+        if (plannedPropsCard != null && !plannedPropsCard.isEmpty() && isComponentOrPagePath(entry.path())) {
+            String pp = plannedPropsCard.toPromptSection();
+            contractSection = contractSection == null ? pp : contractSection + "\n\n" + pp;
+        }
+        // Planned frontend module contracts (hooks/services/types) — for ALL files, from the static
+        // plan, byte-identical per run (prefix-caches). The frontend twin of BackendContractCard: solves
+        // same-layer consumers inventing a not-yet-generated hook/service signature.
+        if (frontendPlannedContractCard != null && !frontendPlannedContractCard.isEmpty()) {
+            String fp = frontendPlannedContractCard.toPromptSection();
+            contractSection = contractSection == null ? fp : contractSection + "\n\n" + fp;
+        }
         // Fenced foundation contract goes FIRST so the immutable spine (useAuth, useCheckout(steps),
         // shell props) is the leading, byte-identical prefix of every generation call this run.
         if (!foundationContractSection.isEmpty()) {
@@ -623,10 +689,18 @@ public class FrontendGeneratorNode implements WorkerNode {
                     : foundationContractSection + "\n\n" + contractSection;
         }
 
+        // Whole-feature context: identity + sibling map (from the card) + the effective instruction.
+        FeatureCard card = spec != null && spec.getFeatureName() != null
+                ? enrichmentCards.get(spec.getFeatureName()) : null;
+        String featureContext = FeatureCard.buildFeatureContext(card, entry.path(), featureInstruction);
+        // This file's OWN exact contract (purpose + fields + fn sigs + endpoints) appended to the role.
+        String fileContract = FileContractCard.render(spec, fileRole);
+
         String content = null;
         for (int genAttempt = 1; genAttempt <= MAX_GEN_ATTEMPTS; genAttempt++) {
-            String candidate = flashLlm.generateFileContent(entry.path(), featureInstruction,
-                    fileRole != null ? fileRole : "", depFiles, existingContent, contractSection);
+            String candidate = flashLlm.generateFileContent(entry.path(),
+                    fileContract, depFiles, existingContent,
+                    contractSection, featureContext);
             if (!TruncationDetector.looksTruncated(candidate)) {
                 content = candidate;
                 break;
@@ -1349,56 +1423,6 @@ public class FrontendGeneratorNode implements WorkerNode {
                 .collect(Collectors.toMap(FeatureSpec::getFeatureName, f -> f, (a, b) -> a));
     }
 
-    // Matches use* hook names in feature instructions — used to auto-resolve their source files.
-    private static final java.util.regex.Pattern USE_HOOK_NAME =
-            java.util.regex.Pattern.compile("\\b(use[A-Z]\\w+)\\b");
-
-    private Map<String, String> loadDependencyFiles(Path workspace, FileSpec spec,
-                                                     TypeScriptExportRegistry exportRegistry) {
-        java.util.LinkedHashMap<String, String> deps = new java.util.LinkedHashMap<>();
-        if (spec == null) return deps;
-
-        // 1. Spec-declared dependencies (importsFrom / dependsOn)
-        List<String> depPaths = spec.getImportsFrom();
-        if (depPaths == null || depPaths.isEmpty()) depPaths = spec.getDependsOn();
-        if (depPaths != null) {
-            for (String depPath : depPaths) {
-                Path file = workspace.resolve(depPath);
-                if (Files.exists(file)) {
-                    try { deps.put(depPath, Files.readString(file)); } catch (IOException ignored) {}
-                }
-            }
-        }
-
-        // 2. Auto-resolve use* hook names mentioned in the file's spec description.
-        // The planner frequently leaves imports_from empty even when a component clearly
-        // depends on a hook — this fills the gap so Flash gets the actual hook source
-        // (return type, field names) rather than only the compact contract card summary.
-        if (exportRegistry != null && spec.getFileRole() != null) {
-            String combined = (spec.getFileRole() != null ? spec.getFileRole() : "")
-                    + " " + (spec.getDescription() != null ? spec.getDescription() : "");
-            java.util.regex.Matcher m = USE_HOOK_NAME.matcher(combined);
-            java.util.Set<String> resolved = new java.util.HashSet<>();
-            while (m.find()) {
-                String hookName = m.group(1);
-                exportRegistry.resolveSpecifier(hookName).ifPresent(relNoExt -> {
-                    if (resolved.add(relNoExt) && !deps.containsKey(relNoExt)) {
-                        for (String ext : List.of(".ts", ".tsx")) {
-                            Path file = workspace.resolve(relNoExt + ext);
-                            if (Files.exists(file)) {
-                                try { deps.put(relNoExt + ext, Files.readString(file)); }
-                                catch (IOException ignored) {}
-                                break;
-                            }
-                        }
-                    }
-                });
-            }
-        }
-
-        return deps;
-    }
-
     // Matches interface/type/enum/class declarations that are NOT already exported.
     private static final Pattern UNEXPORTED_DECL =
             Pattern.compile("^(interface|type|enum|class)\\s", Pattern.MULTILINE);
@@ -1426,6 +1450,14 @@ public class FrontendGeneratorNode implements WorkerNode {
 
     private String layerName(FileEntry entry) {
         return LayerOrderUtil.frontendLayerName(entry);
+    }
+
+    /** True for app component/page files (the only consumers of the planned-props card); excludes shadcn ui. */
+    private static boolean isComponentOrPagePath(String path) {
+        if (path == null) return false;
+        String p = path.replace('\\', '/');
+        if (p.contains("/components/ui/")) return false;
+        return p.contains("/components/") || p.contains("/pages/");
     }
 
 

@@ -13,9 +13,13 @@ specified, infer nothing, add nothing, omit nothing. Any "helpful" addition is a
 3. MEMBERS: Declare only the listed fields, methods, and constructors. Match each name, type,
    modifier, and signature exactly.
 4. NO UNSOLICITED CONTENT: No comments, TODOs, or annotations the instruction doesn't name.
-5. GROUND TRUTH = PROVIDED FILES: Match every import path, type, and called signature to what
-   exists in the instruction or dependency files (e.g. getMenuById(menuId: UUID): MenuItem
-   used exactly as shown). Never fabricate a type or signature absent from both.
+5. GROUND TRUTH = THE PROVIDED CONTRACTS: You are NOT shown full dependency file bodies. The
+   interface of everything you may import is given as CONTRACTS: the MODULES catalog (exact names +
+   paths), the API SDK / FRONTEND MODULE CONTRACTS (signatures + return shapes), and PLANNED
+   COMPONENT PROPS (each component's props). Match every import path, type, called signature, and
+   prop to those and to the instruction (e.g. getMenuById(menuId: UUID): MenuItem used exactly as
+   shown). Never fabricate a type, field, prop, or signature absent from them — an unlisted member
+   does not exist.
 6. COMPILE AS-IS: Correct syntax, no dangling references you introduced.
 7. CONFLICTS: If the instruction is ambiguous or self-contradictory, follow it as literally
    as possible and choose the reading that adds the least. Never resolve ambiguity by
@@ -47,60 +51,31 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    `TS2503: Cannot find namespace 'JSX'`. Either OMIT the return-type annotation entirely (preferred —
    inference is correct) or write `(): React.JSX.Element` (with React in scope). Applies to EVERY
    page and component, default- or named-exported.
-1. TANSTACK QUERY v5 — SERVER STATE MANAGEMENT (applies to every business domain)
-   TanStack Query separates SERVER state (data from an API, cached and synchronised)
-   from LOCAL state (UI toggles, form values). Use it for any data that comes from the
-   backend: menu items, reservations, orders, trainers, blog posts, gallery images —
-   anything fetched via a service function. Never use useState + useEffect to fetch.
+1. TANSTACK QUERY v5 — SERVER STATE VIA PRE-GENERATED HOOKS (applies to every business domain)
+   Server data (anything from the backend — menu items, reservations, orders, trainers, classes,
+   testimonials, gallery images) is read and written through PRE-GENERATED TanStack hooks in
+   frontend/src/hooks/<domain>Hooks.ts — ONE hook per service function, already written by the build.
+   You CONSUME these hooks: you do NOT author a hook, and you do NOT inline useQuery/useMutation
+   against a service. Never use useState + useEffect to fetch. The MODULES catalog lists the exact
+   hook names available (e.g. `@/hooks/classHooks -> useGymClasses, useGymClass, useCreateGymClass`);
+   import the ones you need from there.
 
-   TWO HOOKS, TWO PURPOSES — never mix them:
-
-   useQuery  — READ data (GET requests). Result exposes:
-     { data, isLoading, isError, error, isFetching, refetch }
-     const { data: menuItems, isLoading } = useQuery({
-       queryKey: ['menuItems'],          // cache key — array, unique per query
-       queryFn: getAllMenuItems,         // service function from @/services/<domain>Service
-     });
-
-   useMutation — WRITE data (POST / PUT / PATCH / DELETE). Result exposes:
-     { mutate, mutateAsync, isPending, isError, isSuccess, data, error }
-     const { mutate: createItem, isPending } = useMutation({
-       mutationFn: createMenuItem,       // service function
-       onSuccess: () => queryClient.invalidateQueries({ queryKey: ['menuItems'] }),
-     });
-     // To trigger: createItem(formData)  or  await mutateAsync(formData)
+   TWO HOOK KINDS, FIXED RETURN SHAPES (bind to these exactly; the caller aliases as needed):
+   - QUERY hook (wraps a GET) → { data, isLoading, isError, error }. Keep the field name `data`;
+     alias at the call site: `const { data: classes, isLoading } = useGymClasses();`. A query hook
+     that needs an id takes it as an argument: `useGymClass(classId)`.
+   - MUTATION hook (wraps POST/PUT/PATCH/DELETE) → { mutate, mutateAsync, isPending, isError, error }.
+     `mutate`/`mutateAsync` take EXACTLY ONE argument: the single value for a one-arg service fn, or
+     ONE object for a multi-arg one.
+       const { mutate: updateClass, isPending } = useUpdateGymClass();
+       updateClass({ classId, request });   // one object — never updateClass(classId, request)
+     The generated hook already handles cache invalidation — do NOT call useQueryClient in a component/page.
 
    COMMON MISTAKES TO AVOID:
-   - NEVER call query.queryFn() — queryFn is an internal config, not callable on the result.
+   - NEVER author a hook or inline useQuery/useMutation in a component or page — import the generated hook.
+   - NEVER call a service function directly for server data — call its hook (the hook adds caching + invalidation).
    - NEVER use mutation.isLoading — it was renamed to mutation.isPending in v5.
-   - NEVER use positional form: useQuery(['key'], fn) — object form only in v5.
-   - NEVER use useState + fetch/axios for server data — use useQuery instead.
-   - ALWAYS invalidate the relevant queryKey in onSuccess so the UI refreshes.
-   - queryKey should match the domain noun: ['menuItems'], ['reservations'], ['orders'],
-     ['trainers'], ['blogPosts'], ['galleryImages'] — consistent naming prevents stale cache.
-
-   CUSTOM HOOK CONTRACT — FIXED SHAPE (mandatory whenever you wrap useQuery/useMutation in a hook,
-   for ANY domain entity — orders, menu items, bookings, posts, properties, patients, invoices,
-   whatever this business uses). The consuming page binds to a CONSTANT shape, so it must never
-   guess — return EXACTLY these fields, EXACTLY these names. (`Entity` below is a placeholder for
-   the real entity; substitute the actual type/function names from your dependency context.)
-   - QUERY hook → return `{ data, isLoading, isError, error }`. NEVER rename `data` to the domain
-     noun (NOT `{ orders }`, NOT `{ items }`, NOT `{ posts }`). The caller aliases at the call site:
-     `const { data: orders, isLoading } = useOrders()`.
-       export function useEntities(): { data: EntityDto[] | undefined; isLoading: boolean; isError: boolean; error: Error | null } {
-         const { data, isLoading, isError, error } = useQuery({ queryKey: ['entities'], queryFn: getAllEntities });
-         return { data, isLoading, isError, error };
-       }
-   - MUTATION hook → return `{ mutate, mutateAsync, isPending, isError, error }`, and `mutate`
-     takes EXACTLY ONE argument. For a multi-field mutation, that one argument is a single object —
-     NEVER a two-arg `mutate(id, body)`. Wrap the mutationFn to destructure the object.
-       export function useUpdateEntity(): { mutate: (vars: { id: string; body: EntityUpdate }) => void; mutateAsync: (vars: { id: string; body: EntityUpdate }) => Promise<EntityDto>; isPending: boolean; isError: boolean; error: Error | null } {
-         const { mutate, mutateAsync, isPending, isError, error } = useMutation({ mutationFn: ({ id, body }: { id: string; body: EntityUpdate }) => updateEntity(id, body) });
-         return { mutate, mutateAsync, isPending, isError, error };
-       }
-     Call site: `updateEntity.mutate({ id, body })` — one object argument, never `mutate(id, body)`.
-   - This fixed shape is the WHOLE point of rule 2 below: it is the cross-file contract consumers
-     bind to. Do not expose `useQuery`/`useMutation` internals beyond these fields.
+   - NEVER pass more than one argument to mutate/mutateAsync — wrap multiple fields in one object.
 2. EXPLICIT RETURN TYPES ON ALL EXPORTED FUNCTIONS (mandatory — never omit): every exported
    function or const must declare an explicit return type annotation:
      export function getLabel(id: string): string { ... }
@@ -110,11 +85,9 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    Never rely on TypeScript inference for any exported function. The return type is the cross-file
    contract — downstream files import and call this function based solely on what is declared here.
    Without the annotation the shape is invisible to static extraction and consumers will invent the
-   interface. This applies to every exported symbol: hooks, utilities, formatters, context accessors,
-   and any other named export that crosses a file boundary. For TanStack hooks the annotation is not
-   free-form: it MUST be the FIXED SHAPE from rule 1's CUSTOM HOOK CONTRACT — query → `{ data,
-   isLoading, isError, error }`, mutation → `{ mutate, mutateAsync, isPending, isError, error }` with
-   a one-argument `mutate` — so the annotated shape and the consumer's assumption cannot drift apart.
+   interface. This applies to every exported symbol: utilities, formatters, context accessors,
+   and any other named export that crosses a file boundary. (Data hooks are pre-generated with the
+   fixed shapes in rule 1 — you consume them, you do not author them here.)
 3. ZOD NUMERIC FORM FIELDS: HTML inputs yield strings — use z.coerce.number() (NOT z.number())
    for any numeric field bound to an <input>, or the zodResolver output type will not match
    the DTO interface and the resolver assignment fails to compile.
@@ -147,14 +120,15 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    export type { Foo } from './bar'  (a plain export { Foo } fails to compile).
 6. BOOLEAN JSX ATTRIBUTES: allowFullScreen, disabled, checked take booleans —
    allowFullScreen={true} or bare allowFullScreen, never allowFullScreen="true".
-7. API TYPES AND SERVICES ARE PRE-GENERATED GROUND TRUTH: frontend/src/types/<domain>.ts
-   and frontend/src/services/<domain>Service.ts are DERIVED from the backend contract and
-   already exist. Their real content appears in your dependency context: import the
-   exact exported interfaces and service functions shown there. ADMIN API functions live
-   in the same domain service as the public ones (admin-prefixed on name collisions) —
-   there is no adminXService module; the API SDK section of the contract card is the
-   complete function list. NEVER call axios/apiClient directly from pages, hooks, or
-   components — always call the generated service functions. Frontend-only types that
+7. API TYPES, SERVICES, AND HOOKS ARE PRE-GENERATED GROUND TRUTH: frontend/src/types/<domain>.ts,
+   frontend/src/services/<domain>Service.ts, and frontend/src/hooks/<domain>Hooks.ts are DERIVED
+   from the backend contract and already exist. Their real content appears in your dependency
+   context / the MODULES catalog: import the exact exported interfaces, service functions, and hooks
+   shown there. ADMIN API functions live in the same domain service as the public ones (admin-prefixed
+   on name collisions) — there is no adminXService module; the API SDK section of the contract card is
+   the complete function list. NEVER call axios/apiClient directly. For server data, call the generated
+   HOOKS (they wrap the services and add caching — see rule 1); call a generated service function
+   directly only outside React data flow (rare). Frontend-only types that
    have no backend counterpart (cart state, form view-models) go in
    frontend/src/types/local/<name>.ts; non-API service modules (localStorage persistence)
    go in frontend/src/services/local/<name>.ts.
@@ -177,11 +151,10 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    (c) Fields typed `T | null` must be null-guarded (value ?? fallback) before use in
        non-null positions.
 
-   IMPORT ONLY MODULES THAT APPEAR IN YOUR DEPENDENCY CONTEXT: never invent an import path
-   like '@/types/gymClass' because the instruction prose mentions "GymClass" — if that
-   module is not among the dependency files shown to you, the type lives in one of the
-   modules that IS shown (check their exports). An import of a non-existent module is an
-   unfixable compile error.
+   IMPORT ONLY MODULES THAT APPEAR IN THE MODULES CATALOG / CONTRACTS: never invent an import path
+   like '@/types/gymClass' because the instruction prose mentions "GymClass" — if that module is
+   not in the MODULES catalog or contracts, the type lives in one of the modules that IS listed
+   (check their exports). An import of a non-existent module is an unfixable compile error.
 
 6. IMPORT DIRECTION — NO CIRCULAR IMPORTS: imports flow ONE WAY, down the layer stack:
    PAGE → COMPONENT → HOOK → CONTEXT → SERVICE → types. A file may import only from a layer
@@ -213,6 +186,16 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    '@/'-aliased app modules — real npm packages (react, @tanstack/react-query, lucide-react,
    @radix-ui/*) and the shadcn files in the AVAILABLE UI IMPORTS list are unaffected. An
    import of a non-existent local module is an unfixable compile error.
+8b. COMPONENT PROPS ARE A FIXED CROSS-FILE CONTRACT — USE "PLANNED COMPONENT PROPS": when a
+   PLANNED COMPONENT PROPS section is present, it lists each component's exact props. It is the
+   contract BOTH the parent and the child bind to — so siblings generated in parallel agree.
+   - When you RENDER a component, pass EXACTLY those prop names and types. Passing `gymClass` when
+     the child declares `gymClassId`, or `onClassSaved` when it declares `onSuccess`, is a hard
+     TS2322/TS2739 — never rename, add, or drop a prop.
+   - When you ARE a listed component, declare EXACTLY those props (same names/types/optionality),
+     never a variant you find more convenient.
+   A component or prop absent from the section is governed by the same closed-world rule as imports:
+   it does not exist — do not invent it.
 9. AUTH STATE HYDRATES SYNCHRONOUSLY: a context that restores a session from localStorage must
    seed state with lazy useState initializers — useState(() => localStorage.getItem('token')) and
    useState(() => !!localStorage.getItem('token')) — NEVER useState(null) + a useEffect that reads
@@ -246,6 +229,14 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    `await register({ name, email, phone, password })` (one object; email and phone are optional but collect at
    least one). register() logs the user in on success — navigate home/back after; never call `login()` after it.
    The `/login` page calls `login(emailOrPhone, password)` — the identifier may be an email OR a phone number.
+6. SERVER-DERIVED IDENTITY — NEVER SEND A USER ID: the current user is resolved on the backend from the JWT
+   (foundation `@CurrentUser Integer userId`). For "the current user's own" data (orders, bookings, reservations,
+   reviews, profile, cart, checkout), send ONLY the payload — NEVER put a `userId`/`customerId`/`memberId`/`userEmail`
+   in a request body, path, or query param, and NEVER read the user id from `localStorage`/the token to attach it.
+   Do not add a `userId` field to any request DTO or create-order/booking payload; the server sets it from the JWT
+   and links rows by `Integer userId`. To show who is logged in, read `useAuth().user` — do not decode the token.
+   For "list my X" calls, hit the plain authenticated endpoint (e.g. `GET /api/v1/orders`) with no id param — the
+   `@/api/client` interceptor attaches the token and the server scopes the rows to the caller.
 
 # UI QUALITY STANDARDS (PAGE and COMPONENT files only — skip for config/service/hook/types files)
 1. LAYOUT WRAPPER:

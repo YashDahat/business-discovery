@@ -520,6 +520,80 @@ class FrontendContractCardTest {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    // ── Hook INPUT params must survive (derived getById hooks are useX(id) — consumer must pass it) ──
+
+    @Test
+    void surfacesHookInputParams() throws Exception {
+        write("frontend/src/hooks/menuHooks.ts", """
+                import { useQuery } from '@tanstack/react-query';
+                import type { MenuItemDto } from '@/types/menu';
+
+                export function useMenuItems(): { data: MenuItemDto[] | undefined; isLoading: boolean } {
+                  return {} as never;
+                }
+                export function useMenuItemById(itemId: string): { data: MenuItemDto | undefined; isLoading: boolean } {
+                  return {} as never;
+                }
+                """);
+
+        String section = FrontendContractCard.build(workspace).toPromptSection();
+
+        assertThat(section).contains("useMenuItemById(itemId: string):");   // param surfaced, not dropped
+        assertThat(section).contains("useMenuItems():");                    // no-param hook unchanged
+    }
+
+    // ── Card-gap module extraction (§3.6 R-a: services/local, lib, utils, config) ──────────────
+
+    @Test
+    void extractsLocalServiceFunctionSignatures() throws Exception {
+        write("frontend/src/services/local/cartStorage.ts", """
+                import type { CartItem } from '@/types/local/cart';
+
+                export function loadCart(): CartItem[] { return []; }
+                export const saveCart = (items: CartItem[]): void => { /* ... */ };
+                """);
+
+        String section = FrontendContractCard.build(workspace).toPromptSection();
+
+        assertThat(section).contains("@/services/local/cartStorage");
+        assertThat(section).contains("loadCart(): CartItem[]");
+        assertThat(section).contains("saveCart(items: CartItem[]): void");
+    }
+
+    @Test
+    void extractsTypedConstFromConfig() throws Exception {
+        write("frontend/src/config/siteConfig.ts", """
+                import type { SiteConfig } from '@/shell';
+
+                export const siteConfig: SiteConfig = {
+                  header: { brandName: 'ABS Fitness' },
+                  footer: { phone: '+91 90000 00000' },
+                };
+                """);
+
+        String section = FrontendContractCard.build(workspace).toPromptSection();
+
+        assertThat(section).contains("@/config/siteConfig");
+        assertThat(section).contains("siteConfig: SiteConfig");
+    }
+
+    @Test
+    void extractsLibUtilFunction() throws Exception {
+        write("frontend/src/lib/utils.ts", """
+                import { type ClassValue, clsx } from 'clsx';
+                import { twMerge } from 'tailwind-merge';
+
+                export function cn(...inputs: ClassValue[]): string {
+                  return twMerge(clsx(inputs));
+                }
+                """);
+
+        String section = FrontendContractCard.build(workspace).toPromptSection();
+
+        assertThat(section).contains("@/lib/utils");
+        assertThat(section).contains("cn(...inputs: ClassValue[]): string");
+    }
+
     private void write(String rel, String content) throws Exception {
         Path p = workspace.resolve(rel);
         Files.createDirectories(p.getParent());

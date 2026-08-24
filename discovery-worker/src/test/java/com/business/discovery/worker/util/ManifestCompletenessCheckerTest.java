@@ -109,6 +109,110 @@ class ManifestCompletenessCheckerTest {
         assertThat(mr.referencedBy()).contains("feature:admin");
     }
 
+    // ── hook-symbol (findDanglingHooks) ──────────────────────────────────────
+
+    private FileSpec controller(String path, String... handlerNames) {
+        return FileSpec.builder()
+                .fileName(path.substring(path.lastIndexOf('/') + 1))
+                .filePath(path).fileType("BACKEND")
+                .publicFunctions(java.util.Arrays.stream(handlerNames)
+                        .map(n -> com.business.discovery.worker.service.llm.PublicFunction.builder().name(n).build())
+                        .toList())
+                .featureName("classes").build();
+    }
+
+    private FileSpec componentWithRole(String path, String fileRole) {
+        return FileSpec.builder()
+                .fileName(path.substring(path.lastIndexOf('/') + 1))
+                .filePath(path).fileType("FRONTEND").fileRole(fileRole)
+                .description("component").featureName("classes").build();
+    }
+
+    @Test
+    void flagsHookNamedInProseWithNoBackingService() {
+        FeatureSpec f = FeatureSpec.builder().featureName("classes")
+                .featureInstruction("The dashboard calls useAnalyticsSummary() to render KPIs.")
+                .build();
+        ArchitectureSpec spec = ArchitectureSpec.builder()
+                .files(List.of(page("frontend/src/pages/AdminDashboardPage.tsx", List.of(), "home")))
+                .features(List.of(f)).build();
+
+        List<String> hooks = ManifestCompletenessChecker.findDanglingHooks(spec, workspace)
+                .stream().map(ManifestCompletenessChecker.DanglingHook::hookName).toList();
+
+        assertThat(hooks).contains("useAnalyticsSummary");
+    }
+
+    @Test
+    void doesNotFlagServiceBackedHook() {
+        // abs-fitness regression safety: ClassForm's role names useCreateGymClass/useUpdateGymClass;
+        // the backend has createGymClass/updateGymClass handlers, so the mechanical generator will emit
+        // those hooks → they must NOT be flagged.
+        ArchitectureSpec spec = ArchitectureSpec.builder()
+                .files(List.of(
+                        controller("backend/src/main/java/com/absfitness/controller/AdminClassController.java",
+                                "createGymClass", "updateGymClass", "getAllGymClasses"),
+                        componentWithRole("frontend/src/components/admin/ClassForm.tsx",
+                                "COMPONENT — consumes the useCreateGymClass, useUpdateGymClass, and useGymClasses hooks.")))
+                .features(List.of()).build();
+
+        List<String> hooks = ManifestCompletenessChecker.findDanglingHooks(spec, workspace)
+                .stream().map(ManifestCompletenessChecker.DanglingHook::hookName).toList();
+
+        assertThat(hooks).doesNotContain("useCreateGymClass", "useUpdateGymClass", "useGymClasses");
+    }
+
+    @Test
+    void doesNotFlagFoundationHookOnDisk() throws IOException {
+        writeOnDisk("hooks/useAuth.ts", "export function useAuth() { return null; }");
+        FeatureSpec f = FeatureSpec.builder().featureName("classes")
+                .featureInstruction("The page reads the current user via useAuth().").build();
+        ArchitectureSpec spec = ArchitectureSpec.builder()
+                .files(List.of(page("frontend/src/pages/ProfilePage.tsx", List.of(), "profile")))
+                .features(List.of(f)).build();
+
+        List<String> hooks = ManifestCompletenessChecker.findDanglingHooks(spec, workspace)
+                .stream().map(ManifestCompletenessChecker.DanglingHook::hookName).toList();
+
+        assertThat(hooks).doesNotContain("useAuth");
+    }
+
+    @Test
+    void doesNotFlagCompositeHookDeclaredAsPublicFunction() {
+        FileSpec composite = FileSpec.builder()
+                .fileName("useClassBooking.ts").filePath("frontend/src/hooks/useClassBooking.ts")
+                .fileType("FRONTEND")
+                .publicFunctions(List.of(com.business.discovery.worker.service.llm.PublicFunction.builder()
+                        .name("useClassBooking").build()))
+                .featureName("classes").build();
+        FeatureSpec f = FeatureSpec.builder().featureName("classes")
+                .featureInstruction("ClassCard uses useClassBooking(gymClassId) to book.").build();
+        ArchitectureSpec spec = ArchitectureSpec.builder()
+                .files(List.of(composite,
+                        page("frontend/src/components/classes/ClassCard.tsx", List.of(), "card")))
+                .features(List.of(f)).build();
+
+        List<String> hooks = ManifestCompletenessChecker.findDanglingHooks(spec, workspace)
+                .stream().map(ManifestCompletenessChecker.DanglingHook::hookName).toList();
+
+        assertThat(hooks).doesNotContain("useClassBooking");
+    }
+
+    @Test
+    void carriesReferencedByForDanglingHook() {
+        FeatureSpec f = FeatureSpec.builder().featureName("classes")
+                .featureInstruction("Calls useGhostHook().").build();
+        ArchitectureSpec spec = ArchitectureSpec.builder()
+                .files(List.of(page("frontend/src/pages/X.tsx", List.of(), "x")))
+                .features(List.of(f)).build();
+
+        ManifestCompletenessChecker.DanglingHook dh =
+                ManifestCompletenessChecker.findDanglingHooks(spec, workspace).stream()
+                        .filter(h -> h.hookName().equals("useGhostHook")).findFirst().orElseThrow();
+
+        assertThat(dh.referencedBy()).contains("feature:classes");
+    }
+
     private FileSpec backendFile(String path, List<String> importsFrom) {
         return FileSpec.builder()
                 .fileName(path.substring(path.lastIndexOf('/') + 1))

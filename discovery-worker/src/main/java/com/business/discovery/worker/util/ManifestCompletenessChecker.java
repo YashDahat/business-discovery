@@ -3,6 +3,7 @@ package com.business.discovery.worker.util;
 import com.business.discovery.worker.service.llm.ArchitectureSpec;
 import com.business.discovery.worker.service.llm.FeatureSpec;
 import com.business.discovery.worker.service.llm.FileSpec;
+import com.business.discovery.worker.service.llm.PublicFunction;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
@@ -45,10 +46,21 @@ public final class ManifestCompletenessChecker {
     /** A prose ref is trusted only when its final segment names a component (PascalCase) or a hook. */
     private static final Pattern COMPONENT_OR_HOOK = Pattern.compile("[A-Z][A-Za-z0-9]*|use[A-Z][A-Za-z0-9]*");
 
+    /** A bare {@code useXxx} hook symbol named in prose (no {@code @/} path). */
+    private static final Pattern HOOK_SYMBOL = Pattern.compile("\\buse[A-Z][A-Za-z0-9]*\\b");
+    /** {@code export [default] [async] function|const useXxx} declaration on disk. */
+    private static final Pattern ON_DISK_HOOK_DECL = Pattern.compile(
+            "export\\s+(?:default\\s+)?(?:async\\s+)?(?:function|const)\\s+(use[A-Z][A-Za-z0-9]*)");
+    /** {@code export { useXxx, ... }} re-export on disk. */
+    private static final Pattern ON_DISK_REEXPORT = Pattern.compile("export\\s*\\{([^}]*)}");
+
     private ManifestCompletenessChecker() {}
 
     /** A referenced-but-absent frontend module, with the files/features that referenced it. */
     public record MissingRef(String importPath, Set<String> referencedBy) {}
+
+    /** A hook symbol named in enrichment prose that no service backs, no file declares, and the foundation does not ship. */
+    public record DanglingHook(String hookName, Set<String> referencedBy) {}
 
     /**
      * @param spec      the (enriched) architecture spec
@@ -147,7 +159,107 @@ public final class ManifestCompletenessChecker {
         return missing;
     }
 
+    /**
+     * Hook-symbol completeness: finds {@code useXxx} hooks NAMED IN ENRICHMENT PROSE (a file's
+     * {@code file_role}/{@code description} or a feature's {@code feature_instruction}) that nothing
+     * will provide — the abs-fitness defect, where the brief told {@code ClassForm} to consume
+     * {@code useCreateGymClass}/{@code useUpdateGymClass} but no file declared them (ARCHITECTURE.json
+     * exporter set = NONE) → TS2724 → 30 wasted fix rounds.
+     *
+     * <p>Written for the target state (CRUD hooks are DERIVED by the mechanical generator, §3 of the
+     * design doc): a hook is PROVIDED when
+     * <ol>
+     *   <li>a backend handler/service method forward-maps to it via {@link HookNaming} (the generator
+     *       will emit it) — so a service-backed hook like {@code useCreateGymClass} is NOT flagged; or</li>
+     *   <li>some file declares it as a {@code public_function} (a composite, LLM-authored hook); or</li>
+     *   <li>the foundation already ships it on disk ({@code useAuth}, {@code useCart}, {@code useCheckout}).</li>
+     * </ol>
+     * Anything else is a capability the enrichment invented with no backing — a genuine dangling hook.
+     * Complements (does not duplicate) {@link #findMissingFrontend}, which is path-level; this is
+     * symbol-level. Detection only — the caller decides whether to warn, repair the prose, or fail.
+     */
+    public static List<DanglingHook> findDanglingHooks(ArchitectureSpec spec, Path workspace) {
+        Set<String> provided = new TreeSet<>();
+
+        for (FileSpec f : nz(spec.getFiles())) {
+            // (1) hooks the generator will emit from every backend handler/service method.
+            if (f.getFilePath() != null && f.getFilePath().startsWith(BACKEND_ROOT)) {
+                for (PublicFunction pf : nz(f.getPublicFunctions())) {
+                    if (pf != null && pf.getName() != null) {
+                        String h = HookNaming.hookFor(pf.getName());
+                        if (h != null) provided.add(h);
+                    }
+                }
+            }
+            // (2) composite / already-planned hooks declared as a public_function.
+            for (PublicFunction pf : nz(f.getPublicFunctions())) {
+                if (pf != null && pf.getName() != null && HOOK_SYMBOL.matcher(pf.getName().trim()).matches()) {
+                    provided.add(pf.getName().trim());
+                }
+            }
+        }
+        // (3) foundation hooks already on disk (pre-cloned before planning).
+        provided.addAll(scanOnDiskHooks(workspace.resolve(FRONTEND_ROOT)));
+
+        // Referenced hook symbols in prose → who named them.
+        Map<String, Set<String>> referenced = new LinkedHashMap<>();
+        for (FileSpec f : nz(spec.getFiles())) {
+            String owner = f.getFilePath() != null ? f.getFilePath() : f.getFileName();
+            for (String sym : hookSymbols(f.getFileRole())) addRef(referenced, sym, owner);
+            for (String sym : hookSymbols(f.getDescription())) addRef(referenced, sym, owner);
+        }
+        for (FeatureSpec ft : nz(spec.getFeatures())) {
+            for (String sym : hookSymbols(ft.getFeatureInstruction())) {
+                addRef(referenced, sym, "feature:" + ft.getFeatureName());
+            }
+        }
+
+        List<DanglingHook> dangling = new ArrayList<>();
+        for (Map.Entry<String, Set<String>> e : referenced.entrySet()) {
+            if (!provided.contains(e.getKey())) {
+                dangling.add(new DanglingHook(e.getKey(), new TreeSet<>(e.getValue())));
+            }
+        }
+        return dangling;
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    /** All {@code useXxx} symbols named in a prose blob. */
+    private static List<String> hookSymbols(String prose) {
+        List<String> out = new ArrayList<>();
+        if (prose == null || prose.isBlank()) return out;
+        Matcher m = HOOK_SYMBOL.matcher(prose);
+        while (m.find()) out.add(m.group());
+        return out;
+    }
+
+    /** Scans {@code frontend/src} for exported {@code useXxx} hook symbols (declarations + re-exports). */
+    private static Set<String> scanOnDiskHooks(Path fsrc) {
+        Set<String> found = new TreeSet<>();
+        if (!Files.exists(fsrc)) return found;
+        try (Stream<Path> s = Files.walk(fsrc)) {
+            s.filter(Files::isRegularFile)
+             .filter(p -> p.toString().endsWith(".ts") || p.toString().endsWith(".tsx"))
+             .forEach(p -> {
+                 try {
+                     String content = Files.readString(p);
+                     Matcher d = ON_DISK_HOOK_DECL.matcher(content);
+                     while (d.find()) found.add(d.group(1));
+                     Matcher r = ON_DISK_REEXPORT.matcher(content);
+                     while (r.find()) {
+                         for (String part : r.group(1).split(",")) {
+                             String sym = part.trim().split("\\s+")[0].trim();
+                             if (HOOK_SYMBOL.matcher(sym).matches()) found.add(sym);
+                         }
+                     }
+                 } catch (IOException ignored) { /* unreadable file → skip */ }
+             });
+        } catch (IOException e) {
+            log.warn("[ManifestCompletenessChecker] Could not scan hooks under {}: {}", fsrc, e.getMessage());
+        }
+        return found;
+    }
 
     /** Normalizes a structured import specifier to a workspace-relative, extension-less path, or null if non-local. */
     static String normalize(String spec) {

@@ -89,8 +89,8 @@ public class InfraGeneratorNode implements WorkerNode {
                           + "\nBusiness: " + ctx.getBriefCtx().businessName()
                           + "\nTech stack: " + ctx.getBriefCtx().techStack();
 
-                // INFRA features aren't enriched — pass empty featureInstruction
-                String content = llm.generateFileContent(entry.path(), "", fileRole, configContext, existingContent);
+                // INFRA features aren't enriched — no feature context, just the per-file role
+                String content = llm.generateFileContent(entry.path(), fileRole, configContext, existingContent);
 
                 Files.writeString(filePath, content);
                 upsertRecord(ctx, entry.path(), GeneratedFile.FileType.INFRA);

@@ -125,11 +125,16 @@ instead of removing it, and leave the tangled design in place.
 
 ## Exactness
 Exact identifiers, not descriptions — literal field names/casing ("menuItemId");
-concrete types ("UUID", "decimal(10,2)", "List<MenuItem>", never "number"/"object");
+concrete types ("Long", "Integer", "BigDecimal", "LocalDate", "List<MenuItem>", never "number"/"object", and never "UUID" for ids — see IDs & user identity below);
 endpoints as method + full path + params ("GET /api/v1/menus/{menuId}/items?category={category}");
 return AND error types with status codes. Integrating artifacts must match exactly —
-if a controller calls getOrderById(UUID): OrderResponse, the service declares it
+if a controller calls getOrderById(Long): OrderResponse, the service declares it
 identically. Trace every cross-reference before finalizing.
+
+## IDs & user identity (BACKEND — mandatory; this is the #1 source of runtime drift)
+- Every domain entity's PRIMARY KEY is `Long id` with `@GeneratedValue(strategy = GenerationType.IDENTITY)` — NEVER a UUID. Every `*Id` field that references another domain entity is that entity's `Long id`. Do not emit a UUID-typed `id` or `*Id` anywhere.
+- Reference the platform USER by `Integer userId` (= User.id of the fenced foundation `User`). A controller obtains it with the foundation resolver `@CurrentUser Integer userId`; the frontend NEVER sends a user id. In every user-owned entity/DTO (order, booking, reservation, review, appointment, …) the user link is `Integer userId`, set server-side from `@CurrentUser`.
+- NEVER type the user link as UUID, NEVER invent a separate `memberId`/`customerId` of a different type, and NEVER store email/phone as the reference (those are login + lookup keys only). A service that needs the current user takes `Integer userId`; a "my own rows" query filters by `userId` — do not expose a user-id path param.
 
 ## Layer-specific field rules
 - MODEL: public_variables = ALL @Column fields with Java type + constraints; api_endpoints = null
@@ -138,9 +143,12 @@ identically. Trace every cross-reference before finalizing.
 - CONTROLLER: api_endpoints = FULL endpoint list; public_functions = handler method signatures
 - DTO: public_variables = ALL fields with Java type + Bean Validation annotations; api_endpoints = null
 - EXCEPTION: minimal public_functions; api_endpoints = null
-- PAGE: api_endpoints_consumed = null (pages call hooks, not backend directly)
+- PAGE: api_endpoints_consumed = null (pages consume the build's derived hooks by capability, not the backend directly)
 - COMPONENT: public_functions = component name with props type; api_endpoints = null
-- HOOK: public_functions = the hook signature; api_endpoints_consumed = null (hooks call services)
+- HOOK: data hooks are DERIVED by the build (one TanStack hook per service function) — they are
+  NOT in the files array. Never emit a HOOK entry, and never author or name a hook (no
+  "useCreateGymClass"). When a file's role would "use the useX hook", describe the CAPABILITY
+  instead ("fetch all classes", "create a class") and let the build wire the generated hook.
 - SERVICE (frontend): api_endpoints_consumed = backend endpoints this service calls; public_functions = all exported async functions
 
 ## file_role

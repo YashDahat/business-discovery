@@ -80,7 +80,7 @@ class FrontendGeneratorNodeTest {
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(1);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), any(), any(), any()))
                 .thenReturn("export default function Component() { return null; }");
 
         node.execute(ctx);
@@ -112,7 +112,7 @@ class FrontendGeneratorNodeTest {
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(1);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), any(), any(), any()))
                 .thenReturn("export default function C() { return null; }");
 
         node.execute(ctx);
@@ -163,7 +163,7 @@ class FrontendGeneratorNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         // lenient: the LLM throws before the per-layer git checkpoint ever reads the branch
         lenient().when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), any(), any(), any()))
                 .thenThrow(new WorkerException(FailureType.INFRA, "LLM timeout"));
 
         assertThatThrownBy(() -> node.execute(ctx))
@@ -235,7 +235,7 @@ class FrontendGeneratorNodeTest {
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(1);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), any(), any(), any()))
                 .thenReturn("export type Placeholder = {};");
 
         node.execute(ctx);
@@ -266,12 +266,13 @@ class FrontendGeneratorNodeTest {
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(2);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), eq("// old"), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), eq("// old"), any(), any()))
                 .thenReturn("// updated");
 
         node.execute(ctx);
 
-        verify(flashLlm).generateFileContent(anyString(), eq("update instruction"), anyString(), anyMap(), eq("// old"), any());
+        verify(flashLlm).generateFileContent(anyString(), anyString(), anyMap(), eq("// old"), any(),
+                argThat(fc -> fc != null && fc.contains("update instruction")));
         assertThat(Files.readString(existing)).isEqualTo("// updated");
     }
 

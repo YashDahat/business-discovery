@@ -87,6 +87,16 @@ public final class FrontendContractCard {
             "^export\\s+(?:default\\s+)?(?:const|function|enum|class|let|var)\\s+",
             Pattern.MULTILINE);
 
+    // Exported function (or arrow-const function) in a card-gap module — pattern ends on the params' '('.
+    private static final Pattern MODULE_FN = Pattern.compile(
+            "^export\\s+(?:default\\s+)?(?:async\\s+)?(?:function\\s+(\\w+)"
+          + "|const\\s+(\\w+)\\s*=\\s*(?:async\\s*)?)\\s*\\(",
+            Pattern.MULTILINE);
+    // Exported typed non-function const: `export const siteConfig: SiteConfig = {…}`.
+    private static final Pattern MODULE_TYPED_CONST = Pattern.compile(
+            "^export\\s+const\\s+(\\w+)\\s*:\\s*([^=\\n]+?)\\s*=",
+            Pattern.MULTILINE);
+
     // ── Fence markers (mirrors FrontendGeneratorNode + CartSpineScaffold) ─────
 
     private static final String CART_SPINE_MARKER      = "GENERATED cart spine";
@@ -139,6 +149,10 @@ public final class FrontendContractCard {
         scanDirectory(card, src.resolve("shell"),      "shell");      // foundation scaffold — AdminLayout etc.
         scanDirectory(card, src.resolve("types"),      "types");      // classifyKind skips derived files
         scanDirectory(card, src.resolve("components"), "components"); // classifyKind skips ui/
+        scanDirectory(card, src.resolve("services/local"), "module"); // non-API services (localStorage, formatters)
+        scanDirectory(card, src.resolve("lib"),        "module");     // cn() etc.
+        scanDirectory(card, src.resolve("utils"),      "module");
+        scanDirectory(card, src.resolve("config"),     "module");     // siteConfig
 
         log.info("[FrontendContractCard] Built from disk: {} module(s)", card.moduleCount());
         return card;
@@ -260,6 +274,13 @@ public final class FrontendContractCard {
             return "type";
         }
 
+        // Card-gap modules the dependency-body reader used to cover (services/local, lib, utils,
+        // config/siteConfig) — extract their exported function/const signatures so dropping the
+        // body reader (§3.6 R-a) does not leave a consumer with a name-only catalog entry.
+        if (path.contains("/services/local/")) return "module";
+        if (path.contains("/lib/") || path.contains("/utils/") || path.contains("/util/")) return "module";
+        if (path.contains("/config/")) return "module";
+
         return null;
     }
 
@@ -275,7 +296,12 @@ public final class FrontendContractCard {
             extractProps(content, sigs);
         }
 
-        // Hooks/types/contexts/shell: extract exported interfaces and type aliases
+        // Card-gap modules (services/local, lib, utils, config): exported fn + typed-const signatures.
+        if ("module".equals(kind)) {
+            extractModuleSignatures(content, sigs);
+        }
+
+        // Hooks/types/contexts/shell/module: extract exported interfaces and type aliases
         if (!"component".equals(kind)) {
             extractTypes(content, sigs);
         }
@@ -305,6 +331,9 @@ public final class FrontendContractCard {
             int paramOpen = m.end() - 1;                       // pattern ends on the params' '('
             int paramClose = matchDelims(content, paramOpen, '(', ')');
             if (paramClose < 0) continue;
+            // Input params matter now that data hooks are derived: a getById hook is useX(id: string),
+            // and a consumer reading only the card must know to pass the id (else TS2554).
+            String prefix = name + "(" + collapse(content.substring(paramOpen + 1, paramClose)) + ")";
 
             int i = skipWs(content, paramClose + 1);
             String sig;
@@ -314,18 +343,53 @@ public final class FrontendContractCard {
                 if (i < content.length() && content.charAt(i) == '{') {          // object return type
                     String body = matchBraces(content, i);
                     if (body == null) continue;
-                    sig = name + "(): { " + collapse(body) + " }";
+                    sig = prefix + ": { " + collapse(body) + " }";
                 } else {                                                          // named/generic return type
                     String rt = readReturnType(content, i);
                     if (rt == null || rt.isBlank()) continue;
-                    sig = name + "(): " + collapse(rt);
+                    sig = prefix + ": " + collapse(rt);
                 }
             } else {
                 // Gap A — no annotation; recover the shape from the return literal (names only).
                 String shape = extractReturnLiteralShape(content, paramClose + 1);
                 if (shape == null) continue;
-                sig = name + "(): " + shape;
+                sig = prefix + ": " + shape;
             }
+            if (!sigs.contains(sig)) sigs.add(sig);
+        }
+    }
+
+    // ── Card-gap module extraction (services/local, lib, utils, config) ─────────────────────────
+
+    /**
+     * Extracts a card-gap module's exported surface: each function as {@code name(params): ret}
+     * (params + return read brace-aware so nested generics survive) and each typed non-function const
+     * as {@code name: Type}. Lets a consumer import from a local service / util / config without the
+     * dependency-body reader (§3.6).
+     */
+    private static void extractModuleSignatures(String content, List<String> sigs) {
+        Matcher m = MODULE_FN.matcher(content);
+        while (m.find()) {
+            String name = m.group(1) != null ? m.group(1) : m.group(2);
+            int paramOpen = m.end() - 1;
+            int paramClose = matchDelims(content, paramOpen, '(', ')');
+            if (paramClose < 0) continue;
+            String params = collapse(content.substring(paramOpen + 1, paramClose));
+            int i = skipWs(content, paramClose + 1);
+            String ret = "";
+            if (i < content.length() && content.charAt(i) == ':') {
+                String rt = readReturnType(content, skipWs(content, i + 1));
+                if (rt != null && !rt.isBlank()) ret = ": " + collapse(rt);
+            }
+            String sig = name + "(" + params + ")" + ret;
+            if (!sigs.contains(sig)) sigs.add(sig);
+        }
+        Matcher c = MODULE_TYPED_CONST.matcher(content);
+        while (c.find()) {
+            String name = c.group(1);
+            boolean alreadyFn = sigs.stream().anyMatch(s -> s.startsWith(name + "("));
+            if (alreadyFn) continue;                       // arrow-fn const already captured above
+            String sig = name + ": " + collapse(c.group(2));
             if (!sigs.contains(sig)) sigs.add(sig);
         }
     }
