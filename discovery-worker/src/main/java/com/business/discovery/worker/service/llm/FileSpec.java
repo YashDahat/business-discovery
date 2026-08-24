@@ -46,4 +46,13 @@ public class FileSpec {
      * falls back to the feature-level FeatureSpec.changeRequired — the pre-file-grain behavior.
      */
     private Boolean changeRequired;
+
+    /**
+     * True once ContractReconciler has set this file's interface — i.e. its signatures were
+     * cross-checked against its producers/consumers and the foundation, so they are AUTHORITATIVE.
+     * Null/false means the interface is only the planned/enriched one (best-available, not
+     * reconciled). Lets generation label a contract "reconciled" vs "planned" and lets a consumer
+     * treat a reconciled dependency interface as ground truth over the dependency's raw body.
+     */
+    private Boolean contractReconciled;
 }

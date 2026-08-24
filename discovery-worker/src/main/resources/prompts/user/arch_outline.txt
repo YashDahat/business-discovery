@@ -84,33 +84,33 @@ NEVER plan any other file under frontend/src/services/ (no admin{Domain}Service.
 admin CRUD functions live in the derived <domain>Service.ts; see Step 1b). Non-API
 modules go in frontend/src/services/local/<name>.ts.
 
-ALWAYS include these baseline files regardless of business type:
+BASELINE FILES — what is fenced (DO NOT PLAN) vs what you plan.
+
+PRE-SCAFFOLDED — DO NOT PLAN. These already exist on disk, fenced. Never emit a FileSpec for them and
+never re-declare their shapes — the system instructions' PRE-SCAFFOLDED sections and
+frontend/FOUNDATION_CONTRACT.md are the single source of truth:
+- Backend auth spine: model/User, model/Role (exactly ADMIN, USER — bare authorities, never ROLE_-
+  prefixed), UserRepository, UserService, JwtUtil, JwtAuthFilter, SecurityConfig, PasswordEncoderConfig,
+  AuthController, AuthRequest/AuthResponse, AdminInitializer, SpaController.
+- Backend payment spine (PaymentService / PaymentGateway / Payment / ... — see system instructions).
+- Frontend auth: @/context/AuthContext + @/hooks/useAuth (AuthProvider is already mounted at the app
+  root; consume auth ONLY via useAuth() — there is NO authService.ts and NO types/auth.ts; login is
+  email-OR-phone) and @/api/client (the axios instance; the JWT is attached automatically).
+- Frontend site shell @/shell: SiteLayout, SiteHeader, SiteFooter (admin-entry link already inside
+  SiteHeader) and the headless cart framework @/cart.
+
+ALWAYS include these baseline files regardless of business type (these you DO plan):
 - backend/src/main/java/com/{{slug}}/exception/GlobalExceptionHandler.java (EXCEPTION)
 - backend/src/main/java/com/{{slug}}/dto/ErrorResponse.java (DTO)
-- backend/src/main/java/com/{{slug}}/model/User.java (MODEL) and model/Role.java (MODEL, enum: ADMIN, CUSTOMER)
-- backend/src/main/java/com/{{slug}}/repository/UserRepository.java (REPOSITORY)
-- backend/src/main/java/com/{{slug}}/service/UserService.java (SERVICE) — MUST implement
-  UserDetailsService: loadUserByUsername queries UserRepository by the login identifier and
-  maps User's roles to "ROLE_"-prefixed GrantedAuthority. SecurityConfig and JwtAuthFilter
-  constructor-inject UserDetailsService for DaoAuthenticationProvider — this compiles clean
-  but crash-loops the whole app at boot if nothing implements the interface.
-- backend/src/main/java/com/{{slug}}/util/JwtUtil.java (UTIL)
-- backend/src/main/java/com/{{slug}}/security/JwtAuthFilter.java (CONFIG)
-- backend/src/main/java/com/{{slug}}/config/SecurityConfig.java (CONFIG) — passwordEncoder()
-  MUST carry @Bean (never a plain helper method) — a missing @Bean fails the same way for
-  anything that injects PasswordEncoder
-- backend/src/main/java/com/{{slug}}/config/AdminInitializer.java (CONFIG)
-- backend/src/main/java/com/{{slug}}/config/DataSeeder.java (CONFIG)
-- backend/src/main/java/com/{{slug}}/controller/AuthController.java (CONTROLLER)
-- backend/src/main/java/com/{{slug}}/controller/SpaController.java (CONTROLLER)
-- backend/src/main/java/com/{{slug}}/dto/AuthRequest.java and dto/AuthResponse.java (DTO)
-- frontend/src/context/AuthContext.tsx (CONTEXT)
-- frontend/src/services/authService.ts (SERVICE) + frontend/src/types/auth.ts (UTIL)
-- frontend/src/hooks/useAuth.ts (HOOK)
-- frontend/src/components/ProtectedRoute.tsx, Layout.tsx, Header.tsx, Footer.tsx, AdminLayout.tsx (COMPONENT)
-- frontend/src/pages/LoginPage.tsx and AdminDashboardPage.tsx (PAGE)
-- frontend/src/api/client.ts (SERVICE)
-- frontend/src/App.tsx (COMPONENT)
+- frontend/src/config/siteConfig.ts (UTIL) — configures the fenced SiteHeader/SiteFooter; the ONLY
+  place business-specific shell content lives
+- frontend/src/components/ProtectedRoute.tsx (COMPONENT) — YOUR route guard (NOT in the foundation):
+  one component reading useAuth(), prop allowedRoles?: string[], reused for signed-in and admin routes
+- frontend/src/components/AdminLayout.tsx (COMPONENT) — YOUR admin sidebar shell (checks role ADMIN)
+- frontend/src/pages/LoginPage.tsx and frontend/src/pages/SignupPage.tsx (PAGE) — call useAuth()
+  login / register; never re-declare the auth context
+- frontend/src/pages/AdminDashboardPage.tsx (PAGE) — the /admin landing (wrapped in AdminLayout)
+Do NOT plan frontend/src/routes.ts or frontend/src/App.tsx — both are derived from this plan.
 
 IMPORTANT — imports_from and depends_on must use FULL relative file paths (e.g.
 "backend/src/main/java/com/{{slug}}/dto/AuthResponse.java"), not just filenames.
@@ -130,7 +130,8 @@ entries (layer: COMPONENT), each listed in the page's imports_from and grouped i
 SAME feature as the page.
 
 Also check the service layer: no file under frontend/src/services/ except one
-<domain>Service.ts per backend domain (plus authService.ts) or services/local/*.
+<domain>Service.ts per backend domain or services/local/* (there is NO authService.ts — auth is
+consumed through the fenced @/hooks/useAuth).
 Every file that calls the API lists its <domain>Service.ts in imports_from. Do NOT
 plan frontend/src/routes.ts — it is derived from this plan, as is App.tsx's route
 table; pages must follow the PAGE NAMING → ROUTE convention from Step 3.

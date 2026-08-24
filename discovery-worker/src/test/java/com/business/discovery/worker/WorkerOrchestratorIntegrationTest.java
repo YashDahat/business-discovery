@@ -219,10 +219,11 @@ class WorkerOrchestratorIntegrationTest {
             }
             return "// generated";
         };
-        // Stub both overloads — the generator nodes call the 6-arg form (shared contract section).
-        when(geminiFlashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
+        // Stub both overloads — Infra calls the 4-arg form, backend/frontend the 6-arg form
+        // (shared contract section + feature context).
+        when(geminiFlashLlm.generateFileContent(anyString(), anyString(), anyMap(), any()))
                 .thenAnswer(generatedAnswer);
-        when(geminiFlashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
+        when(geminiFlashLlm.generateFileContent(anyString(), anyString(), anyMap(), any(), any(), any()))
                 .thenAnswer(generatedAnswer);
 
         // GitHub stubs

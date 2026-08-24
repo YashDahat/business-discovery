@@ -80,7 +80,7 @@ class FrontendGeneratorNodeTest {
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(1);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), any(), any(), any()))
                 .thenReturn("export default function Component() { return null; }");
 
         node.execute(ctx);
@@ -103,15 +103,16 @@ class FrontendGeneratorNodeTest {
         lenient().when(buildToolService.runNpmInstallDevPackages(any(), any(String[].class)))
                 .thenReturn(new BuildToolService.BuildResult(0, ""));
 
-        String appPath = "frontend/src/App.tsx";
-        writeSpec(tempDir, specEntry(appPath, "FRONTEND", "PLANNED", "instruction App"));
-        when(ctx.getFileManifest()).thenReturn(List.of(new FileEntry(appPath, FileType.FRONTEND, "Root")));
+        // A regular component (App.tsx is the fenced shell and would never reach Flash).
+        String appPath = "frontend/src/components/Hero.tsx";
+        writeSpec(tempDir, specEntry(appPath, "FRONTEND", "PLANNED", "instruction Hero"));
+        when(ctx.getFileManifest()).thenReturn(List.of(new FileEntry(appPath, FileType.FRONTEND, "Hero")));
         when(ctx.getBriefCtx()).thenReturn(mockBriefContext());
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(1);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), any(), any(), any()))
                 .thenReturn("export default function C() { return null; }");
 
         node.execute(ctx);
@@ -151,7 +152,8 @@ class FrontendGeneratorNodeTest {
 
     @Test
     void llmThrowsInfraException_propagates() throws Exception {
-        String filePath = "frontend/src/App.tsx";
+        // A regular component — App.tsx is the fenced shell and never round-trips through Flash.
+        String filePath = "frontend/src/components/Hero.tsx";
         writeSpec(tempDir, specEntry(filePath, "FRONTEND", "PLANNED", "instruction"));
 
         when(ctx.getFileManifest()).thenReturn(List.of(
@@ -161,7 +163,7 @@ class FrontendGeneratorNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         // lenient: the LLM throws before the per-layer git checkpoint ever reads the branch
         lenient().when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), any(), any(), any()))
                 .thenThrow(new WorkerException(FailureType.INFRA, "LLM timeout"));
 
         assertThatThrownBy(() -> node.execute(ctx))
@@ -233,7 +235,7 @@ class FrontendGeneratorNodeTest {
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(1);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any(), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), any(), any(), any()))
                 .thenReturn("export type Placeholder = {};");
 
         node.execute(ctx);
@@ -246,7 +248,9 @@ class FrontendGeneratorNodeTest {
 
     @Test
     void requestedChangesMode_changeRequiredTrue_regeneratesFile() throws Exception {
-        String filePath = "frontend/src/App.tsx";
+        // A genuinely editable component — App.tsx is now the frozen shell and is fenced, so it
+        // would never round-trip through Flash regardless of changeRequired.
+        String filePath = "frontend/src/components/ThemeToggle.tsx";
         Path existing = tempDir.resolve(filePath);
         Files.createDirectories(existing.getParent());
         Files.writeString(existing, "// old");
@@ -262,12 +266,13 @@ class FrontendGeneratorNodeTest {
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(2);
         when(ctx.getGithubBranch()).thenReturn("feature/test");
-        when(flashLlm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), eq("// old"), any()))
+        when(flashLlm.generateFileContent(anyString(), anyString(), anyMap(), eq("// old"), any(), any()))
                 .thenReturn("// updated");
 
         node.execute(ctx);
 
-        verify(flashLlm).generateFileContent(anyString(), eq("update instruction"), anyString(), anyMap(), eq("// old"), any());
+        verify(flashLlm).generateFileContent(anyString(), anyString(), anyMap(), eq("// old"), any(),
+                argThat(fc -> fc != null && fc.contains("update instruction")));
         assertThat(Files.readString(existing)).isEqualTo("// updated");
     }
 

@@ -27,7 +27,7 @@ public class BuildToolService {
     }
 
     public BuildResult runTscCheck(Path frontendDir) {
-        return run(frontendDir, List.of("npm", "exec", "tsc", "--", "--project", "tsconfig.app.json"));
+        return run(frontendDir, List.of("npm", "run", "typecheck"));
     }
 
     public BuildResult runNpmInstallPackage(Path frontendDir, String packageName) {

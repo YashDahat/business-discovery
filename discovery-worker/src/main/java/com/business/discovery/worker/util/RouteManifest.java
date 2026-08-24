@@ -79,6 +79,22 @@ public final class RouteManifest {
         return new RouteManifest(out);
     }
 
+    /**
+     * Builds a manifest directly from page entries (the disk-scan fallback): dedupes by page and
+     * applies the same deterministic order as {@link #fromSpec}. Used when the plan carries no PAGE
+     * entries — a partial-plan update run — so the route table is rebuilt from what exists on disk
+     * rather than emptied.
+     */
+    public static RouteManifest fromPages(List<Entry> pages) {
+        Set<String> seen = new LinkedHashSet<>();
+        List<Entry> out = new ArrayList<>();
+        for (Entry e : pages) {
+            if (e != null && seen.add(e.page())) out.add(e);
+        }
+        out.sort(ORDER);
+        return new RouteManifest(out);
+    }
+
     /** Same derivation for a single page file discovered on disk (reconciliation path). */
     public static Entry fromPagePath(String path) {
         String normalized = path.replace('\\', '/');
@@ -109,7 +125,8 @@ public final class RouteManifest {
      * PAGE NAMING → ROUTE convention (documented in arch_outline so the planner names
      * pages accordingly):
      *   HomePage           → /                (nav "Home")
-     *   LoginPage          → /login           (no nav)
+     *   LoginPage          → /login           (no nav — foundation auth page)
+     *   SignupPage         → /signup          (no nav — foundation auth page)
      *   AdminDashboardPage → /admin           (admin, nav "Dashboard")
      *   Admin<X>Page       → /admin/<x-kebab> (admin, nav)
      *   <X>DetailPage      → /<x-kebab>/:id   (no nav — param routes never appear in nav)
@@ -134,6 +151,10 @@ public final class RouteManifest {
             nav = true;
         } else if (!admin && rest.size() == 1 && rest.get(0).equals("login")) {
             path = "/login";
+            nav = false;
+        } else if (!admin && rest.size() == 1 && rest.get(0).equals("signup")) {
+            // Foundation auth page (like login) — reached via the header CTA / login page, not main nav.
+            path = "/signup";
             nav = false;
         } else if (!admin && tokens.equals(List.of("not", "found"))) {
             path = "*";

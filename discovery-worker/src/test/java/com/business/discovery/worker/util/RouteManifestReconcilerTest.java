@@ -48,7 +48,7 @@ class RouteManifestReconcilerTest {
     }
 
     @Test
-    void appendsDiskOnlyPagesAndReemitsAppTsx() throws Exception {
+    void appendsDiskOnlyPagesAndReemitsAppRoutes() throws Exception {
         writeSpec("frontend/src/pages/HomePage.tsx");
         writePage("HomePage");
         writePage("ContactPage"); // agent-created, not in the plan
@@ -58,9 +58,33 @@ class RouteManifestReconcilerTest {
         assertThat(reconciled).isTrue();
         String routes = Files.readString(workspace.resolve("frontend/src/routes.ts"));
         assertThat(routes).contains("CONTACT: '/contact'");
-        String app = Files.readString(workspace.resolve("frontend/src/App.tsx"));
-        assertThat(app).contains("<Route path=\"/contact\" element={<ContactPage />} />")
+        String appRoutes = Files.readString(workspace.resolve("frontend/src/AppRoutes.tsx"));
+        assertThat(appRoutes).contains("<Route path=\"/contact\" element={<ContactPage />} />")
                 .contains("<Route path=\"/\" element={<HomePage />} />");
+        // the shell is written and delegates to <AppRoutes/> — never holds the table itself
+        assertThat(Files.readString(workspace.resolve("frontend/src/App.tsx")))
+                .contains("<AppRoutes />").doesNotContain("<Route ");
+    }
+
+    @Test
+    void routesFoundationAuthPagesFromDisk() throws Exception {
+        // The foundation clone ships LoginPage/SignupPage; they are NOT in the business plan.
+        // The disk→manifest pass must route them so every generated app gets /login and /signup.
+        writeSpec("frontend/src/pages/HomePage.tsx");
+        writePage("HomePage");
+        writePage("LoginPage");   // foundation-cloned, unplanned
+        writePage("SignupPage");  // foundation-cloned, unplanned
+
+        RouteManifestReconciler.reconcile(workspace);
+
+        String routes = Files.readString(workspace.resolve("frontend/src/routes.ts"));
+        assertThat(routes).contains("LOGIN: '/login'").contains("SIGNUP: '/signup'");
+        String appRoutes = Files.readString(workspace.resolve("frontend/src/AppRoutes.tsx"));
+        assertThat(appRoutes)
+                .contains("import LoginPage from './pages/LoginPage';")
+                .contains("import SignupPage from './pages/SignupPage';")
+                .contains("<Route path=\"/login\" element={<LoginPage />} />")
+                .contains("<Route path=\"/signup\" element={<SignupPage />} />");
     }
 
     @Test
@@ -71,33 +95,48 @@ class RouteManifestReconcilerTest {
 
         assertThat(RouteManifestReconciler.reconcile(workspace)).isTrue();
         String firstRoutes = Files.readString(workspace.resolve("frontend/src/routes.ts"));
+        String firstAppRoutes = Files.readString(workspace.resolve("frontend/src/AppRoutes.tsx"));
         String firstApp = Files.readString(workspace.resolve("frontend/src/App.tsx"));
 
         assertThat(RouteManifestReconciler.reconcile(workspace)).isTrue();
         assertThat(Files.readString(workspace.resolve("frontend/src/routes.ts"))).isEqualTo(firstRoutes);
+        assertThat(Files.readString(workspace.resolve("frontend/src/AppRoutes.tsx"))).isEqualTo(firstAppRoutes);
+        // the frozen shell is byte-identical across attempts too
         assertThat(Files.readString(workspace.resolve("frontend/src/App.tsx"))).isEqualTo(firstApp);
     }
 
     @Test
-    void healsAgentDamagedAppTsx() throws Exception {
+    void healsAgentDamagedAppRoutes() throws Exception {
         writeSpec("frontend/src/pages/HomePage.tsx", "frontend/src/pages/AdminOrdersPage.tsx");
         writePage("HomePage");
         writePage("AdminOrdersPage");
-        // previous attempt's agent left a partial router registering only one route
-        Path app = workspace.resolve("frontend/src/App.tsx");
-        Files.writeString(app, "import { Route } from 'react-router-dom'\n<Route path=\"/\" />\n");
+        // previous attempt's agent left a partial route table registering only one route
+        Path appRoutes = workspace.resolve("frontend/src/AppRoutes.tsx");
+        Files.writeString(appRoutes, "import { Route } from 'react-router-dom'\n<Route path=\"/\" />\n");
 
         RouteManifestReconciler.reconcile(workspace);
 
-        assertThat(Files.readString(app))
+        assertThat(Files.readString(appRoutes))
                 .contains("<Route path=\"/admin/orders\"")
                 .contains("<Route path=\"/\" element={<HomePage />} />");
     }
 
     @Test
-    void noPlanMeansNothingToReconcile() throws Exception {
+    void frozenShellSurvivesPartialPlan() throws Exception {
+        // A prior full run left a complete route table; an update run then arrives with NO PAGE
+        // entries in the plan. The disk fallback must rebuild every route rather than dropping them.
         writePage("HomePage");
-        assertThat(RouteManifestReconciler.reconcile(workspace)).isFalse();
+        writePage("CartPage");
+        writePage("AdminOrdersPage");
+        // no writeSpec — the plan carries no pages
+
+        assertThat(RouteManifestReconciler.reconcile(workspace)).isTrue();
+
+        String appRoutes = Files.readString(workspace.resolve("frontend/src/AppRoutes.tsx"));
+        assertThat(appRoutes)
+                .contains("<Route path=\"/\" element={<HomePage />} />")
+                .contains("<Route path=\"/cart\" element={<CartPage />} />")
+                .contains("<Route path=\"/admin/orders\"");
     }
 
     @Test
@@ -124,7 +163,7 @@ class RouteManifestReconcilerTest {
 
         RouteManifestReconciler.reconcile(workspace);
 
-        assertThat(Files.readString(workspace.resolve("frontend/src/App.tsx")))
+        assertThat(Files.readString(workspace.resolve("frontend/src/AppRoutes.tsx")))
                 .contains("<ProtectedRoute><AdminOrdersPage /></ProtectedRoute>");
     }
 
@@ -139,8 +178,8 @@ class RouteManifestReconcilerTest {
 
         RouteManifestReconciler.reconcile(workspace);
 
-        String app = Files.readString(workspace.resolve("frontend/src/App.tsx"));
-        long routeCount = app.lines().filter(l -> l.contains("<Route path=")).count();
+        String appRoutes = Files.readString(workspace.resolve("frontend/src/AppRoutes.tsx"));
+        long routeCount = appRoutes.lines().filter(l -> l.contains("<Route path=")).count();
         assertThat(routeCount).isEqualTo(pages.size());
     }
 }

@@ -21,7 +21,7 @@ public class WorkerOrchestrator {
 
     // Total number of WorkerNode beans expected in the pipeline.
     // Update this constant whenever a node is added or removed.
-    private static final int EXPECTED_NODE_COUNT = 15;
+    private static final int EXPECTED_NODE_COUNT = 16;
 
     private final WorkerContext ctx;
     private final GitService gitService;

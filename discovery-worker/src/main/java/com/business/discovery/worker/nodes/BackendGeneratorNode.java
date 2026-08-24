@@ -1,4 +1,4 @@
-package com.business.discovery.worker.nodes;
+ package com.business.discovery.worker.nodes;
 
 import com.business.discovery.worker.constants.FailureType;
 import com.business.discovery.worker.constants.FileType;
@@ -7,12 +7,15 @@ import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.model.GeneratedFile;
 import com.business.discovery.worker.repository.GeneratedFileRepository;
 import com.business.discovery.worker.service.llm.ArchitectureSpec;
+import com.business.discovery.worker.service.llm.FeatureCard;
 import com.business.discovery.worker.service.llm.FeatureSpec;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.EnrichmentCardUtil;
 import com.business.discovery.worker.util.EnvVarScanner;
+import com.business.discovery.worker.util.FileContractCard;
 import com.business.discovery.worker.util.JavaClassRegistry;
 import com.business.discovery.worker.util.JavaFileTemplater;
 import com.business.discovery.worker.util.JavaImportResolver;
@@ -63,6 +66,16 @@ public class BackendGeneratorNode implements WorkerNode {
     private static final Pattern CLASS_NAME_PATTERN = Pattern.compile("\\b([A-Z][A-Za-z0-9]+)\\b");
 
     private final LlmGeneratorService flashLlm;
+
+    /** Fenced foundation contract (User/Role/PaymentService/exceptions), loaded once per run; "" when absent. */
+    private volatile String foundationContractSection = "";
+    private volatile String backendContractSection = "";   // reconciled backend interfaces (ground truth)
+
+    /** docs/ENRICHMENT.json feature cards, keyed by featureName; loaded once per run, empty when absent. */
+    private volatile Map<String, FeatureCard> enrichmentCards = Map.of();
+
+    /** All FileSpecs by path; set once per run — used to stamp a dependency's reconciled interface onto its body. */
+    private volatile Map<String, FileSpec> allSpecsByPath = Map.of();
     private final GeneratedFileRepository fileRepo;
     private final GitService gitService;
 
@@ -84,12 +97,46 @@ public class BackendGeneratorNode implements WorkerNode {
 
         ArchitectureSpec architectureSpec = loadSpec(workspace);
         Map<String, FileSpec> specByPath = buildSpecByPath(architectureSpec);
+        this.allSpecsByPath = specByPath;   // for stamping reconciled interfaces onto dependency bodies
         Map<String, FeatureSpec> featuresByName = buildFeaturesByName(architectureSpec);
         Map<String, String> standaloneClassImports = buildStandaloneClassImports(architectureSpec);
         JavaClassRegistry classRegistry = JavaClassRegistry.buildFromSpec(architectureSpec);
         // Merge files already on disk (from previous attempts, exception classes not in spec, etc.)
         // so JavaImportResolver never strips their imports as "ghost imports"
         classRegistry.mergeFromFilesystem(backendDir.resolve("src/main/java"));
+
+        // Fenced foundation contract (User/Role/PaymentService/exceptions) — ground truth for the
+        // immutable Java spine, appended to the (cached) system prompt of every backend generation call.
+        this.foundationContractSection =
+                com.business.discovery.worker.util.FoundationContractCard.backendSection(workspace);
+        if (foundationContractSection.isEmpty()) {
+            log.warn("[BackendGeneratorNode] No backend/FOUNDATION_CONTRACT.md in workspace — "
+                    + "generating without the fenced foundation contract");
+        } else {
+            log.info("[BackendGeneratorNode] Loaded fenced foundation contract ({} chars)",
+                    foundationContractSection.length());
+        }
+
+        // Reconciled backend contracts (from ContractReconciler @ planning) — the whole feature's
+        // class interfaces as one dedicated ground-truth section, so a consumer (service→repo→DTO)
+        // binds to exactly what its producer exposes. Backend twin of PlannedComponentPropsCard;
+        // appended to the cached system prompt alongside the foundation contract.
+        var backendCard =
+                com.business.discovery.worker.util.BackendContractCard.build(architectureSpec.getFiles());
+        this.backendContractSection = backendCard.toPromptSection();
+        log.info("[BackendGeneratorNode] Backend contract card: {} class interface(s)", backendCard.classCount());
+
+        // Per-feature context cards (docs/ENRICHMENT.json) — each file's generation prompt gets its
+        // whole feature's identity + sibling files/roles, keyed by FileSpec.featureName. Empty when
+        // ENRICHMENT.json is absent; the effective instruction still flows via buildFeatureContext.
+        try {
+            this.enrichmentCards = EnrichmentCardUtil.read(workspace);
+            log.info("[BackendGeneratorNode] Loaded {} enrichment feature card(s)", enrichmentCards.size());
+        } catch (IOException e) {
+            log.warn("[BackendGeneratorNode] Could not read ENRICHMENT.json — generating without feature "
+                    + "cards: {}", e.getMessage());
+            this.enrichmentCards = Map.of();
+        }
 
         preInjectDependencies(backendDir.resolve("pom.xml"), architectureSpec);
 
@@ -296,8 +343,26 @@ public class BackendGeneratorNode implements WorkerNode {
                                     Map<String, String> standaloneClassImports, String existingContent) {
         Map<String, String> depFiles = loadDependencyFiles(workspace, spec,
                 featureInstruction, fileRole, standaloneClassImports);
-        return flashLlm.generateFileContent(entry.path(), featureInstruction,
-                fileRole != null ? fileRole : "", depFiles, existingContent);
+        // Whole-feature context: identity + sibling map (from the card) + the effective instruction.
+        FeatureCard card = spec != null && spec.getFeatureName() != null
+                ? enrichmentCards.get(spec.getFeatureName()) : null;
+        String featureContext = FeatureCard.buildFeatureContext(card, entry.path(), featureInstruction);
+        // This file's OWN exact contract (purpose + fields + method sigs + endpoints) appended to the role.
+        String fileContract = FileContractCard.render(spec, fileRole);
+        return flashLlm.generateFileContent(entry.path(),
+                fileContract, depFiles, existingContent,
+                sharedContext(), featureContext);
+    }
+
+    /**
+     * The run-constant ground truth appended to the cached system prompt: the fenced foundation
+     * contract + the reconciled backend contract card. Both are byte-identical across the run's
+     * generation calls, so they extend the shared prefix instead of being re-billed per call.
+     */
+    private String sharedContext() {
+        if (backendContractSection.isEmpty()) return foundationContractSection;
+        if (foundationContractSection.isEmpty()) return backendContractSection;
+        return foundationContractSection + "\n\n" + backendContractSection;
     }
 
     private String existingContent(Path filePath, boolean requestedChangesMode, FeatureSpec feature) {
@@ -366,7 +431,8 @@ public class BackendGeneratorNode implements WorkerNode {
             for (String depPath : depPaths) {
                 Path file = workspace.resolve(depPath);
                 if (Files.exists(file)) {
-                    try { deps.put(depPath, Files.readString(file)); } catch (IOException ignored) {}
+                    try { deps.put(depPath, stampReconciledInterface(depPath, Files.readString(file))); }
+                    catch (IOException ignored) {}
                 }
             }
         }
@@ -385,12 +451,27 @@ public class BackendGeneratorNode implements WorkerNode {
             if (!deps.containsKey(relPath)) {
                 Path file = workspace.resolve(relPath);
                 if (Files.exists(file)) {
-                    try { deps.put(relPath, Files.readString(file)); } catch (IOException ignored) {}
+                    try { deps.put(relPath, stampReconciledInterface(relPath, Files.readString(file))); }
+                    catch (IOException ignored) {}
                 }
             }
         }
 
         return deps;
+    }
+
+    /**
+     * Prepends a dependency's RECONCILED interface (when it has one) to its body, marked authoritative,
+     * so a stale/divergent body can't silently override the reconciled contract. Bodies are kept intact
+     * (field-level ground truth preserved) — only annotated. No-op when the dep isn't reconciled.
+     */
+    private String stampReconciledInterface(String depPath, String body) {
+        FileSpec depSpec = allSpecsByPath.get(depPath);
+        if (depSpec == null || !Boolean.TRUE.equals(depSpec.getContractReconciled())) return body;
+        String iface = FileContractCard.renderInterfaceOnly(depSpec);
+        if (iface.isBlank()) return body;
+        return "// RECONCILED INTERFACE (authoritative — bind to THIS; body below is reference only, may lag):\n"
+                + "// " + iface + "\n" + body;
     }
 
     // ── Dependency injection (keyword-based, runs once before generation) ─────

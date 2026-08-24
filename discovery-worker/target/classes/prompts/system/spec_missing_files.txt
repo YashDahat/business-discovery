@@ -1,0 +1,40 @@
+You are completing a full-stack project's architecture plan. The project has a Spring Boot (Java)
+backend and a React + TypeScript (Vite) frontend. Some modules are referenced by already-planned
+files (in their imports or feature descriptions) but were never listed for generation. Produce a
+proper file specification for each REAL missing module so a downstream code generator can build a
+correct, working file — not a placeholder.
+
+Each missing module's path tells you its side and kind:
+- `backend/…/*.java`      → a Java class: entity / DTO / repository / service / controller / config.
+- `frontend/src/…/*.ts(x)` → a React component, hook, context, TypeScript type, or service module.
+
+Return STRICT JSON only — no markdown fences, no prose outside the JSON:
+
+{"files": [
+  {
+    "file_name": "<leaf name, e.g. OrderItemResponse.java or AdminLayout.tsx>",
+    "file_path": "<EXACTLY one of the referenced paths given — do not invent or relocate>",
+    "file_type": "BACKEND" | "FRONTEND",
+    "layer": "<backend: ENTITY|DTO|REPOSITORY|SERVICE|CONTROLLER|CONFIG · frontend: COMPONENT|HOOK|CONTEXT|TYPE|SERVICE>",
+    "feature_name": "<the feature that referenced it, if known>",
+    "description": "<implementation-ready spec: what it is, what it exposes, how consumers use it>",
+    "imports_from": ["<libraries + workspace-relative paths of existing modules this file needs>"],
+    "status": "PLANNED"
+  }
+]}
+
+Rules:
+- `file_path` MUST be exactly one of the referenced paths provided. Do NOT invent new paths and do NOT
+  relocate a file — the consumers already reference it at that path.
+- `file_type` is derived from the path (`backend/` → BACKEND, `frontend/` → FRONTEND). `status` is always "PLANNED".
+- `description` must be concrete and implementation-ready — enough for a generator to build the file
+  correctly, and consistent with how the referencing files use the module:
+    * backend — the class's fields/types or method signatures the callers rely on (e.g. a DTO's fields
+      as consumed by the mapping/response code; a service's methods as called by controllers).
+    * frontend — the component's props, a hook's return shape, or a type's fields, AND whether the
+      export is default or named (infer from how consumers import it).
+  If an EXEMPLAR is provided, mirror its structure, imports, and conventions.
+- `imports_from` lists what THIS file needs (libraries + workspace-relative paths of existing modules).
+- OMIT any referenced path that is actually a third-party/library import, a language or framework
+  built-in, a type-only alias, or already provided by the scaffold — do not fabricate a file for it.
+- Specify ONLY the missing modules listed. Do not restate or modify files that already exist.

@@ -105,4 +105,55 @@ class UiImportRewriterTest {
         assertThat(result).contains("import { DialogTitle, DialogHeader } from '@/components/ui/dialog';");
         assertThat(result).doesNotContain("@radix-ui/react-dialog"); // emptied import removed
     }
+
+    // ── Rule 3: add missing imports for used-but-unimported JSX tags ─────────────
+
+    @Test
+    void addsMissingLocalShadcnComponentImport() throws Exception {
+        Files.writeString(src.resolve("components/ui/card.tsx"),
+                "export const Card = () => <div/>\nexport const CardContent = () => <div/>\n");
+        Path page = src.resolve("pages/Menu.tsx");
+        Files.createDirectories(page.getParent());
+        Files.writeString(page, "export default function Menu() { return <Card><CardContent/></Card> }\n");
+
+        boolean changed = UiImportRewriter.fix(src, inventory());
+
+        assertThat(changed).isTrue();
+        String result = Files.readString(page);
+        assertThat(result).contains("from '@/components/ui/card'").contains("Card").contains("CardContent");
+    }
+
+    @Test
+    void addsMissingNodeModuleIconImportFromRegistry() throws Exception {
+        Files.writeString(frontend.resolve("package.json"), "{\"dependencies\":{\"lucide-react\":\"^1\"}}");
+        Path lucide = frontend.resolve("node_modules/lucide-react");
+        Files.createDirectories(lucide);
+        Files.writeString(lucide.resolve("package.json"), "{\"name\":\"lucide-react\",\"types\":\"index.d.ts\"}");
+        Files.writeString(lucide.resolve("index.d.ts"), "export { ShoppingCart, Menu };\n");
+        NodeModuleExportRegistry registry = NodeModuleExportRegistry.build(frontend);
+
+        Path page = src.resolve("pages/Cart.tsx");
+        Files.createDirectories(page.getParent());
+        Files.writeString(page, "export default function Cart() { return <ShoppingCart/> }\n");
+
+        UiImportRewriter.fix(src, inventory(), registry);
+
+        assertThat(Files.readString(page)).contains("import { ShoppingCart } from 'lucide-react';");
+    }
+
+    @Test
+    void skipsTagsAlreadyImportedOrLocallyDeclared() throws Exception {
+        Files.writeString(src.resolve("components/ui/card.tsx"), "export const Card = () => <div/>\n");
+        Path page = src.resolve("pages/X.tsx");
+        Files.createDirectories(page.getParent());
+        String content = "import { Card } from '@/components/ui/card';\n"
+                + "function Badge() { return null }\n"
+                + "export default function X() { return <Card><Badge/></Card> }\n";
+        Files.writeString(page, content);
+
+        UiImportRewriter.fix(src, inventory());
+
+        // Card already imported, Badge locally declared → nothing added.
+        assertThat(Files.readString(page)).isEqualTo(content);
+    }
 }

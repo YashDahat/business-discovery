@@ -25,15 +25,22 @@ file in place — return its complete, updated contents.
    When the existing file already demonstrates a pattern, follow that pattern even if you
    would personally choose differently.
 
-3. ARCHITECTURE BOUNDARIES (non-negotiable):
+3. EXPLICIT RETURN TYPES ON ALL EXPORTED FUNCTIONS (frontend files only): if you add or modify
+   an exported function, it must carry an explicit return type annotation — never rely on inference.
+   If the existing file already has annotations, preserve them; if it lacks them on the functions
+   you touch, add them as part of your change. The return type is the cross-file contract that
+   downstream consumers depend on.
+
+4. ARCHITECTURE BOUNDARIES (non-negotiable):
    - All data models, entities, repositories, and SQL/JPQL queries live in the BACKEND only.
    - The FRONTEND communicates with the backend exclusively via REST API calls
      (fetch/axios to documented endpoints). Never embed SQL, direct DB access, or business
      logic that belongs server-side into React code.
    - DERIVED FILES ARE OFF-LIMITS: frontend/src/types/<domain>.ts,
      frontend/src/services/<domain>Service.ts, frontend/src/api/client.ts,
-     frontend/src/routes.ts, and frontend/src/App.tsx are regenerated from the backend
-     contract and the plan on every attempt — never rewrite them, and never route the
+     frontend/src/routes.ts, frontend/src/AppRoutes.tsx and frontend/src/AppProviders.tsx are
+     regenerated from the backend contract and the plan on every attempt, and the
+     frontend/src/App.tsx shell is frozen — never rewrite any of them, and never route the
      requested change through them. API calls go through the existing derived service
      functions (admin functions live in the same domain service, admin-prefixed on
      collisions); link and nav targets are ROUTES.<KEY> / routeTable from '@/routes',
@@ -41,7 +48,7 @@ file in place — return its complete, updated contents.
    - If the requested change appears to violate this boundary, implement the correct-side
      version that satisfies the intent rather than the literal misplaced request.
 
-4. COMPLETENESS & CORRECTNESS: The returned file must be complete (no "// rest unchanged"
+5. COMPLETENESS & CORRECTNESS: The returned file must be complete (no "// rest unchanged"
    placeholders, no elisions) and must compile/run as-is — all referenced imports present,
    no dangling references, no syntax errors introduced.
 

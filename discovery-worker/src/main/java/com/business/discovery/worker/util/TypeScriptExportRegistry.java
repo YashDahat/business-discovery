@@ -2,6 +2,8 @@ package com.business.discovery.worker.util;
 
 import lombok.extern.slf4j.Slf4j;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
@@ -10,6 +12,7 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Tracks exported symbols from generated TypeScript/TSX files.
@@ -21,13 +24,19 @@ import java.util.regex.Pattern;
 @Slf4j
 public class TypeScriptExportRegistry {
 
+    // Group 1 = the `default ` keyword (present → default export), group 2 = the symbol name.
     private static final Pattern NAMED_EXPORT = Pattern.compile(
-            "^export\\s+(?:default\\s+)?(?:function|class|const|let|var|interface|type|enum)\\s+([A-Za-z][\\w]*)",
+            "^export\\s+(default\\s+)?(?:function|class|const|let|var|interface|type|enum)\\s+([A-Za-z][\\w]*)",
             Pattern.MULTILINE);
     private static final Pattern RE_EXPORT = Pattern.compile("\\bexport\\s+\\{([^}]+)}");
 
+    /** How a symbol is exported — decides `import X` vs `import { X }` at the call site. */
+    public enum Binding { DEFAULT, NAMED }
+
     // symbolName → workspace-relative path without extension
     private final Map<String, String> symbolToPath = new HashMap<>();
+    // symbolName → default vs named export form
+    private final Map<String, Binding> symbolToBinding = new HashMap<>();
     private final Path workspace;
 
     public TypeScriptExportRegistry(Path workspace) {
@@ -40,23 +49,55 @@ public class TypeScriptExportRegistry {
 
         Matcher m = NAMED_EXPORT.matcher(content);
         while (m.find()) {
-            symbolToPath.put(m.group(1), relNoExt);
+            String name = m.group(2);
+            symbolToPath.put(name, relNoExt);
+            symbolToBinding.put(name, m.group(1) != null ? Binding.DEFAULT : Binding.NAMED);
         }
 
-        // Named re-exports: export { Foo, Bar } or export { A as B }
+        // Named re-exports: export { Foo, Bar } or export { A as B } — always the named form.
         Matcher rm = RE_EXPORT.matcher(content);
         while (rm.find()) {
             for (String part : rm.group(1).split(",")) {
                 String sym = part.trim().split("\\s+")[0].replaceAll("[{}]", "").trim();
                 if (!sym.isEmpty() && Character.isUpperCase(sym.charAt(0))) {
                     symbolToPath.put(sym, relNoExt);
+                    symbolToBinding.put(sym, Binding.NAMED);
                 }
             }
         }
     }
 
+    /**
+     * Builds a registry by scanning every .ts/.tsx under {@code frontendSrc}. Used by
+     * post-generation pre-passes (e.g. FrontendValidationNode) that need the export map but
+     * weren't present while the files were generated incrementally.
+     */
+    public static TypeScriptExportRegistry buildFromDisk(Path frontendSrc, Path workspace) {
+        TypeScriptExportRegistry registry = new TypeScriptExportRegistry(workspace);
+        if (!Files.exists(frontendSrc)) return registry;
+        try (Stream<Path> files = Files.walk(frontendSrc)) {
+            files.filter(Files::isRegularFile)
+                 .filter(p -> p.toString().endsWith(".ts") || p.toString().endsWith(".tsx"))
+                 .forEach(p -> {
+                     try {
+                         registry.register(p, Files.readString(p));
+                     } catch (IOException e) {
+                         log.warn("[TypeScriptExportRegistry] Could not read {}: {}", p, e.getMessage());
+                     }
+                 });
+        } catch (IOException e) {
+            log.warn("[TypeScriptExportRegistry] Walk failed for {}: {}", frontendSrc, e.getMessage());
+        }
+        return registry;
+    }
+
     public Optional<String> resolveSpecifier(String symbol) {
         return Optional.ofNullable(symbolToPath.get(symbol));
+    }
+
+    /** How {@code symbol} is exported (default vs named), if the registry has seen it. */
+    public Optional<Binding> resolveBinding(String symbol) {
+        return Optional.ofNullable(symbolToBinding.get(symbol));
     }
 
     public boolean knows(String symbol) {

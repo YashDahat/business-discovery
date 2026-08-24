@@ -53,7 +53,7 @@ class InfraGeneratorNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(taskId);
         when(ctx.getAttemptNumber()).thenReturn(1);
-        when(llm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
+        when(llm.generateFileContent(anyString(), anyString(), anyMap(), any()))
                 .thenReturn("# generated infra content");
 
         node.execute(ctx);
@@ -148,12 +148,12 @@ class InfraGeneratorNodeTest {
         when(ctx.getWorkspaceDir()).thenReturn(tempDir);
         when(ctx.getTaskId()).thenReturn(UUID.randomUUID());
         when(ctx.getAttemptNumber()).thenReturn(2);
-        when(llm.generateFileContent(anyString(), anyString(), anyString(), anyMap(), any()))
+        when(llm.generateFileContent(anyString(), anyString(), anyMap(), any()))
                 .thenReturn("# updated Dockerfile");
 
         node.execute(ctx);
 
-        verify(llm).generateFileContent(anyString(), anyString(), anyString(), anyMap(), any());
+        verify(llm).generateFileContent(anyString(), anyString(), anyMap(), any());
         assertThat(Files.readString(tempDir.resolve("Dockerfile"))).isEqualTo("# updated Dockerfile");
     }
 

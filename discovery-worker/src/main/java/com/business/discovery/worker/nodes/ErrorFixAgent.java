@@ -21,6 +21,9 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.nio.file.Files;
 import com.business.discovery.worker.util.ApiContractCard;
+import com.business.discovery.worker.util.CompileErrorClusterer;
+import com.business.discovery.worker.util.FrontendContractCard;
+import com.business.discovery.worker.util.FoundationContractCard;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -50,13 +53,28 @@ import java.util.stream.Collectors;
 @Slf4j
 public class ErrorFixAgent {
 
+    // Round count should track RESIDUAL-error depth, not file count (F3). With the errors clustered
+    // and every named file pre-read into the trigger, the FIRST response should apply every edit, a
+    // single recompile reveals only genuine follow-ons, and each later pass is strictly smaller — so a
+    // healthy run finishes in a handful of rounds. The cap stays generous (30) as a safety ceiling, not
+    // a target: batching into one pass is STEERED (pre-assembly + one-pass prompt), not code-enforced,
+    // so the extra headroom keeps a run that legitimately needs deeper residual passes from being cut
+    // off. Lowering the cap is not the lever that makes the loop deterministic — the pre-assembly is.
     static final int MAX_TOOL_ROUNDS = 30;
 
-    private static final int SEEDED_ERRORS_MAX_CHARS = 6000;
-    private static final int AUTO_VERIFY_MAX_CHARS = 4000;
+    // The compiler feed must be COMPLETE (F3 precondition). The old ~5-6K windows truncated large error
+    // sets ("8 of 57"), and the agent cannot fix what it was never shown, so it silently fell back to
+    // exploration. The clusterer keeps EVERY root cause represented, so a generous window carries the
+    // full clustered manifest to the seed, run_compiler, and auto-verify alike.
+    private static final int COMPILER_FEED_MAX_CHARS = 24000;
+
+    // Deterministic input assembly (F3): every file named in the errors is read up-front into the
+    // trigger, so the agent never spends rounds on read_file/list_files exploration.
+    private static final int NAMED_FILE_MAX_CHARS  = 8000;    // per file
+    private static final int NAMED_FILES_MAX_CHARS = 48000;   // total across all named files
 
     private static final Set<String> MUTATING_TOOLS =
-            Set.of("write_file", "str_replace", "run_npm_install");
+            Set.of("write_file", "str_replace", "bulk_str_replace", "run_npm_install");
 
     // Framework packages that conflict with the platform stack — installing them "fixes"
     // the compile error while breaking the app (e.g. `next` for a next/navigation import).
@@ -67,9 +85,14 @@ public class ErrorFixAgent {
     private static final String SYSTEM_PROMPT = """
             You are a senior engineer debugging multi-file compilation failures in a generated project.
 
-            You have 8 tools:
-            - str_replace            — PREFERRED for fixes: replace an exact text snippet in a file
-            - write_file             — for NEW files or unavoidable full rewrites only
+            You have 9 tools:
+            - str_replace            — PREFERRED for fixes: replace an exact text snippet in ONE file
+            - bulk_str_replace       — apply the SAME fix across MANY files in one call; provide either
+                                       'directory' (scans all .ts/.tsx files under it) or 'paths'
+                                       (comma-separated list). Use when the same wrong pattern repeats
+                                       across multiple pages/components — e.g. a named import on a
+                                       default export used in 10 files: one call fixes all 10.
+            - write_file             — create a NEW file only; blocked on existing files
             - read_file              — read any file's current content
             - search_symbol          — grep for a class/type/function across the project
             - run_compiler           — run the compiler and get ALL current errors
@@ -93,20 +116,67 @@ public class ErrorFixAgent {
             error list without having just changed something.
 
             The current compiler errors are provided in the first message — do not re-run
-            the compiler to discover them.
+            the compiler to discover them. The FILES NAMED IN THOSE ERRORS ARE ALSO PROVIDED
+            in that message, already read for you — do NOT read_file them again.
 
-            YOUR ROUND BUDGET IS LIMITED — BATCH AGGRESSIVELY:
-            Each of your responses costs one round regardless of how many tool calls it
-            contains, and you may make MANY tool calls in a single response. Never spend a
-            round on a single read_file or a single str_replace:
-            - Reconnaissance: ONE response that read_file's EVERY file appearing in the
-              error list (plus the types files they import). Ten reads in one response
-              costs one round; ten rounds of one read each wastes a third of your budget.
-            - Fixing: apply EVERY confident str_replace in the same response — group all
-              edits for all files you have already read. A response with 8 edits across
-              4 files is normal and desired.
+            ONE DETERMINISTIC, EXHAUSTIVE PASS — the compiler already told you everything:
+            The clustered error list is the COMPLETE manifest — every error, its file, its line.
+            There is nothing to discover and no reason to iterate file-by-file. The named files are
+            pre-read in the trigger, so your FIRST response must apply EVERY edit across EVERY file,
+            organized by root-cause cluster:
+            - Do NOT open with a reconnaissance round of read_file / list_files — the files are already
+              in front of you. Reading them again just burns a round.
+            - Fix by CLUSTER, not by file: for a pattern that repeats across files, one bulk_str_replace;
+              for unique defects, str_replace — many in the SAME response. A response with 12 edits
+              across 8 files is normal and desired; one file per response is a defect.
+            - After you submit that pass the harness recompiles once and hands you the result. Only then
+              address errors NEWLY REVEALED by that recompile (a genuine follow-on) — never re-explore.
+              A run whose errors all resolve on the first pass is done in one round.
 
-            STRATEGY:
+            WHEN TO USE bulk_str_replace (MANDATORY — saves 5-10 rounds per run):
+            When you see the SAME wrong pattern in the error list across multiple files,
+            use bulk_str_replace IMMEDIATELY — do not read each file individually.
+
+            TRIGGER: scan the initial error list for the same module path, import line, or
+            type name appearing in 2+ files. That is a bulk fix, not N individual fixes.
+
+            EXAMPLE — generic import error repeated across many files:
+              PageA.tsx(1): error TS2307: Cannot find module '@/components/Layout'
+              PageB.tsx(1): error TS2307: Cannot find module '@/components/Layout'
+              PageC.tsx(1): error TS2307: Cannot find module '@/components/Layout'
+              PageD.tsx(1): error TS2307: Cannot find module '@/components/Layout'
+              PageE.tsx(1): error TS2307: Cannot find module '@/components/Layout'
+
+            WRONG approach (wastes 5+ rounds reading each file one by one):
+              round N:   read_file PageA.tsx
+              round N+1: str_replace PageA.tsx  (fix one file)
+              round N+2: read_file PageB.tsx
+              round N+3: str_replace PageB.tsx  (fix one file)
+              ... (runs out of budget before reaching the last file)
+
+            CORRECT approach (1 round, all 5 files fixed at once):
+              bulk_str_replace(
+                old_string: "import Layout from '@/components/Layout'",
+                new_string: "import Layout from '@/components/layout/Layout'",
+                directory:  "frontend/src/pages"
+              )
+            The tool scans every .ts/.tsx file under that directory, applies the replacement
+            wherever it finds old_string, and returns a summary of which files changed.
+
+            OTHER common bulk patterns (always use bulk_str_replace, never individual str_replace):
+              - "string | undefined not assignable to string | null" in 3+ form components
+                → bulk replace `.optional()` with `.nullable()` across frontend/src/components
+              - Same wrong import path (Layout, Header, a hook, a type) repeated across pages
+                → bulk_str_replace with directory: "frontend/src/pages"
+              - Same missing named import (e.g. Badge, Card, Icon) added to multiple files
+                → bulk_str_replace to prepend the import line across the relevant directory
+              - Same DTO field name used incorrectly in multiple service/hook files
+                → bulk_str_replace across frontend/src/hooks or frontend/src/services
+
+            THE RULE: if the SAME string needs changing in 2+ files, bulk_str_replace.
+            str_replace is for unique, file-specific fixes only.
+
+            STRATEGY (single exhaustive pass):
             1. Group the provided errors by ROOT CAUSE, not by file. One missing export can
                produce ten downstream errors — fix the source, not the symptoms.
             2. For each root cause, classify:
@@ -114,14 +184,15 @@ public class ErrorFixAgent {
                  "Cannot find module X" — the fix belongs in the SOURCE file (add the export/type)
                  or, for a missing npm library, run_npm_install.
                - SELF-CONTAINED: syntax error, wrong return type, bad import — fix the file itself.
-            3. Investigate briskly: read only the files you intend to change plus the involved
-               contract (read_architecture_spec) — in as few responses as possible. Do not
-               re-read files you have already seen.
-            4. Patch with str_replace: minimal old_string (with enough context to be unique)
-               and minimal new_string. One str_replace per distinct defect, many per response.
-               Use write_file only to CREATE a file that should exist but doesn't.
-            5. React to the automatic verification after each change: fixed errors disappear,
-               new ones mean your patch was wrong — revert or adjust before moving on.
+            3. The files you need are already provided (pre-read) — you rarely need read_file at all.
+               Only read a file NOT in the provided set, or an architecture spec (read_architecture_spec)
+               when a contract is genuinely unclear. Never re-read a provided file.
+            4. In ONE response, emit ALL edits: bulk_str_replace for a pattern repeated across files,
+               str_replace for unique defects (minimal, unique old_string; minimal new_string), grouped
+               by cluster so one fix pattern lands across its whole file set at once. write_file only to
+               CREATE a file that should exist but doesn't.
+            5. React to the automatic verification: only errors NEWLY REVEALED by the recompile warrant a
+               second pass; a new error you caused means a patch was wrong — fix it. Do not re-explore.
             6. Stop calling tools when the automatic verification reports the compiler passes,
                or you have exhausted every fix you can apply.
 
@@ -129,7 +200,12 @@ public class ErrorFixAgent {
             Files under frontend/src/types/ (except types/local/) and frontend/src/services/*Service.ts
             are DERIVED from the compiled backend. They are ground truth and are regenerated
             on every attempt — the harness REFUSES edits to them, and any workaround you find
-            will be overwritten. When a page/hook disagrees with a derived type or service:
+            will be overwritten. The FRONTEND MODULE CONTRACTS section lists every hook,
+            context, type, component and shell module — use it to know what a module exports
+            and its exact shape WITHOUT reading the file first. Modules marked [immutable-context]
+            or [shell] are closed for editing — fix consumers to match them. For other modules,
+            read_file first if you need to edit the module itself.
+            When a page/hook disagrees with a derived type or service:
             - "Property 'x' does not exist on type 'YDto'" → rename x in the PAGE to the
               field the derived type actually declares (the error usually suggests it).
             - "'string | null' not assignable to 'string'" → add a null guard or fallback
@@ -184,17 +260,32 @@ public class ErrorFixAgent {
      * The card was already on disk the whole time — it was simply never handed over.
      */
     private String buildContractSection(FileType fileType, Path workspace) {
-        if (fileType != FileType.FRONTEND) return "";
+        StringBuilder section = new StringBuilder();
+
+        // Fenced foundation contract — the immutable spine the fix agent cannot edit but must match
+        // at every call site (User/Role/PaymentService for backend; useAuth/useCheckout/shell for
+        // frontend). This is exactly the ground truth whose absence sent the agent reverse-engineering
+        // foundation files round after round until the 30-round budget ran out.
+        String foundation = fileType == FileType.BACKEND
+                ? FoundationContractCard.backendSection(workspace)
+                : FoundationContractCard.frontendSection(workspace);
+        if (!foundation.isEmpty()) {
+            log.info("[ErrorFixAgent] Seeded fenced foundation contract ({} chars) for {}",
+                    foundation.length(), fileType);
+            section.append("\n").append(foundation).append("\n");
+        }
+
+        if (fileType != FileType.FRONTEND) return section.toString();
 
         ApiContractCard card = ApiContractCard.build(workspace);
         if (card.isEmpty()) {
             log.warn("[ErrorFixAgent] No derived API contract on disk — fixing without wire ground truth");
-            return "";
+            return section.toString();
         }
         log.info("[ErrorFixAgent] Seeded contract card: {} type file(s), {} route(s)",
                 card.typeFileCount(), card.routeCount());
 
-        return """
+        section.append("""
 
                 %s
                 %s
@@ -204,7 +295,20 @@ public class ErrorFixAgent {
                 hand-written apiClient/axios request, and NEVER infer an endpoint path from a type
                 name. The routes above are the only ones the backend serves; a path absent from
                 them 404s at runtime even though it compiles.
-                """.formatted(ApiContractCard.PROMPT_KEY, card.toPromptSection());
+                """.formatted(ApiContractCard.PROMPT_KEY, card.toPromptSection()));
+
+        FrontendContractCard frontendCard = FrontendContractCard.build(workspace);
+        if (!frontendCard.isEmpty()) {
+            log.info("[ErrorFixAgent] Seeded frontend contract card: {} module(s)",
+                    frontendCard.moduleCount());
+            section.append("\nFRONTEND MODULE CONTRACTS ")
+                   .append("(extracted before this fix loop — reflects pre-fix state; ")
+                   .append("if you modify a module listed here, read_file to verify current state)\n")
+                   .append(frontendCard.toPromptSection())
+                   .append("\n");
+        }
+
+        return section.toString();
     }
 
     /**
@@ -220,25 +324,47 @@ public class ErrorFixAgent {
 
         // Seed the trigger with the actual error list — the old trigger made the model
         // spend its first round rediscovering errors we had already collected.
-        BuildToolService.BuildResult preCheck = check(fileType, compileDir);
+        // For frontend, use tsc --noEmit (npm run typecheck) for the seed so the agent
+        // receives the COMPLETE TypeScript error list without vite output mixed in.
+        // The 6000-char window on npm run build often truncated to 8 of 57 errors —
+        // the agent cannot cluster or bulk-fix errors it cannot see. autoVerify stays
+        // on npm run build to catch both tsc and vite issues during the fix loop.
+        BuildToolService.BuildResult preCheck = fileType == FileType.FRONTEND
+                ? buildTool.runTscCheck(compileDir)
+                : check(fileType, compileDir);
+
+        // Defensive: if the scaffold has no `typecheck` script (older projects, or the foundation
+        // not yet updated), `npm run typecheck` exits non-zero with an npm error and no tsc lines —
+        // fall back to the full build so the seed is a real error list, never an npm error.
+        if (fileType == FileType.FRONTEND && !preCheck.success()
+                && !CompileErrorClusterer.hasTscErrors(preCheck.output())) {
+            log.warn("[ErrorFixAgent] `npm run typecheck` produced no tsc errors — falling back to npm run build for the seed");
+            preCheck = buildTool.runNpmBuild(compileDir);
+        }
 
         if (preCheck.success()) {
             log.info("[ErrorFixAgent] {} already compiles — no fix loop needed", fileType);
             return true;
         }
 
-        String errors = prioritizeCompilerOutput(preCheck.output(), SEEDED_ERRORS_MAX_CHARS);
+        String errors = renderErrors(fileType, preCheck.output(), COMPILER_FEED_MAX_CHARS);
         log.warn("[ErrorFixAgent] {} errors before fix loop:\n{}", fileType, errors);
 
+        // Deterministic input assembly (F3): read the union of files named in the errors up-front so the
+        // agent patches from ground truth in one pass instead of spending rounds on read_file exploration.
+        String namedFiles = assembleNamedFiles(fileType, preCheck.output(), workspace);
+
         String trigger = """
-                Fix the %s compilation. Current compiler errors:
+                Fix the %s compilation. Current compiler errors (COMPLETE — clustered by root cause):
 
                 %s
                 %s
-                Group these by root cause, investigate the minimum necessary, and patch with
-                str_replace. The harness auto-compiles after each of your changes.
+                %s
+                In ONE response, apply EVERY edit across EVERY file above, grouped by cluster
+                (bulk_str_replace for a pattern repeated across files; str_replace for unique defects).
+                The harness auto-compiles after your changes; then address only errors it newly reveals.
                 """.formatted(fileType == FileType.BACKEND ? "backend (Java)" : "frontend (TypeScript)",
-                              errors, buildContractSection(fileType, workspace));
+                              errors, namedFiles, buildContractSection(fileType, workspace));
 
         log.info("[ErrorFixAgent] Starting fix loop for {} — max {} tool rounds", fileType, MAX_TOOL_ROUNDS);
 
@@ -273,7 +399,7 @@ public class ErrorFixAgent {
         if (result.success()) {
             return "[auto-verify] COMPILATION PASSED — all errors resolved. You are done; stop calling tools.";
         }
-        String output = prioritizeCompilerOutput(result.output(), AUTO_VERIFY_MAX_CHARS);
+        String output = renderErrors(fileType, result.output(), COMPILER_FEED_MAX_CHARS);
         return "[auto-verify] Compiler run after your changes — remaining errors:\n" + output;
     }
 
@@ -290,6 +416,12 @@ public class ErrorFixAgent {
                 case "write_file"             -> writeFile(args.path("path").asText(), args.path("content").asText(), workspace, ctx);
                 case "str_replace"            -> strReplace(args.path("path").asText(), args.path("old_string").asText(),
                                                             args.path("new_string").asText(), workspace, ctx);
+                case "bulk_str_replace"       -> bulkStrReplace(
+                                                            args.path("old_string").asText(),
+                                                            args.path("new_string").asText(),
+                                                            args.path("directory").asText(""),
+                                                            args.path("paths").asText(""),
+                                                            workspace, ctx);
                 case "run_npm_install"        -> runNpmInstall(args.path("package").asText(), fileType, workspace);
                 case "search_symbol"          -> searchSymbol(args.path("symbol").asText(), args.path("scope").asText("all"), workspace);
                 case "read_architecture_spec" -> readArchSpec(args.path("path").asText(), workspace);
@@ -325,7 +457,22 @@ public class ErrorFixAgent {
 
         if (result.success()) return "COMPILATION PASSED — no errors.";
 
-        return prioritizeCompilerOutput(result.output(), 5000);
+        return renderErrors(isBackend ? FileType.BACKEND : FileType.FRONTEND, result.output(),
+                COMPILER_FEED_MAX_CHARS);
+    }
+
+    /**
+     * Frontend errors are clustered by root cause so the agent receives the COMPLETE set in a
+     * compact, groupable form — the input {@code bulk_str_replace} was designed for — instead of
+     * the derived-file-prioritized truncation that routinely showed "8 of 57". Backend (javac) and
+     * any non-tsc output (e.g. a vite-stage bundle failure) have no tsc error lines, so they fall
+     * back to {@link #prioritizeCompilerOutput}.
+     */
+    private static String renderErrors(FileType fileType, String output, int maxChars) {
+        if (fileType == FileType.FRONTEND && CompileErrorClusterer.hasTscErrors(output)) {
+            return CompileErrorClusterer.cluster(output, maxChars);
+        }
+        return prioritizeCompilerOutput(output, maxChars);
     }
 
     private static final Pattern TSC_ERROR_LINE =
@@ -392,6 +539,112 @@ public class ErrorFixAgent {
         return out;
     }
 
+    // ── Deterministic input assembly (F3) ─────────────────────────────────────
+
+    /** tsc diagnostic first line — {@code path(line,col): error TSxxxx}. Group 1 = the file path. */
+    private static final Pattern FRONTEND_ERROR_FILE =
+            Pattern.compile("^(\\S.*?)\\(\\d+,\\d+\\): error TS\\d+", Pattern.MULTILINE);
+    /** Any {@code .java} path token in mvn/javac output (absolute or relative). */
+    private static final Pattern JAVA_FILE_TOKEN =
+            Pattern.compile("([\\w./$-]+\\.java)");
+
+    /**
+     * The union of files named in the compiler errors, as workspace-relative paths in first-seen order.
+     * Frontend tsc paths ({@code src/...}) are prefixed with {@code frontend/}; backend {@code .java}
+     * paths are normalized to their {@code backend/} prefix. Derived files ARE included — the assembly
+     * lists them as read-only reference so the agent knows to fix their consumers, not them.
+     */
+    static List<String> extractErrorFiles(FileType fileType, String output) {
+        if (output == null || output.isBlank()) return List.of();
+        java.util.LinkedHashSet<String> files = new java.util.LinkedHashSet<>();
+        if (fileType == FileType.FRONTEND) {
+            Matcher m = FRONTEND_ERROR_FILE.matcher(output);
+            while (m.find()) {
+                String f = m.group(1).trim().replace('\\', '/');
+                files.add(f.startsWith("frontend/") ? f : "frontend/" + f);
+            }
+        } else {
+            Matcher m = JAVA_FILE_TOKEN.matcher(output);
+            while (m.find()) {
+                String rel = toBackendRelative(m.group(1).replace('\\', '/'));
+                if (rel != null) files.add(rel);
+            }
+        }
+        return new ArrayList<>(files);
+    }
+
+    /** Normalizes a raw .java path (absolute or relative) to a {@code backend/}-rooted relative path. */
+    private static String toBackendRelative(String raw) {
+        int idx = raw.indexOf("backend/");
+        if (idx >= 0) return raw.substring(idx);
+        return raw.endsWith(".java") && !raw.startsWith("/") ? raw : null;
+    }
+
+    /** Derived / plan-owned frontend modules the fix agent may not edit (mirrors {@link #derivedFileGuard}). */
+    static boolean isDerivedPath(String rel) {
+        String p = rel.replace('\\', '/');
+        boolean inTypes    = p.startsWith("frontend/src/types/") && !p.startsWith("frontend/src/types/local/");
+        boolean inServices = p.startsWith("frontend/src/services/")
+                && !p.startsWith("frontend/src/services/local/") && p.endsWith(".ts");
+        // routes.ts + the derived route registry (AppRoutes/AppProviders). The App.tsx shell stays
+        // editable — it is write-if-missing, so an agent edit persists rather than being clobbered.
+        boolean isRoutes   = p.equals("frontend/src/routes.ts")
+                || p.equals("frontend/src/AppRoutes.tsx")
+                || p.equals("frontend/src/AppProviders.tsx");
+        return inTypes || inServices || isRoutes;
+    }
+
+    /**
+     * Reads every editable file named in the errors into one prompt block, so the agent patches from
+     * ground truth without a read_file exploration round. Derived/immutable files are listed by name
+     * only (they cannot be edited — their consumers must be fixed). Bounded per file and in total.
+     */
+    private String assembleNamedFiles(FileType fileType, String output, Path workspace) {
+        List<String> files = extractErrorFiles(fileType, output);
+        if (files.isEmpty()) return "";
+
+        StringBuilder bodies = new StringBuilder();
+        List<String> derived = new ArrayList<>();
+        int total = 0, included = 0, omitted = 0;
+
+        for (String rel : files) {
+            Path p = workspace.resolve(rel).normalize();
+            if (!p.startsWith(workspace) || !Files.exists(p) || !Files.isRegularFile(p)) continue;
+            if (fileType == FileType.FRONTEND && isDerivedPath(rel)) { derived.add(rel); continue; }
+            if (total >= NAMED_FILES_MAX_CHARS) { omitted++; continue; }
+            try {
+                String content = Files.readString(p);
+                if (content.length() > NAMED_FILE_MAX_CHARS) {
+                    content = content.substring(0, NAMED_FILE_MAX_CHARS)
+                            + "\n/* …truncated — read_file for the rest… */";
+                }
+                bodies.append("\n----- ").append(rel).append(" -----\n").append(content).append('\n');
+                total += content.length();
+                included++;
+            } catch (IOException ignored) {
+                // unreadable — skip
+            }
+        }
+
+        if (included == 0 && derived.isEmpty()) return "";
+
+        StringBuilder out = new StringBuilder();
+        out.append("\nFILES NAMED IN THE ERRORS — already read for you; DO NOT read_file these again. ")
+           .append("Make every edit across all of them in your FIRST response, grouped by the clusters above.\n");
+        if (!derived.isEmpty()) {
+            out.append("(Derived/immutable — NOT editable; fix their consumers to match. Listed for reference: ")
+               .append(String.join(", ", derived)).append(")\n");
+        }
+        out.append(bodies);
+        if (omitted > 0) {
+            out.append("\n[+").append(omitted)
+               .append(" more named file(s) omitted for size — read_file if needed]\n");
+        }
+        log.info("[ErrorFixAgent] Assembled {} named file(s) into the trigger ({} chars); {} derived, {} omitted",
+                included, total, derived.size(), omitted);
+        return out.toString();
+    }
+
     /** Marker line stamped by TsTypeGenerator/TsSdkGenerator on every derived file. */
     private static final String DERIVED_MARKER = "GENERATED from the backend API contract";
 
@@ -413,7 +666,9 @@ public class ErrorFixAgent {
         // end-runs), with services/local/ as the model-writable escape hatch.
         boolean inServices = p.startsWith("frontend/src/services/")
                 && !p.startsWith("frontend/src/services/local/") && p.endsWith(".ts");
-        boolean isRoutes   = p.equals("frontend/src/routes.ts");
+        boolean isRoutes   = p.equals("frontend/src/routes.ts")
+                || p.equals("frontend/src/AppRoutes.tsx")
+                || p.equals("frontend/src/AppProviders.tsx");
 
         if (Files.exists(target)) {
             try {
@@ -450,6 +705,22 @@ public class ErrorFixAgent {
         if (!target.startsWith(workspace)) return "ERROR: path traversal not allowed: " + relativePath;
         String refusal = derivedFileGuard(target, relativePath);
         if (refusal != null) return refusal;
+
+        // ── Option 3: enforce surgical str_replace edits on existing files ──────────
+        // write_file on an existing file replaces ALL content at once: the agent must
+        // reproduce the entire file from memory, which (a) costs ~10–40× more output
+        // tokens than a targeted str_replace, and (b) risks silently changing lines it
+        // didn't intend to touch. Blocking it here forces the agent to use str_replace
+        // for every edit, which is always safe: read the file, find the exact string,
+        // replace just that string, write back — zero drift outside the changed lines.
+        if (Files.exists(target)) {
+            log.warn("[ErrorFixAgent] Blocked write_file on existing file {} — use str_replace for edits",
+                    relativePath);
+            return "REFUSED: '" + relativePath + "' already exists. "
+                    + "Use str_replace to make targeted edits — write_file is only for creating new files. "
+                    + "str_replace(path, old_string, new_string) replaces exactly old_string with new_string; "
+                    + "make old_string the smallest unique snippet that contains the lines you want to change.";
+        }
 
         refusal = lombokGuard(target, relativePath, content);
         if (refusal != null) return refusal;
@@ -527,6 +798,84 @@ public class ErrorFixAgent {
         } catch (IOException e) {
             return "ERROR: " + e.getMessage();
         }
+    }
+
+    /**
+     * Applies the same find-and-replace to every matching file in one tool call.
+     * Covers two modes:
+     *  - directory scan: walks all .ts/.tsx files under the given directory
+     *  - explicit paths: applies only to the comma-separated list of paths
+     * Returns a summary listing which files changed and which were skipped (pattern absent).
+     * Same guards as strReplace: derived files refused, Lombok guard applied.
+     */
+    private String bulkStrReplace(String oldString, String newString,
+                                   String directory, String paths,
+                                   Path workspace, WorkerContext ctx) {
+        if (oldString == null || oldString.isBlank()) return "ERROR: old_string is required";
+        if (newString == null) newString = "";
+
+        // Collect the files to process
+        List<Path> candidates = new java.util.ArrayList<>();
+        if (!paths.isBlank()) {
+            for (String raw : paths.split(",")) {
+                String trimmed = raw.trim();
+                if (!trimmed.isEmpty()) candidates.add(workspace.resolve(trimmed).normalize());
+            }
+        } else if (!directory.isBlank()) {
+            Path dir = workspace.resolve(directory).normalize();
+            if (!dir.startsWith(workspace)) return "ERROR: path traversal not allowed: " + directory;
+            if (!Files.isDirectory(dir)) return "ERROR: not a directory: " + directory;
+            try (java.util.stream.Stream<Path> walk = Files.walk(dir)) {
+                walk.filter(p -> p.toString().endsWith(".ts") || p.toString().endsWith(".tsx"))
+                    .filter(p -> !p.toString().contains("node_modules"))
+                    .sorted()
+                    .forEach(candidates::add);
+            } catch (IOException e) {
+                return "ERROR: could not walk directory: " + e.getMessage();
+            }
+        } else {
+            return "ERROR: provide either 'directory' (to scan) or 'paths' (comma-separated list)";
+        }
+
+        List<String> changed = new java.util.ArrayList<>();
+        List<String> skipped = new java.util.ArrayList<>();
+        List<String> refused = new java.util.ArrayList<>();
+
+        for (Path target : candidates) {
+            if (!target.startsWith(workspace)) { refused.add(target.toString()); continue; }
+            String rel = workspace.relativize(target).toString().replace('\\', '/');
+
+            String refusal = derivedFileGuard(target, rel);
+            if (refusal != null) { refused.add(rel + " (derived)"); continue; }
+            if (!Files.exists(target)) { skipped.add(rel + " (not found)"); continue; }
+
+            try {
+                String content = Files.readString(target);
+                if (!content.contains(oldString)) { skipped.add(rel); continue; }
+
+                String lombokRefusal = lombokGuard(target, rel, content.replace(oldString, newString));
+                if (lombokRefusal != null) { refused.add(rel + " (lombok guard)"); continue; }
+
+                Files.writeString(target, content.replace(oldString, newString));
+                updateDbRecord(rel, ctx);
+                changed.add(rel);
+            } catch (IOException e) {
+                refused.add(rel + " (" + e.getMessage() + ")");
+            }
+        }
+
+        log.info("[ErrorFixAgent] bulk_str_replace: changed={}, skipped={}, refused={}",
+                changed.size(), skipped.size(), refused.size());
+
+        StringBuilder result = new StringBuilder();
+        result.append("Changed ").append(changed.size()).append(" file(s)");
+        if (!changed.isEmpty())
+            result.append(": ").append(String.join(", ", changed));
+        if (!skipped.isEmpty())
+            result.append("\nSkipped (pattern absent): ").append(String.join(", ", skipped));
+        if (!refused.isEmpty())
+            result.append("\nRefused: ").append(String.join(", ", refused));
+        return result.toString();
     }
 
     private static int countOccurrences(String haystack, String needle) {
@@ -657,6 +1006,29 @@ public class ErrorFixAgent {
                                 .addStringProperty("old_string", "Exact text to replace — must occur exactly once in the file")
                                 .addStringProperty("new_string", "Replacement text")
                                 .required(List.of("path", "old_string", "new_string"))
+                                .build())
+                        .build(),
+
+                ToolSpecification.builder()
+                        .name("bulk_str_replace")
+                        .description("Apply the SAME find-and-replace to many files in one call. "
+                                + "Use when the same pattern is wrong across multiple files — e.g. "
+                                + "a named import used on a default-export component in 10 pages, "
+                                + "or the same wrong import path repeated across hooks/components. "
+                                + "Provide EITHER 'directory' (scans all .ts/.tsx files under it) "
+                                + "OR 'paths' (comma-separated list of specific files). "
+                                + "Returns a summary: how many files were changed and which ones.")
+                        .parameters(JsonObjectSchema.builder()
+                                .addStringProperty("old_string",
+                                        "Exact text to replace — applied to every matching file")
+                                .addStringProperty("new_string",
+                                        "Replacement text")
+                                .addStringProperty("directory",
+                                        "Relative directory to scan, e.g. 'frontend/src/pages' or 'frontend/src'. "
+                                        + "All .ts and .tsx files under it are checked; unchanged if old_string not found.")
+                                .addStringProperty("paths",
+                                        "Comma-separated list of specific relative file paths to patch instead of scanning a directory.")
+                                .required(List.of("old_string", "new_string"))
                                 .build())
                         .build(),
 

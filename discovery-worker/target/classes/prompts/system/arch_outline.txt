@@ -51,8 +51,10 @@ Service + Controller is NOT implemented.
   AdminOrderController + types/order.ts + orderService.ts + useOrders.ts + OrderPage.tsx + CartContext.tsx
 - Payment/Razorpay → PRE-SCAFFOLDED, DO NOT PLAN (see the PAYMENT SPINE note below). The
   ordering feature injects the scaffolded PaymentService directly; emit NO payment files or feature.
-- Events/Gallery → Event, EventRepository, EventDto, EventService, EventController,
+- Events → Event, EventRepository, EventDto, EventService, EventController,
   AdminEventController + types/event.ts + eventService.ts + useEvents.ts + EventsPage.tsx
+  (event PHOTOS are NOT an entity — they live in the fenced media library; see the MEDIA
+  LIBRARY + GALLERY note below)
 
 REPRESENTATIVE, not exhaustive. For any other feature, follow the same pattern:
 backend = Model + Repository + Service + Controller (+ DTO, + AdminController if it has
@@ -62,13 +64,16 @@ admin management); frontend = types/<domain>.ts + service.ts + use<Feature>.ts +
 Every FRONTEND feature that has a service.ts MUST include a companion types file:
   frontend/src/types/<domain>.ts   (layer: UTIL, same feature as the rest of the frontend domain)
 
-The service.ts, hook.ts, and Page.tsx in the same feature MUST list this types file in
+The service.ts and Page.tsx in the same feature MUST list this types file in
 their imports_from arrays so the cross-reference validator can detect it.
 
-NOTE — these types and service files are DERIVED FROM THE BACKEND at build time
-(not LLM-generated): still plan them in the manifest with imports_from wiring —
-the manifest paths tell the derivation where to emit. Pages and hooks import from
-them exactly as planned.
+NOTE — types, service, AND hook files are DERIVED FROM THE BACKEND at build time
+(not LLM-generated). Types and services: still plan them in the manifest with
+imports_from wiring — the manifest paths tell the derivation where to emit. HOOKS:
+do NOT plan them at all, and do NOT list a hook in any imports_from — the build emits
+one frontend/src/hooks/<domain>Hooks.ts per service (a TanStack hook wrapping every
+service function) and pages/components resolve it from the module registry at generation
+time. Never author a hook file.
 
 ## Step 1b — Service Files: ONE per domain, NOTHING else (MANDATORY)
 Plan exactly ONE frontend/src/services/<domain>Service.ts per backend domain, and NO
@@ -120,7 +125,22 @@ regenerates the whole file) and routinely exceeds the LLM output budget.
 ## Step 3 — Baseline infra (ADDITIVE, never a substitute)
 Add to EVERY project in addition to Steps 1–2, never displacing a derived file:
 
-  Backend (PLAN THESE): SpaController, GlobalExceptionHandler, ErrorResponse.
+  Backend (PLAN THESE): GlobalExceptionHandler, ErrorResponse.
+  SpaController is PRE-SCAFFOLDED by the foundation — DO NOT PLAN it.
+
+  Frontend (PLAN THIS — exactly once, in the shared-frontend or core-ui feature):
+    src/config/siteConfig.ts — the site shell configuration. This file supplies the
+    SiteHeader and SiteFooter with ALL business-specific content and design tokens via props.
+    It is the ONLY place Header/Footer content is authored. Generate it as a named const
+    that exports a SiteConfig object (import type { SiteConfig } from '@/shell'):
+      header: { brandName, navLinks, ctaButton, bgClass, textClass, hoverClass, ctaClass }
+      footer: { brandName, tagline, address, phone, email, openingHours, quickLinks, socialLinks,
+                bgClass, textClass, accentClass }
+    navLinks must cover every public route in the plan. ctaButton should be the primary
+    conversion action (book table / order now / join / enquire). bgClass/textClass/accentClass
+    must use Tailwind classes that match the business's brand palette.
+    DO NOT generate Header.tsx, Footer.tsx, or Layout.tsx — these are pre-built in the
+    foundation at @/shell and are closed for modification.
 
   Backend AUTH SPINE — PRE-SCAFFOLDED, DO NOT PLAN. These files are written to disk
   deterministically by the build BEFORE you run and are NOT part of your manifest. Do NOT
@@ -172,8 +192,19 @@ Add to EVERY project in addition to Steps 1–2, never displacing a derived file
   MUST NOT create users: the ADMIN user is seeded by the pre-scaffolded AdminInitializer, and a
   second user-seeding component collides on the unique email and crash-loops the app at boot.
 
-  Frontend: AuthContext, LoginPage, AdminDashboardPage, ProtectedRoute,
-  Layout, Header, Footer, AdminLayout, api/client.ts, App.tsx
+  Frontend AUTH — PRE-SCAFFOLDED, DO NOT PLAN. Fenced on disk (see frontend/FOUNDATION_CONTRACT.md
+  for exact shapes; never re-declare):
+    @/context/AuthContext + @/hooks/useAuth — AuthProvider is already mounted at the app root; consume
+      auth ONLY via useAuth(). There is NO authService.ts and NO types/auth.ts; login is email-OR-phone
+      and register() takes one object and self-logs-in.
+    @/api/client — the axios instance; the JWT Bearer is attached automatically. Never create another
+      axios client and never set the Authorization header.
+  (The site shell @/shell — SiteLayout/SiteHeader/SiteFooter — is likewise fenced; see Step 3.)
+  You DO generate, referencing the above: ProtectedRoute.tsx (your route guard, NOT in the foundation),
+  AdminLayout.tsx, siteConfig.ts, and the Login/Signup/Admin pages. frontend/src/routes.ts,
+  frontend/src/AppRoutes.tsx, frontend/src/AppProviders.tsx and the frontend/src/App.tsx shell
+  are DERIVED from this plan — do NOT plan them. (App.tsx is a frozen shell mounting the provider
+  tree around <AppRoutes/>; the route table lives in the derived AppRoutes.tsx.)
 
   Frontend CART/COMMERCE FRAMEWORK — PRE-SCAFFOLDED (HEADLESS), DO NOT PLAN its files. A configurable,
   business-agnostic cart framework lives under frontend/src/cart/ (state + logic only, fenced +
@@ -209,6 +240,26 @@ Add to EVERY project in addition to Steps 1–2, never displacing a derived file
       metadata for extras). Pricing (GST/delivery/discount): add rules to cartConfig.ts, read useCart().totals —
       NEVER hardcode a charge inside a component.
 
+  MEDIA LIBRARY + GALLERY — PRE-SCAFFOLDED, DO NOT PLAN. The foundation ships ONE media library:
+  admin uploads/manages all images at /admin/media; bytes are stored in object storage (MinIO/S3),
+  served at /api/v1/media/{key}. The public gallery is a VIEW over it — an image is published to the
+  gallery by an admin flag (showInGallery + section/event), not a separate store. FENCED — do NOT plan
+  or emit any of these, and do NOT build your own gallery/upload/storage:
+    Backend: MediaAsset, MediaAssetRepository, MediaAssetDto, MediaAssetService, GallerySection,
+      GalleryItemDto, AdminMediaController (/api/v1/admin/media), GalleryController (public GET
+      /api/v1/gallery), MediaController (GET /api/v1/media/{key}), StorageService/MinioStorageService,
+      S3Config.
+    Frontend: @/types/media, @/services/mediaService, @/hooks/useMedia, pages/admin/AdminMediaPage.tsx,
+      @/types/gallery, @/services/galleryService, @/hooks/useGallery, @/components/gallery/GallerySection,
+      pages/GalleryPage.tsx.
+  To show gallery images on the site, render <GallerySection section="WEBSITE" /> (or "EVENT") or read
+  useGallery(section?). Admins manage everything at /admin/media (upload, publish-to-gallery, edit,
+  delete). There is NO separate /admin/gallery page.
+  ENTITY IMAGES (e.g. a Trainer's photo): DO NOT build your own upload/storage. Your entity keeps a
+  plain image-URL string field (e.g. `photoUrl`); the admin uploads in the media library, copies the
+  `/api/v1/media/<key>` url, and stores it on the entity; display with <img src={entity.photoUrl}>.
+  (See frontend/backend FOUNDATION_CONTRACT.md for shapes.)
+
 App.tsx MUST be included in the files array — it is NOT scaffold. But do NOT design its
 route table: App.tsx and frontend/src/routes.ts are DERIVED from this plan at build time
 (never plan routes.ts). Every route is derived from its page's FILE NAME, so name pages
@@ -227,15 +278,21 @@ so the derived route is the intended one:
 For each domain entity the owner manages (e.g. MenuItem, Reservation, Order):
   backend/.../controller/Admin{Domain}Controller.java   (CONTROLLER)
   frontend/src/pages/Admin{Domain}Page.tsx               (PAGE)
-The admin page's hook and components list frontend/src/services/<domain>Service.ts in
+The admin page and its components list frontend/src/services/<domain>Service.ts in
 imports_from — admin CRUD functions live in the derived domain SDK (see Step 1b), never
-in a separate admin service file.
+in a separate admin service file. (The admin hook is derived — never planned.)
 
 # JAVA TYPE RULES (these create file entries — apply while listing files)
 Every Java enum and record MUST be its own top-level .java file — never a nested type.
 A status enum (ReservationStatus) or nested request record (OrderItemRequest) is a
 SEPARATE entry in the files array with its own file_name, file_path, and layer
 (enum → MODEL, record DTO → DTO). The parent file references them via imports_from.
+
+ENTITY IDS = Long. Every domain entity's primary key is a `Long id` (generated IDENTITY) —
+plan the `id` public_variable as type Long, NEVER UUID. Cross-entity reference fields are the
+target's Long id (e.g. `planId`, `classId` → Long), and each DTO's `id` is Long too, so entity,
+DTO, and the derived frontend type all agree. Reference the platform user by `userId` of type
+Integer (= User.id, foundation), never a UUID. Do not plan any UUID-typed `id` or `*Id` field.
 
 Every custom exception class referenced anywhere in the project MUST appear as its own
 entry in the "files" array (package com.{slug}.exception, layer EXCEPTION) — e.g.
@@ -256,8 +313,8 @@ floating CTA + UPI badge + Google Maps embed (any Indian business), prominent
 testimonials section (4.5+ rated businesses).
 
 **Hard constraint:** every creative addition must follow the same derivation rules as
-Step 1. A new frontend feature needs service.ts + hook + types/<domain>.ts + Page.tsx.
-A new backend feature needs Model + Repository + Service + Controller. Never add a
+Step 1. A new frontend feature needs service.ts + types/<domain>.ts + Page.tsx (the hook
+is DERIVED — never plan it). A new backend feature needs Model + Repository + Service + Controller. Never add a
 partial set — an incomplete feature causes generation failures downstream.
 
 # OUTLINE RULES
@@ -280,14 +337,15 @@ same domain on backend and frontend are SEPARATE features.
 
 ## Feature type rules
 - BACKEND: all Java files for one business domain (model + repo + service + controller + DTOs)
-- FRONTEND: all TypeScript/TSX files for one domain (service.ts + hook + Page.tsx +
-  AdminPage.tsx + every Step 2a component belonging to those pages)
+- FRONTEND: all TypeScript/TSX files for one domain (service.ts + Page.tsx +
+  AdminPage.tsx + every Step 2a component belonging to those pages; the hook is derived, never planned)
 - INFRA: ALL infra files (CI workflows, nginx.conf if any). Exactly one INFRA feature per
   project, named "infrastructure". No enrichment runs for it.
-- SHARED: cross-cutting backend utilities that are NOT pre-scaffolded — SpaController,
-  GlobalExceptionHandler, ErrorResponse. (The auth spine — User, Role, SecurityConfig,
-  PasswordEncoderConfig, JwtUtil, JwtAuthFilter, AuthController, Auth DTOs, UserRepository,
-  UserService, AdminInitializer — is pre-scaffolded per Step 3; never place it in a feature.)
+- SHARED: cross-cutting backend utilities — GlobalExceptionHandler, ErrorResponse.
+  (The foundation pre-scaffolds: SpaController, User, Role, SecurityConfig, PasswordEncoderConfig,
+  JwtUtil, JwtAuthFilter, AuthController, Auth DTOs, UserRepository, UserService, AdminInitializer,
+  and the full payment spine. None of these appear in SHARED or any feature — they are closed for
+  modification and open for extension: generated code imports/uses them, never reimplements them.)
 
 ## Size rule
 4–10 files per feature, NOT counting COMPONENT files. If a domain exceeds 10 non-component
@@ -312,7 +370,7 @@ keys).
 
 # SELF-CHECK (do not output)
 - Every mustHaveFeature has backend Model + Repository + Service + Controller?
-- Every recommendedPage has a Page.tsx; every data-loading page has service.ts + hook + types file?
+- Every recommendedPage has a Page.tsx; every data-loading page has service.ts + types file? (the hook is derived — never planned)
 - Every page with a form, table, or dialog decomposed per Step 2a — shell page + one
   COMPONENT file per concern, components in the SAME feature as their page?
 - Every path in every imports_from list exists as a file_path entry?

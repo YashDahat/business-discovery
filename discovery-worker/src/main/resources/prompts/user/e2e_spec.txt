@@ -1,0 +1,18 @@
+Write the Playwright e2e spec for this feature.
+
+== FEATURE ==
+{featureName}
+
+{featureInstruction}
+
+== ROUTE MANIFEST (navigate with these exact paths, baseURL is injected) ==
+{routes}
+
+== AVAILABLE SELECTORS (data-testid literals present in the app, grouped by file) ==
+{selectors}
+
+== SEEDED LOGIN CREDENTIALS (use for any admin/owner journey) ==
+{credentials}
+
+Produce the raw .ts spec content now — journey for THIS feature only, testid-first selectors,
+relative navigation, outcome assertions. No fences, no prose.

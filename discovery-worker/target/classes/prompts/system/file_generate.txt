@@ -48,6 +48,42 @@ JPA BIDIRECTIONAL SAVE — set the child's owning-side reference BEFORE saving t
       orderItems.forEach(i -> i.setOrder(order));   // REQUIRED before the save
       orderRepository.save(order);                  // cascade now writes a valid order_id
 
+ENTITY PRIMARY KEYS = Long IDENTITY — every domain @Entity declares its @Id EXACTLY as:
+      @Id
+      @GeneratedValue(strategy = GenerationType.IDENTITY)
+      private Long id;
+  NEVER use UUID for a primary key or ANY id field: no `private UUID id`, no
+  GenerationType.UUID, no GenerationType.AUTO, no UUID.randomUUID()/UUID.nameUUIDFromBytes for ids.
+  Reference another domain entity by its Long id — a foreign-key field is `private Long <entity>Id;`
+  (e.g. orderId, planId, classId), a @PathVariable is `Long id`, and a DTO's id field is `Long id`
+  (the entity, its DTO, and the frontend type MUST all agree on the id type). Fenced foundation spine
+  is the ONLY exception and is left as-is: User.id is Integer, Payment.id is Long, and the platform
+  user is referenced by `Integer userId` (see the CURRENT USER rule below). UUID may appear only for
+  an external gateway/correlation token, never for a row's own identity.
+
+JPA SEEDING — never assign an @Id that is @GeneratedValue. In a CommandLineRunner/seeder,
+  construct each entity with the no-arg constructor + setters (or a builder) and leave the id
+  null so Hibernate generates it. Passing an explicit id (e.g. new Trainer(UUID.randomUUID(), …))
+  makes Spring Data see a non-null id, treat the row as detached, and issue an UPDATE (merge) that
+  matches zero rows — the seeder crashes at boot with ObjectOptimisticLockingFailureException and
+  the app restart-loops. Seed every entity the way its siblings do: no id argument.
+
+CURRENT USER = userId, via @CurrentUser — inject the current user with `@CurrentUser Integer userId`
+  (foundation resolver; = User.id, null for a guest). NEVER parse the principal as a UUID (no
+  UUID.fromString(...), no nameUUIDFromBytes, no hardcoded id). A domain model references the user by
+  an `Integer userId` field (= User.id) set from @CurrentUser — NEVER a UUID, and never email/phone
+  stored as the link. For the current user's own rows, filter the repository by `userId` (do not
+  expose an id path param). Email/phone are login + lookup keys only: when you must find a user by
+  them use UserRepository.findByEmail(...) / findByPhone(...).
+
+CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-built in @/cart):
+  CartItem: { id: string|number; name: string; unitPrice: number; quantity: number; imageUrl?: string|null; variantKey?: string; metadata?: Record<string,unknown> }
+  addItem(item: CartItem): void  — import useCart from '@/cart/CartContext' or '@/context/CartContext'
+  CartTotals: { subtotal: number; adjustments: AdjustmentLine[]; total: number }
+  AdjustmentLine: { id: string; label: string; amount: number }
+  Access totals as: const { cartItems, addItem, totals, cartCount } = useCart()
+  totals.adjustments.map(adj => adj.label / adj.amount) — never adj.index or adj.name
+
 8. UI COMPONENTS — shadcn-first. Follow this priority order for frontend files:
    (a) PREFER shadcn: for any element shadcn provides — Button, Input, Textarea, Label, Select,
        Checkbox, RadioGroup, Switch, Form, Dialog, AlertDialog, DropdownMenu, Popover, Tooltip,
@@ -62,19 +98,57 @@ JPA BIDIRECTIONAL SAVE — set the child's owning-side reference BEFORE saving t
    NEVER import from @/lib/utils in app files. Use clsx for className merging.
 
 # TYPESCRIPT / REACT 19 CONSTRAINTS (TS/TSX files only — every rule fixes a recurring build breaker)
-1. TANSTACK QUERY v5 API ONLY (v4 idioms do not compile):
-   - useQuery({ queryKey: ['trainers'], queryFn: fetchTrainers })  — OBJECT form; positional
-     useQuery(['trainers'], fetchTrainers) is a compile error in v5.
-   - Mutations expose isPending — mutation.isLoading DOES NOT EXIST on useMutation results.
-   - useMutation({ mutationFn: createTrainer, onSuccess: ... }) — object form here too.
+1. TANSTACK QUERY v5 — SERVER STATE MANAGEMENT (applies to every business domain)
+   TanStack Query separates SERVER state (data from an API, cached and synchronised)
+   from LOCAL state (UI toggles, form values). Use it for any data that comes from the
+   backend: menu items, reservations, orders, trainers, blog posts, gallery images —
+   anything fetched via a service function. Never use useState + useEffect to fetch.
+
+   TWO HOOKS, TWO PURPOSES — never mix them:
+
+   useQuery  — READ data (GET requests). Result exposes:
+     { data, isLoading, isError, error, isFetching, refetch }
+     const { data: menuItems, isLoading } = useQuery({
+       queryKey: ['menuItems'],          // cache key — array, unique per query
+       queryFn: getAllMenuItems,         // service function from @/services/<domain>Service
+     });
+
+   useMutation — WRITE data (POST / PUT / PATCH / DELETE). Result exposes:
+     { mutate, mutateAsync, isPending, isError, isSuccess, data, error }
+     const { mutate: createItem, isPending } = useMutation({
+       mutationFn: createMenuItem,       // service function
+       onSuccess: () => queryClient.invalidateQueries({ queryKey: ['menuItems'] }),
+     });
+     // To trigger: createItem(formData)  or  await mutateAsync(formData)
+
+   COMMON MISTAKES TO AVOID:
+   - NEVER call query.queryFn() — queryFn is an internal config, not callable on the result.
+   - NEVER use mutation.isLoading — it was renamed to mutation.isPending in v5.
+   - NEVER use positional form: useQuery(['key'], fn) — object form only in v5.
+   - NEVER use useState + fetch/axios for server data — use useQuery instead.
+   - ALWAYS invalidate the relevant queryKey in onSuccess so the UI refreshes.
+   - queryKey should match the domain noun: ['menuItems'], ['reservations'], ['orders'],
+     ['trainers'], ['blogPosts'], ['galleryImages'] — consistent naming prevents stale cache.
 2. ZOD NUMERIC FORM FIELDS: HTML inputs yield strings — use z.coerce.number() (NOT z.number())
    for any numeric field bound to an <input>, or the zodResolver output type will not match
    the DTO interface and the resolver assignment fails to compile.
-3. TYPE RE-EXPORTS: isolatedModules is on — re-exporting a type requires
+3. IMPORT FORM — match the export form of the target file exactly (TS2614 otherwise):
+   - `export default function Foo()` or `export default Foo` → import as `import Foo from './Foo'`
+     DEFAULT import — NO braces. This is by far the most common form for component files.
+   - `export function Foo()` or `export const Foo =` without `default` → `import { Foo } from './Foo'`
+     NAMED import — WITH braces.
+   - NEVER write `import { Layout } from './Layout'` when Layout.tsx uses `export default function Layout`.
+     This is a compile error (TS2614) every single time — it is not a "maybe".
+   - Rule of thumb: page and component files (*.tsx) almost always use `export default`. Utility files
+     with multiple exports (hooks, services, types, utils) use named exports.
+   UNUSED IMPORTS — every symbol you import must be used in this file.
+   Never import a type or component you don't render or call. ESLint removes unused imports
+   as an ERROR before the build — unused-imports/no-unused-imports: error is active.
+4. TYPE RE-EXPORTS: isolatedModules is on — re-exporting a type requires
    export type { Foo } from './bar'  (a plain export { Foo } fails to compile).
-4. BOOLEAN JSX ATTRIBUTES: allowFullScreen, disabled, checked take booleans —
+6. BOOLEAN JSX ATTRIBUTES: allowFullScreen, disabled, checked take booleans —
    allowFullScreen={true} or bare allowFullScreen, never allowFullScreen="true".
-5. API TYPES AND SERVICES ARE PRE-GENERATED GROUND TRUTH: frontend/src/types/<domain>.ts
+7. API TYPES AND SERVICES ARE PRE-GENERATED GROUND TRUTH: frontend/src/types/<domain>.ts
    and frontend/src/services/<domain>Service.ts are DERIVED from the backend contract and
    already exist. Their real content appears in your dependency context: import the
    exact exported interfaces and service functions shown there. ADMIN API functions live
@@ -140,9 +214,30 @@ JPA BIDIRECTIONAL SAVE — set the child's owning-side reference BEFORE saving t
    '@/'-aliased app modules — real npm packages (react, @tanstack/react-query, lucide-react,
    @radix-ui/*) and the shadcn files in the AVAILABLE UI IMPORTS list are unaffected. An
    import of a non-existent local module is an unfixable compile error.
+9. AUTH STATE HYDRATES SYNCHRONOUSLY: a context that restores a session from localStorage must
+   seed state with lazy useState initializers — useState(() => localStorage.getItem('token')) and
+   useState(() => !!localStorage.getItem('token')) — NEVER useState(null) + a useEffect that reads
+   localStorage. A useEffect runs AFTER the first render, so on a refresh or deep-link of a
+   protected route ProtectedRoute reads isAuthenticated=false on first paint and redirects to
+   /login, silently logging the user out.
+10. READ THE ID FROM WHERE THE URL PUTS IT: match the param reader to the route definition in the
+   ROUTE MANIFEST. If navigation targets a query string (navigate(`/checkout?planId=${id}`) with
+   <Route path="/checkout">), read useSearchParams().get('planId') — useParams() returns {}
+   because the route declares no :param. Only use useParams() when the route is path-parameterised
+   (<Route path="/checkout/:id">). A mismatch fetches with an empty id, loads no data, and renders
+   the error/empty state.
 
 # UI QUALITY STANDARDS (PAGE and COMPONENT files only — skip for Java/config files)
-1. LAYOUT WRAPPER: public Page.tsx wraps JSX in <Layout> from @/components/Layout. Admin*Page.tsx wraps in <AdminLayout> from @/components/AdminLayout. Never inline nav or sidebar inside a page.
+1. LAYOUT WRAPPER:
+   - Public Page.tsx returns its content DIRECTLY — no Layout wrapper needed. The foundation's
+     SiteLayout (with SiteHeader + SiteFooter) is applied globally in App.tsx via a nested Route,
+     so every public page already has Header + Footer. Never import or render <Layout> in a public page.
+   - Admin*Page.tsx wraps in <AdminLayout> from @/components/AdminLayout — this provides the admin
+     sidebar. Never inline nav or sidebar inside a page.
+   - src/config/siteConfig.ts MUST be generated for every project — it configures the SiteHeader
+     and SiteFooter with the business's brand name, nav links, CTA, contact details, social links,
+     and Tailwind design tokens (bgClass, textClass, accentClass etc.). Import SiteConfig type from
+     '@/shell'. This file is the ONLY place business-specific shell content lives.
 2. SECTION CONTAINERS: <section className="py-16 px-4"><div className="max-w-7xl mx-auto">…</div></section> — content never touches viewport edge.
 3. RESPONSIVE GRIDS: grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 — never fixed column counts on mobile.
 4. RESPONSIVE TYPOGRAPHY: hero h1 = text-4xl md:text-6xl font-bold; section headings = text-2xl md:text-3xl font-semibold.
@@ -151,6 +246,8 @@ JPA BIDIRECTIONAL SAVE — set the child's owning-side reference BEFORE saving t
 7. LOADING STATES: data-fetching components render a skeleton or spinner while isLoading is true — never an empty container.
 8. EMPTY STATES: when a list/result is empty, render a styled empty-state with icon + message — not a blank section.
 9. DYNAMIC COPY ONLY: business name, phone, address, hours — all from props or API response. Zero hardcoded strings in JSX.
+10. MOBILE NAV: a Header/navbar that hides its links with `hidden md:flex` MUST provide a mobile fallback — a hamburger button (lucide-react Menu/X, shown `md:hidden`) that toggles a dropdown listing the same links plus the auth actions. Without it, mobile visitors see only the logo and cannot navigate.
+11. TEST HOOKS (data-testid): put a `data-testid` on every element an automated flow must find — so browser e2e tests locate elements by a stable id, not brittle text. Use kebab-case with a stable convention: nav links `nav-<routeKey>` (nav-memberships); a form `<entity>-form`; its inputs `<entity>-<field>` (login-email, login-password, trial-name); its submit `<entity>-submit` (login-submit); primary CTAs `<action>-cta` (join-cta, book-cta); repeated list/card items `<entity>-card` (same testid on each — tests select by index). Add them to real interactive elements only (inputs, buttons, links, cards); never to layout wrappers. This is additive — it never changes rendered output or replaces accessibility roles/labels.
 
 # OUTPUT
 Return ONLY raw file content — no fences, language tag, explanation, or preamble.

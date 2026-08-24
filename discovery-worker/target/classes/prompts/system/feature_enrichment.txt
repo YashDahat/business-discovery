@@ -78,17 +78,16 @@ Pick the most relevant URL for this business category. Always add <div className
 8. BUSINESS-SPECIFIC CONTENT
 Use the actual business name, domain entity names, and realistic placeholder copy that matches the business type. No generic "Item" or "Entity" names.
 
-Business contact details (address, phone, opening hours, map coordinates) are provided in the user prompt under BUSINESS CONTEXT. Use them VERBATIM in Footer.tsx and any contact section — never approximate, never invent. If the address says Pune, the Footer shows Pune — never Bangalore or any other city.
+Business contact details (address, phone, opening hours, map coordinates) are provided in the user prompt under BUSINESS CONTEXT. Use them VERBATIM in siteConfig.ts (the fenced SiteFooter's props) and any contact section — never approximate, never invent. If the address says Pune, the site shows Pune — never Bangalore or any other city.
 
-9. AUTH TOKEN KEY CONSISTENCY
-The localStorage key used to store the JWT MUST be identical in every file that touches it. Default key: 'token'.
-- AuthContext stores it: localStorage.setItem('token', response.token)
-- api/client.ts interceptor reads it: localStorage.getItem('token')
-- Any other hook or service that reads the token uses the same key
-If this feature is auth-ui, declare the key name explicitly in featureInstruction. If this feature's files read the token (e.g. in an axios interceptor), cross-reference the auth-ui peer summary and use the exact same key — never invent 'authToken' or any variant.
+9. AUTH TOKEN IS FENCED — DO NOT AUTHOR IT
+The JWT and its storage are owned by the fenced foundation: @/context/AuthContext stores the token and
+the @/api/client interceptor attaches it automatically. Never plan or author an AuthContext /
+authService / api-client, never read or write localStorage for the token, and never set an
+Authorization header. Consume auth only through useAuth(); the current user's identity comes from there.
 
-10. SHARED LAYOUT COMPONENTS
-Public pages MUST wrap content in <Layout> from @/components/Layout. Admin pages MUST wrap content in <AdminLayout> from @/components/AdminLayout. The nav/sidebar is NEVER duplicated inside individual page files — it lives only in Layout.tsx / AdminLayout.tsx.
+10. SHARED LAYOUT
+Public pages return their content DIRECTLY — the fenced SiteLayout (SiteHeader + SiteFooter) is applied globally in the derived App.tsx, so never wrap a public page in a layout and never import @/components/Layout (it does not exist). Admin pages wrap content in <AdminLayout> from @/components/AdminLayout (your own). The nav/sidebar is NEVER duplicated inside page files — it lives only in the fenced shell / AdminLayout.
 
 # DEPENDENCY DIRECTION (cross-feature wiring — bean cycles crash the app at BOOT)
 
@@ -126,11 +125,16 @@ instead of removing it, and leave the tangled design in place.
 
 ## Exactness
 Exact identifiers, not descriptions — literal field names/casing ("menuItemId");
-concrete types ("UUID", "decimal(10,2)", "List<MenuItem>", never "number"/"object");
+concrete types ("Long", "Integer", "BigDecimal", "LocalDate", "List<MenuItem>", never "number"/"object", and never "UUID" for ids — see IDs & user identity below);
 endpoints as method + full path + params ("GET /api/v1/menus/{menuId}/items?category={category}");
 return AND error types with status codes. Integrating artifacts must match exactly —
-if a controller calls getOrderById(UUID): OrderResponse, the service declares it
+if a controller calls getOrderById(Long): OrderResponse, the service declares it
 identically. Trace every cross-reference before finalizing.
+
+## IDs & user identity (BACKEND — mandatory; this is the #1 source of runtime drift)
+- Every domain entity's PRIMARY KEY is `Long id` with `@GeneratedValue(strategy = GenerationType.IDENTITY)` — NEVER a UUID. Every `*Id` field that references another domain entity is that entity's `Long id`. Do not emit a UUID-typed `id` or `*Id` anywhere.
+- Reference the platform USER by `Integer userId` (= User.id of the fenced foundation `User`). A controller obtains it with the foundation resolver `@CurrentUser Integer userId`; the frontend NEVER sends a user id. In every user-owned entity/DTO (order, booking, reservation, review, appointment, …) the user link is `Integer userId`, set server-side from `@CurrentUser`.
+- NEVER type the user link as UUID, NEVER invent a separate `memberId`/`customerId` of a different type, and NEVER store email/phone as the reference (those are login + lookup keys only). A service that needs the current user takes `Integer userId`; a "my own rows" query filters by `userId` — do not expose a user-id path param.
 
 ## Layer-specific field rules
 - MODEL: public_variables = ALL @Column fields with Java type + constraints; api_endpoints = null
@@ -139,9 +143,12 @@ identically. Trace every cross-reference before finalizing.
 - CONTROLLER: api_endpoints = FULL endpoint list; public_functions = handler method signatures
 - DTO: public_variables = ALL fields with Java type + Bean Validation annotations; api_endpoints = null
 - EXCEPTION: minimal public_functions; api_endpoints = null
-- PAGE: api_endpoints_consumed = null (pages call hooks, not backend directly)
+- PAGE: api_endpoints_consumed = null (pages consume the build's derived hooks by capability, not the backend directly)
 - COMPONENT: public_functions = component name with props type; api_endpoints = null
-- HOOK: public_functions = the hook signature; api_endpoints_consumed = null (hooks call services)
+- HOOK: data hooks are DERIVED by the build (one TanStack hook per service function) — they are
+  NOT in the files array. Never emit a HOOK entry, and never author or name a hook (no
+  "useCreateGymClass"). When a file's role would "use the useX hook", describe the CAPABILITY
+  instead ("fetch all classes", "create a class") and let the build wire the generated hook.
 - SERVICE (frontend): api_endpoints_consumed = backend endpoints this service calls; public_functions = all exported async functions
 
 ## file_role

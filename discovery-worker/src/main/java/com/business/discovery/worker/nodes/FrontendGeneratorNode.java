@@ -8,13 +8,16 @@ import com.business.discovery.worker.model.GeneratedFile;
 import com.business.discovery.worker.repository.GeneratedFileRepository;
 import com.business.discovery.worker.service.BuildToolService;
 import com.business.discovery.worker.service.llm.ArchitectureSpec;
+import com.business.discovery.worker.service.llm.FeatureCard;
 import com.business.discovery.worker.service.llm.FeatureSpec;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.util.ApiContractCard;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.EnrichmentCardUtil;
 import com.business.discovery.worker.util.EslintCycleParser;
+import com.business.discovery.worker.util.FileContractCard;
 import com.business.discovery.worker.util.LayerOrderUtil;
 import com.business.discovery.worker.util.TruncationDetector;
 import com.business.discovery.worker.util.TypeScriptExportRegistry;
@@ -53,6 +56,11 @@ public class FrontendGeneratorNode implements WorkerNode {
     // Max concurrent Flash LLM calls per layer — limits Gemini API rate pressure.
     private static final int MAX_PARALLEL_PER_LAYER = 5;
 
+    // Marker written as the first-line comment in every foundation frontend file so isFenced()
+    // protects them from LLM overwrite. The LLM must never regenerate AuthContext, api/client,
+    // lib/utils, or context shims — these are part of the deterministic foundation scaffold.
+    public static final String FOUNDATION_FENCE_MARKER = "GENERATED foundation scaffold";
+
     // Same-attempt regeneration budget for a file that comes back truncated (mid-token).
     private static final int MAX_GEN_ATTEMPTS = 3;
 
@@ -78,6 +86,7 @@ public class FrontendGeneratorNode implements WorkerNode {
                 "noUnusedLocals": false,
                 "noUnusedParameters": false,
                 "noFallthroughCasesInSwitch": true,
+                "forceConsistentCasingInFileNames": true,
                 "paths": { "@/*": ["./src/*"] }
               },
               "include": ["src"]
@@ -169,6 +178,13 @@ public class FrontendGeneratorNode implements WorkerNode {
     // Guards concurrent writes to ARCHITECTURE.json from parallel Flash LLM threads within a layer.
     private final ReentrantLock archJsonLock = new ReentrantLock();
 
+    // Playwright e2e scaffold — config + dev dep only (spec SCRIPTS are authored later by
+    // PlaywrightSpecGenerator). Skipped entirely when e2e is disabled.
+    @org.springframework.beans.factory.annotation.Value("${worker.e2e.enabled:true}")
+    private boolean e2eEnabled;
+    @org.springframework.beans.factory.annotation.Value("${worker.e2e.playwright-version:1.48.0}")
+    private String playwrightVersion;
+
     public FrontendGeneratorNode(@Qualifier("geminiFlash") LlmGeneratorService flashLlm,
                                  BuildToolService buildToolService,
                                  GeneratedFileRepository fileRepo,
@@ -232,6 +248,12 @@ public class FrontendGeneratorNode implements WorkerNode {
             // regeneration and auto-mounted by App.tsx provider discovery.
             com.business.discovery.worker.util.CartSpineScaffold.write(frontendDir.resolve("src"));
 
+            // Seed the export registry from ALL foundation files already on disk before generation
+            // starts. Without this, TypeScriptImportFixer cannot resolve imports from foundation
+            // files that are not in the spec (e.g. AuthContext, context shims, api/client) because
+            // the registry only learns about files as they are generated or skipped during this run.
+            seedExportRegistryFromDisk(frontendDir.resolve("src"), workspace, exportRegistry);
+
             // Ground-truth UI inventory: what @radix-ui packages and shadcn ui files ACTUALLY
             // export, enumerated from the installed workspace. Injected into every generation
             // prompt and consumed by UiImportRewriter — replaces hardcoded component knowledge.
@@ -252,6 +274,58 @@ public class FrontendGeneratorNode implements WorkerNode {
             } else {
                 log.info("[FrontendGeneratorNode] API contract card: {} type file(s), {} route(s)",
                         contractCard.typeFileCount(), contractCard.routeCount());
+            }
+
+            // Planned component prop contracts — the transport of the ground truth reconciled at
+            // planning time (ContractReconciler in ProjectPlanningNode), read back off the spec here
+            // and injected into component/page prompts so both sides bind field-for-field.
+            this.plannedPropsCard =
+                    com.business.discovery.worker.util.PlannedComponentPropsCard.build(architectureSpec.getFiles());
+            log.info("[FrontendGeneratorNode] Planned component props: {} component/page contract(s)",
+                    plannedPropsCard.moduleCount());
+
+            // Frontend twin of BackendContractCard: planned/reconciled interfaces of NON-component
+            // modules (hooks/services/types), so a same-layer consumer binds to their signatures
+            // instead of inventing them.
+            this.frontendPlannedContractCard =
+                    com.business.discovery.worker.util.FrontendPlannedContractCard.build(architectureSpec.getFiles());
+            log.info("[FrontendGeneratorNode] Planned frontend module contracts: {} hook/service/type interface(s)",
+                    frontendPlannedContractCard.moduleCount());
+            if (!plannedPropsCard.componentsWithoutProps().isEmpty()) {
+                log.warn("[FrontendGeneratorNode] {} component/page file(s) have NO props in the plan "
+                        + "(parents cannot bind their contract): {}",
+                        plannedPropsCard.componentsWithoutProps().size(),
+                        plannedPropsCard.componentsWithoutProps());
+            }
+            if (!plannedPropsCard.componentsWithOpaqueProps().isEmpty()) {
+                log.warn("[FrontendGeneratorNode] {} component/page file(s) still have OPAQUE props "
+                        + "(<Name>Props ref, not fields) after reconciliation — these will drift: {}",
+                        plannedPropsCard.componentsWithOpaqueProps().size(),
+                        plannedPropsCard.componentsWithOpaqueProps());
+            }
+
+            // Fenced foundation contract (auth/cart/checkout/shell) — ground truth for the immutable
+            // spine, deterministic + byte-identical every run so it rides the system-prompt prefix cache.
+            this.foundationContractSection =
+                    com.business.discovery.worker.util.FoundationContractCard.frontendSection(workspace);
+            if (foundationContractSection.isEmpty()) {
+                log.warn("[FrontendGeneratorNode] No frontend/FOUNDATION_CONTRACT.md in workspace — "
+                        + "generating without the fenced foundation contract");
+            } else {
+                log.info("[FrontendGeneratorNode] Loaded fenced foundation contract ({} chars)",
+                        foundationContractSection.length());
+            }
+
+            // Per-feature context cards (docs/ENRICHMENT.json) — each file's generation prompt gets its
+            // whole feature's identity + sibling files/roles, keyed by FileSpec.featureName. Empty when
+            // ENRICHMENT.json is absent; the effective instruction still flows via buildFeatureContext.
+            try {
+                this.enrichmentCards = EnrichmentCardUtil.read(workspace);
+                log.info("[FrontendGeneratorNode] Loaded {} enrichment feature card(s)", enrichmentCards.size());
+            } catch (IOException e) {
+                log.warn("[FrontendGeneratorNode] Could not read ENRICHMENT.json — generating without feature "
+                        + "cards: {}", e.getMessage());
+                this.enrichmentCards = Map.of();
             }
 
             // Ground-truth navigation contract: routes.ts + App.tsx derived from the plan's
@@ -282,7 +356,9 @@ public class FrontendGeneratorNode implements WorkerNode {
                     if (isFenced(entry.path(), spec, workspace)
                             || shouldSkip(spec, feature, requestedChangesMode, Files.exists(filePath))) {
                         if (Files.exists(filePath)) {
-                            exportRegistry.register(filePath, Files.readString(filePath));
+                            String skippedContent = Files.readString(filePath);
+                            exportRegistry.register(filePath, skippedContent);
+                            frontendContractCard.register(filePath, skippedContent);
                         }
                     }
                 }
@@ -367,7 +443,9 @@ public class FrontendGeneratorNode implements WorkerNode {
                     Path filePath = workspace.resolve(entry.path());
                     if (Files.exists(filePath)) {
                         try {
-                            exportRegistry.register(filePath, Files.readString(filePath));
+                            String generatedContent = Files.readString(filePath);
+                            exportRegistry.register(filePath, generatedContent);
+                            frontendContractCard.register(filePath, generatedContent);
                         } catch (IOException e) {
                             log.warn("[FrontendGeneratorNode] Could not register exports for {}: {}",
                                     entry.path(), e.getMessage());
@@ -407,7 +485,17 @@ public class FrontendGeneratorNode implements WorkerNode {
     // Set once per execute() before the parallel generation block; read-only afterwards.
     private volatile com.business.discovery.worker.util.UiComponentInventory uiInventory;
     private volatile com.business.discovery.worker.util.ApiContractCard contractCard;
+    private volatile com.business.discovery.worker.util.PlannedComponentPropsCard plannedPropsCard;
+    private volatile com.business.discovery.worker.util.FrontendPlannedContractCard frontendPlannedContractCard;
     private volatile String routeCardSection;
+    private com.business.discovery.worker.util.FrontendContractCard frontendContractCard =
+            new com.business.discovery.worker.util.FrontendContractCard();
+
+    /** Fenced foundation contract (auth/cart/checkout/shell), loaded once per run; "" when absent. */
+    private volatile String foundationContractSection = "";
+
+    /** docs/ENRICHMENT.json feature cards, keyed by featureName; loaded once per run, empty when absent. */
+    private volatile Map<String, FeatureCard> enrichmentCards = Map.of();
 
     /**
      * Derives routes.ts + App.tsx from the plan's PAGE entries before any layer generates.
@@ -439,14 +527,21 @@ public class FrontendGeneratorNode implements WorkerNode {
         Files.createDirectories(frontendSrc);
         Files.writeString(frontendSrc.resolve("routes.ts"),
                 com.business.discovery.worker.util.RouteManifestGenerator.emitRoutesTs(manifest));
-        Files.writeString(frontendSrc.resolve("App.tsx"),
-                com.business.discovery.worker.util.RouteManifestGenerator.emitAppTsx(manifest, flags));
-        log.info("[FrontendGeneratorNode] Route registry derived — {} routes into routes.ts + App.tsx",
-                manifest.entries().size());
+        // App.tsx is the frozen shell (write-if-missing); the churn lives in the derived children
+        // AppRoutes.tsx (route table) + AppProviders.tsx (discovered providers), re-emitted here.
+        com.business.discovery.worker.util.RouteManifestGenerator.ensureAppShell(frontendSrc, flags);
+        Files.writeString(frontendSrc.resolve("AppRoutes.tsx"),
+                com.business.discovery.worker.util.RouteManifestGenerator.emitAppRoutes(manifest, flags));
+        Files.writeString(frontendSrc.resolve("AppProviders.tsx"),
+                com.business.discovery.worker.util.RouteManifestGenerator.emitAppProviders(flags));
+        log.info("[FrontendGeneratorNode] Route registry derived — {} routes into routes.ts + "
+                + "AppRoutes.tsx (App.tsx shell frozen)", manifest.entries().size());
 
         manifestPaths.add("frontend/src/routes.ts");
         markDerived(ctx, workspace, "frontend/src/routes.ts", true);
         markDerived(ctx, workspace, "frontend/src/App.tsx", false);
+        markDerived(ctx, workspace, "frontend/src/AppRoutes.tsx", true);
+        markDerived(ctx, workspace, "frontend/src/AppProviders.tsx", true);
 
         this.routeCardSection = com.business.discovery.worker.util.RouteManifest.PROMPT_KEY
                 + "\n" + manifest.toPromptSection();
@@ -491,9 +586,13 @@ public class FrontendGeneratorNode implements WorkerNode {
      */
     private boolean isFenced(String path, FileSpec spec, Path workspace) {
         String p = path.replace('\\', '/');
-        if (p.equals("frontend/src/routes.ts") || p.equals("frontend/src/App.tsx")) {
-            // Only fenced once the registry exists — an empty-plan run leaves App.tsx to Flash.
-            return routeCardSection != null;
+        if (p.equals("frontend/src/routes.ts") || p.equals("frontend/src/App.tsx")
+                || p.equals("frontend/src/AppRoutes.tsx") || p.equals("frontend/src/AppProviders.tsx")) {
+            // The route registry (routes.ts, App.tsx shell, AppRoutes, AppProviders) is worker-owned.
+            // Fence by ON-DISK EXISTENCE, not just "did synthesis run this attempt" — an empty-plan
+            // update run leaves the registry in place, and un-fencing it there is exactly how a
+            // partial re-derivation dropped the cart route and admin pages.
+            return routeCardSection != null || Files.exists(workspace.resolve(p));
         }
         boolean inServices = p.startsWith("frontend/src/services/")
                 && !p.startsWith("frontend/src/services/local/") && p.endsWith(".ts");
@@ -510,7 +609,8 @@ public class FrontendGeneratorNode implements WorkerNode {
                 String first = lines.findFirst().orElse("");
                 return first.contains("GENERATED from the backend API contract")
                         || first.contains("GENERATED from the architecture plan")
-                        || first.contains(com.business.discovery.worker.util.CartSpineScaffold.FENCE_MARKER);
+                        || first.contains(com.business.discovery.worker.util.CartSpineScaffold.FENCE_MARKER)
+                        || first.contains(FOUNDATION_FENCE_MARKER);
             } catch (IOException ignored) {
                 return false;
             }
@@ -523,7 +623,11 @@ public class FrontendGeneratorNode implements WorkerNode {
                                   String fileRole, boolean requestedChangesMode,
                                   FeatureSpec feature, Set<String> manifestPaths,
                                   TypeScriptExportRegistry exportRegistry) throws IOException {
-        Map<String, String> depFiles = loadDependencyFiles(workspace, spec);
+        // Registry-only referencing (§3.6): the interface of every dependency comes from the export
+        // catalog (names/paths, below) + the contract cards (signatures, in contractSection) — we no
+        // longer paste full dependency file bodies. The bodies were method/JSX noise a consumer never
+        // needs, cost tokens on every call, and depended on the ~27%-empty imports_from.
+        Map<String, String> depFiles = new java.util.LinkedHashMap<>();
         if (uiInventory != null && !uiInventory.isEmpty()) {
             depFiles.put("AVAILABLE UI IMPORTS (ground truth — import ONLY names listed here)",
                     uiInventory.toPromptSection());
@@ -556,11 +660,47 @@ public class FrontendGeneratorNode implements WorkerNode {
             contractSection = contractSection == null
                     ? routeCardSection : contractSection + "\n\n" + routeCardSection;
         }
+        // Frontend contract card: hook return types, context signatures, local type field shapes
+        // extracted from all layers completed before this file's layer. Empty for the first layer;
+        // grows incrementally so each layer sees contracts from all prior layers.
+        if (!frontendContractCard.isEmpty()) {
+            String fcSection = "FRONTEND MODULE CONTRACTS\n" + frontendContractCard.toPromptSection();
+            contractSection = contractSection == null ? fcSection : contractSection + "\n\n" + fcSection;
+        }
+        // Planned component prop contracts — only for files that ARE / RENDER components (component, page).
+        // From the static plan, so it is available up front and byte-identical per run (prefix-caches).
+        // Solves the same-layer sibling-prop drift the incremental FrontendContractCard cannot.
+        if (plannedPropsCard != null && !plannedPropsCard.isEmpty() && isComponentOrPagePath(entry.path())) {
+            String pp = plannedPropsCard.toPromptSection();
+            contractSection = contractSection == null ? pp : contractSection + "\n\n" + pp;
+        }
+        // Planned frontend module contracts (hooks/services/types) — for ALL files, from the static
+        // plan, byte-identical per run (prefix-caches). The frontend twin of BackendContractCard: solves
+        // same-layer consumers inventing a not-yet-generated hook/service signature.
+        if (frontendPlannedContractCard != null && !frontendPlannedContractCard.isEmpty()) {
+            String fp = frontendPlannedContractCard.toPromptSection();
+            contractSection = contractSection == null ? fp : contractSection + "\n\n" + fp;
+        }
+        // Fenced foundation contract goes FIRST so the immutable spine (useAuth, useCheckout(steps),
+        // shell props) is the leading, byte-identical prefix of every generation call this run.
+        if (!foundationContractSection.isEmpty()) {
+            contractSection = contractSection == null
+                    ? foundationContractSection
+                    : foundationContractSection + "\n\n" + contractSection;
+        }
+
+        // Whole-feature context: identity + sibling map (from the card) + the effective instruction.
+        FeatureCard card = spec != null && spec.getFeatureName() != null
+                ? enrichmentCards.get(spec.getFeatureName()) : null;
+        String featureContext = FeatureCard.buildFeatureContext(card, entry.path(), featureInstruction);
+        // This file's OWN exact contract (purpose + fields + fn sigs + endpoints) appended to the role.
+        String fileContract = FileContractCard.render(spec, fileRole);
 
         String content = null;
         for (int genAttempt = 1; genAttempt <= MAX_GEN_ATTEMPTS; genAttempt++) {
-            String candidate = flashLlm.generateFileContent(entry.path(), featureInstruction,
-                    fileRole != null ? fileRole : "", depFiles, existingContent, contractSection);
+            String candidate = flashLlm.generateFileContent(entry.path(),
+                    fileContract, depFiles, existingContent,
+                    contractSection, featureContext);
             if (!TruncationDetector.looksTruncated(candidate)) {
                 content = candidate;
                 break;
@@ -629,8 +769,42 @@ public class FrontendGeneratorNode implements WorkerNode {
             "use-toast", "sonner"
     );
 
+    /**
+     * Pre-seeds the export registry from every .ts/.tsx file already on disk in the frontend/src
+     * tree before generation starts. This covers foundation files that are not in the spec and
+     * therefore never go through the normal skipped-file registration path:
+     * AuthContext, context shims (CartContext re-export, CheckoutContext), api/client, etc.
+     * Without this, TypeScriptImportFixer cannot resolve imports like
+     * {@code import { useAuth } from '@/context/AuthContext'} because the registry is empty
+     * at the start of generation and only learns about files as they are processed.
+     * Idempotent — a file registered twice simply overwrites its entry with the same data.
+     */
+    private void seedExportRegistryFromDisk(Path frontendSrc, Path workspace,
+                                            TypeScriptExportRegistry exportRegistry) {
+        if (!Files.isDirectory(frontendSrc)) return;
+        int seeded = 0;
+        try (var walk = Files.walk(frontendSrc)) {
+            for (Path p : (Iterable<Path>) walk.filter(f ->
+                    f.toString().endsWith(".tsx") || f.toString().endsWith(".ts"))
+                    .filter(f -> !f.toString().contains("node_modules"))
+                    .filter(f -> !f.toString().contains("/components/ui/")) // shadcn handled by UiInventory
+                    ::iterator) {
+                try {
+                    String content = Files.readString(p);
+                    exportRegistry.register(p, content);
+                    frontendContractCard.register(p, content);
+                    seeded++;
+                } catch (IOException ignored) {}
+            }
+        } catch (IOException e) {
+            log.warn("[FrontendGeneratorNode] Could not seed export registry from disk: {}", e.getMessage());
+        }
+        if (seeded > 0) log.info("[FrontendGeneratorNode] Seeded export registry from {} pre-existing files", seeded);
+    }
+
     private void ensureFrontendWorkspace(Path frontendDir, Path workspace) throws IOException {
         writeCanonicalConfigs(frontendDir);
+        ensurePlaywrightScaffold(frontendDir);
         ensureTailwind(frontendDir);
         ensureHookformResolvers(frontendDir);
         ensureRadixUiPackages(frontendDir);
@@ -638,6 +812,52 @@ public class FrontendGeneratorNode implements WorkerNode {
         ensureShadcnComponents(frontendDir, workspace);
         ensureEslintSetup(frontendDir);
         runEslintPass(frontendDir);
+    }
+
+    // Canonical playwright.config.ts — deterministic scaffold (never LLM-authored). The e2e spec
+    // SCRIPTS under frontend/e2e/ are generated separately by PlaywrightSpecGenerator; this writes
+    // only config + the dev dependency, exactly like CANONICAL_VITE_CONFIG / tsconfig above.
+    private static final String CANONICAL_PLAYWRIGHT_CONFIG = """
+            import { defineConfig, devices } from '@playwright/test'
+
+            // Scaffolded — do not edit. Feature e2e specs live in ./e2e (one per feature).
+            // baseURL is injected by the pipeline runner via the BASE_URL env var.
+            export default defineConfig({
+              testDir: './e2e',
+              timeout: 30_000,
+              expect: { timeout: 7_000 },
+              fullyParallel: false,
+              retries: 0,
+              reporter: [['list'], ['json', { outputFile: 'e2e-results.json' }]],
+              use: {
+                baseURL: process.env.BASE_URL || 'http://localhost:8080',
+                trace: 'off',
+                screenshot: 'only-on-failure',
+              },
+              projects: [
+                { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+              ],
+            })
+            """;
+
+    /**
+     * Deterministic Playwright setup: writes the canonical config + the e2e/ dir and adds
+     * {@code @playwright/test} as a dev dependency. No test content — that is authored later.
+     * Guarded by worker.e2e.enabled so a disabled pipeline ships no Playwright footprint.
+     */
+    private void ensurePlaywrightScaffold(Path frontendDir) throws IOException {
+        if (!e2eEnabled) return;
+        Files.writeString(frontendDir.resolve("playwright.config.ts"), CANONICAL_PLAYWRIGHT_CONFIG);
+        Files.createDirectories(frontendDir.resolve("e2e"));
+        log.info("[FrontendGeneratorNode] Wrote canonical playwright.config.ts");
+
+        Path pkgPath = frontendDir.resolve("package.json");
+        if (Files.exists(pkgPath) && !Files.readString(pkgPath).contains("@playwright/test")) {
+            BuildToolService.BuildResult r = buildToolService.runNpmInstallDevPackages(
+                    frontendDir, "@playwright/test@" + playwrightVersion);
+            if (r.success()) log.info("[FrontendGeneratorNode] Installed @playwright/test@{} (dev)", playwrightVersion);
+            else log.warn("[FrontendGeneratorNode] @playwright/test install failed: {}", r.output());
+        }
     }
 
     private void writeCanonicalConfigs(Path frontendDir) throws IOException {
@@ -1203,25 +1423,6 @@ public class FrontendGeneratorNode implements WorkerNode {
                 .collect(Collectors.toMap(FeatureSpec::getFeatureName, f -> f, (a, b) -> a));
     }
 
-    private Map<String, String> loadDependencyFiles(Path workspace, FileSpec spec) {
-        java.util.LinkedHashMap<String, String> deps = new java.util.LinkedHashMap<>();
-        if (spec == null) return deps;
-
-        List<String> depPaths = spec.getImportsFrom();
-        if (depPaths == null || depPaths.isEmpty()) depPaths = spec.getDependsOn();
-        if (depPaths == null) return deps;
-
-        for (String depPath : depPaths) {
-            Path file = workspace.resolve(depPath);
-            if (Files.exists(file)) {
-                try {
-                    deps.put(depPath, Files.readString(file));
-                } catch (IOException ignored) {}
-            }
-        }
-        return deps;
-    }
-
     // Matches interface/type/enum/class declarations that are NOT already exported.
     private static final Pattern UNEXPORTED_DECL =
             Pattern.compile("^(interface|type|enum|class)\\s", Pattern.MULTILINE);
@@ -1249,6 +1450,14 @@ public class FrontendGeneratorNode implements WorkerNode {
 
     private String layerName(FileEntry entry) {
         return LayerOrderUtil.frontendLayerName(entry);
+    }
+
+    /** True for app component/page files (the only consumers of the planned-props card); excludes shadcn ui. */
+    private static boolean isComponentOrPagePath(String path) {
+        if (path == null) return false;
+        String p = path.replace('\\', '/');
+        if (p.contains("/components/ui/")) return false;
+        return p.contains("/components/") || p.contains("/pages/");
     }
 
 

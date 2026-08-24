@@ -10,6 +10,7 @@ import com.business.discovery.worker.util.ArchitectureJsonUtil;
 import com.business.discovery.worker.util.EnvVarScanner;
 import com.business.discovery.worker.util.MavenDependencyInjector;
 import com.business.discovery.worker.util.AuthExceptionHandlerPatcher;
+import com.business.discovery.worker.util.BackendClassSynthesizer;
 import com.business.discovery.worker.util.MissingBeanPatcher;
 import com.business.discovery.worker.util.RepositoryMethodInjector;
 import com.business.discovery.worker.util.JpaBidirectionalSavePatcher;
@@ -73,6 +74,15 @@ public class BackendValidationNode implements WorkerNode {
         // maps the BadCredentialsException thrown inside the login controller to a server error.
         AuthExceptionHandlerPatcher.fix(backendSrcJava);
 
+        // Phase 4 safety net (DETECTION, advisory): surface residual foundation impedance the
+        // reconciler/prompts did not prevent — identity hacks (nameUUIDFromBytes / hardcoded UUID),
+        // a leftover UUID userId surrogate key, a stale Role.CUSTOMER. Writes docs/FOUNDATION_AUDIT.md
+        // and warns; does not rewrite (auto-rewrite arrives with the Phase 3 identity primitive).
+        com.business.discovery.worker.util.FoundationImpedanceAudit.audit(
+                backendSrcJava, com.business.discovery.worker.util.FoundationImpedanceAudit.Layer.BACKEND,
+                ctx.getWorkspaceDir(),
+                com.business.discovery.worker.util.FoundationSymbolRegistry.buildFromWorkspace(ctx.getWorkspaceDir()));
+
         BuildResult initial = buildTool.runMvnCompile(backendDir);
 
         if (initial.success()) {
@@ -91,9 +101,10 @@ public class BackendValidationNode implements WorkerNode {
         boolean methodsInjected = RepositoryMethodInjector.injectMissingMethods(
                 backendDir, initial.output());
 
+        BuildResult latest = initial;
         if (depsInjected || methodsInjected) {
-            BuildResult postInjection = buildTool.runMvnCompile(backendDir);
-            if (postInjection.success()) {
+            latest = buildTool.runMvnCompile(backendDir);
+            if (latest.success()) {
                 log.info("[BackendValidationNode] mvn compile passed after mechanical injection — skipping ErrorFixAgent");
                 rescanValueBindings(ctx);
                 markFilesValidated(ctx);
@@ -102,6 +113,23 @@ public class BackendValidationNode implements WorkerNode {
             log.info("[BackendValidationNode] Mechanical injection incomplete — handing off remaining errors to ErrorFixAgent");
         } else {
             log.warn("[BackendValidationNode] mvn compile failed — starting ErrorFixAgent loop");
+        }
+
+        // Enforcement Point B (backend gen-time closure): deterministically resolve every "cannot find
+        // symbol: class X" — inject a JDK import (LocalTime/BigDecimal), point a referencer at the one
+        // canonical project package, or synthesize a single placeholder class/enum where none exists (the
+        // OrderItemResponse case). javac is the detector; this keeps the residual manifest shrinking so
+        // any leftover member errors (getters/ctors) become a tractable in-file task for the ErrorFixAgent.
+        int resolved = BackendClassSynthesizer.synthesize(backendSrcJava, latest.output());
+        if (resolved > 0) {
+            BuildResult postSynth = buildTool.runMvnCompile(backendDir);
+            if (postSynth.success()) {
+                log.info("[BackendValidationNode] mvn compile passed after resolving {} missing type(s) — skipping ErrorFixAgent", resolved);
+                rescanValueBindings(ctx);
+                markFilesValidated(ctx);
+                return;
+            }
+            log.info("[BackendValidationNode] Resolved {} missing type(s) — residual errors to ErrorFixAgent", resolved);
         }
 
         boolean fixed = errorFixAgent.fix(FileType.BACKEND, ctx);

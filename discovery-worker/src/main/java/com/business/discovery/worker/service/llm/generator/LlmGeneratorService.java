@@ -7,6 +7,7 @@ import com.business.discovery.worker.service.llm.ArchitectureSpec;
 import com.business.discovery.worker.service.llm.BriefContext;
 import com.business.discovery.worker.service.llm.ComplianceResult;
 import com.business.discovery.worker.service.llm.FeatureSpec;
+import com.business.discovery.worker.service.llm.FileContract;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.util.ChangeTargetingUtil;
 import com.business.discovery.worker.util.LlmResponseParser;
@@ -53,14 +54,43 @@ public abstract class LlmGeneratorService {
      * beats burning a ~5-minute container attempt.
      */
     public ArchitectureSpec generateArchitectureSpec(BriefContext brief, String slug) {
+        return generateArchitectureSpec(brief, slug, null);
+    }
+
+    /**
+     * Generates the architecture spec with optional workspace tool access.
+     * When {@code workspace} is provided (non-null), the LLM can call {@code read_file}
+     * to inspect the foundation files already on disk — auth spine, payment spine,
+     * cart context, etc. — before deciding what to plan. This gives it the same context
+     * a human developer would have when extending an existing project.
+     */
+    public ArchitectureSpec generateArchitectureSpec(BriefContext brief, String slug,
+                                                     com.business.discovery.worker.util.WorkspaceReader workspace) {
+        return generateArchitectureSpec(brief, slug, workspace, null);
+    }
+
+    /**
+     * @param fencedSymbolBlock optional closed fenced-symbol list
+     *        ({@code FoundationSymbolRegistry.renderForPlanner()}), appended to the system prompt as
+     *        authoritative ground truth so the planner binds to exact foundation shapes. Ignored when blank.
+     */
+    public ArchitectureSpec generateArchitectureSpec(BriefContext brief, String slug,
+                                                     com.business.discovery.worker.util.WorkspaceReader workspace,
+                                                     String fencedSymbolBlock) {
         boolean isUpdate = brief.requestedChanges() != null && !brief.requestedChanges().isBlank();
 
         String system = PromptLoader.load("system/arch_outline.txt");
+        if (fencedSymbolBlock != null && !fencedSymbolBlock.isBlank()) {
+            system = system + "\n\n" + fencedSymbolBlock;
+        }
         String user   = buildArchSpecUserPrompt(brief, slug, isUpdate);
 
         Exception lastError = null;
         for (int attempt = 1; attempt <= 3; attempt++) {
-            String json = stripMarkdown(callLlm(system, user));
+            String raw = workspace != null
+                    ? callLlmWithTools(system, user, workspace)
+                    : callLlm(system, user);
+            String json = stripMarkdown(raw);
             try {
                 ArchitectureSpec spec = SPEC_MAPPER.readValue(json, ArchitectureSpec.class);
                 int fileCount    = spec.getFiles()    == null ? 0 : spec.getFiles().size();
@@ -121,6 +151,28 @@ public abstract class LlmGeneratorService {
                                      BriefContext brief,
                                      WorkspaceReader workspace,
                                      Set<String> dependentFeatures) {
+        return enrichFeature(feature, featureFiles, peerApiSummaries, brief, workspace,
+                dependentFeatures, null);
+    }
+
+    /**
+     * @param dependentFeatures   slugs of features already declaring a dependency on this one —
+     *                            this feature must not wire back into them or the generated app dies
+     *                            at boot on a Spring bean cycle. Empty for the first feature enriched.
+     * @param priorCycleViolation on a self-heal re-enrichment, the exact dependency cycle this
+     *                            feature's PREVIOUS enrichment closed (e.g.
+     *                            {@code "booking-system-core → notification-service → booking-system-core"}).
+     *                            Injected verbatim into the prompt so the retry is a genuinely
+     *                            different attempt rather than a replay of the advisory constraint
+     *                            it already ignored. Null/blank on the first enrichment.
+     */
+    public FeatureSpec enrichFeature(FeatureSpec feature,
+                                     List<FileSpec> featureFiles,
+                                     Map<String, Object> peerApiSummaries,
+                                     BriefContext brief,
+                                     WorkspaceReader workspace,
+                                     Set<String> dependentFeatures,
+                                     String priorCycleViolation) {
         String requestedChangesSection = (brief.requestedChanges() != null
                 && !brief.requestedChanges().isBlank())
                 ? "\n== REQUESTED CHANGES ==\n" + brief.requestedChanges() + "\n"
@@ -156,7 +208,8 @@ public abstract class LlmGeneratorService {
                 .with("colorScheme",             brief.colorScheme()     != null ? brief.colorScheme()     : "")
                 .with("tone",                    brief.tone()            != null ? brief.tone()            : "")
                 .with("requestedChangesSection", requestedChangesSection)
-                .with("dependencyDirectionSection", buildDependencyDirectionSection(dependentFeatures))
+                .with("dependencyDirectionSection",
+                        buildDependencyDirectionSection(dependentFeatures, priorCycleViolation))
                 .render();
 
         Exception lastError = null;
@@ -206,9 +259,15 @@ public abstract class LlmGeneratorService {
      * peer API contracts with real signatures, and rule 5 instructs it to bind to exactly those.
      * Nothing else in the prompt conveys that the edge is one-way.
      */
-    private static String buildDependencyDirectionSection(Set<String> dependentFeatures) {
-        if (dependentFeatures == null || dependentFeatures.isEmpty()) return "";
-        return """
+    private static String buildDependencyDirectionSection(Set<String> dependentFeatures,
+                                                          String priorCycleViolation) {
+        boolean hasDependents = dependentFeatures != null && !dependentFeatures.isEmpty();
+        boolean hasViolation  = priorCycleViolation != null && !priorCycleViolation.isBlank();
+        if (!hasDependents && !hasViolation) return "";
+
+        StringBuilder section = new StringBuilder();
+        if (hasDependents) {
+            section.append("""
 
                 == DEPENDENCY DIRECTION (HARD CONSTRAINT — overrides the peer contracts above) ==
                 These features already declared a dependency on THIS feature: %s
@@ -227,7 +286,26 @@ public abstract class LlmGeneratorService {
                       consumes it with @EventListener. Use only when no shared controller exists.
 
                 Never resolve this with @Lazy, field @Autowired, or setter injection.
-                """.formatted(String.join(", ", dependentFeatures));
+                """.formatted(String.join(", ", dependentFeatures)));
+        }
+
+        // Self-heal retry: the previous enrichment of THIS feature ignored the advisory constraint
+        // above and closed a concrete cycle. Naming that exact path turns the replay into a genuinely
+        // different attempt — the model now knows precisely which edge it must not draw.
+        if (hasViolation) {
+            section.append("""
+
+                == CYCLE ALREADY FORMED ON THE PREVIOUS ATTEMPT — DO NOT REPEAT IT ==
+                Your previous enrichment of THIS feature closed this Spring bean cycle:
+                    %s
+                That app dies at boot. This is a RE-ENRICHMENT. Produce a feature_instruction and a
+                depends_on_features that DO NOT wire back into any feature named in that path: remove
+                every @Autowired/constructor injection of their services from your plan. If this
+                feature must trigger work inside one of them, RETURN the outcome to the caller or
+                publish a Spring event — never call back, and never use @Lazy to mask it.
+                """.formatted(priorCycleViolation));
+        }
+        return section.toString();
     }
 
     /**
@@ -259,6 +337,76 @@ public abstract class LlmGeneratorService {
                      + " — the cycle gate will reject this spec", feature.getFeatureName(), violations);
         }
         return deps;
+    }
+
+    /**
+     * Contract reconciliation (one Pro call per feature, at planning time): given the feature's files
+     * and the peer contracts they depend on, returns the GROUND-TRUTH interface for each module —
+     * model/DTO fields, service/repo/controller method signatures, and component props — reconciled so
+     * every consumer binds to exactly what its producer exposes. The caller writes these back into the
+     * spec (fileRole + public_functions/variables) so BOTH generators bind to one contract.
+     *
+     * @return one contract per module the model returned; empty list if none. Throws
+     *         {@link WorkerException} only after both attempts fail — the caller keeps the planned
+     *         interfaces on failure rather than aborting the run.
+     */
+    public List<FileContract> reconcileContracts(String featureName,
+                                                 String featureInstruction,
+                                                 String filesJson,
+                                                 String peerContractsJson,
+                                                 String foundationContract) {
+        String system = PromptLoader.load("system/contract_reconcile.txt");
+        String user = PromptTemplate.from(PromptLoader.load("user/contract_reconcile.txt"))
+                .with("featureName",       featureName)
+                .with("featureInstruction", featureInstruction == null ? "" : featureInstruction)
+                .with("filesJson",         filesJson)
+                .with("peerContractsJson", peerContractsJson == null ? "" : peerContractsJson)
+                .with("foundationContract", foundationContract == null ? "" : foundationContract)
+                .render();
+
+        WorkerException lastError = null;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                JsonNode root = LlmResponseParser.parseJsonObject(callLlm(system, user));
+                JsonNode files = root.path("files");
+                if (!files.isArray()) {
+                    throw new WorkerException(FailureType.CODE,
+                            "reconcileContracts: no files array for feature " + featureName);
+                }
+                List<FileContract> contracts = new ArrayList<>();
+                for (JsonNode f : files) {
+                    String module = f.path("module").asText(null);
+                    if (module == null || module.isBlank()) continue;
+                    List<FileContract.Member> members = new ArrayList<>();
+                    for (JsonNode m : f.path("members")) {
+                        String name = m.path("name").asText(null);
+                        String type = m.path("type").asText(null);
+                        if (name != null && !name.isBlank() && type != null && !type.isBlank()) {
+                            members.add(new FileContract.Member(name.trim(), type.trim()));
+                        }
+                    }
+                    List<FileContract.Method> methods = new ArrayList<>();
+                    for (JsonNode s : f.path("methods")) {
+                        String sig = s.asText(null);
+                        if (sig != null && !sig.isBlank()) methods.add(new FileContract.Method(sig.trim()));
+                    }
+                    contracts.add(new FileContract(module.trim(), members, methods));
+                }
+                return contracts;
+            } catch (WorkerException e) {
+                lastError = e;
+                log.warn("[reconcileContracts] Attempt {}/2 failed for '{}': {}",
+                        attempt, featureName, e.getMessage());
+            } catch (LlmResponseParser.LlmParseException e) {
+                lastError = new WorkerException(FailureType.CODE,
+                        "reconcileContracts parse failed for " + featureName + ": " + e.getMessage(), e);
+                log.warn("[reconcileContracts] Attempt {}/2 parse error for '{}': {}",
+                        attempt, featureName, e.getMessage());
+            }
+        }
+        throw lastError != null ? lastError
+                : new WorkerException(FailureType.CODE,
+                        "reconcileContracts failed after 2 attempts for: " + featureName);
     }
 
     /**
@@ -343,41 +491,52 @@ public abstract class LlmGeneratorService {
     }
 
     /**
-     * Flash call: writes a file from a feature-level instruction + per-file role.
-     * featureInstruction is shared across all files in the feature.
-     * fileRole is the structural description of this specific file within the feature.
+     * Flash call: writes a file from its per-file role plus dependency contracts. Used by
+     * InfraGeneratorNode (no feature context) and delegated to by the fuller overload.
+     * fileRole is the structural description of this specific file.
      * filePath is the relative path of the file being generated (e.g.
      * "backend/src/main/java/com/waydownsouth/dto/Foo.java") — injected into the prompt
      * so the LLM derives the correct package/module path instead of guessing.
      */
     public String generateFileContent(String filePath,
-                                      String featureInstruction,
                                       String fileRole,
                                       Map<String, String> dependencyFiles,
                                       String existingContent) {
-        return generateFileContent(filePath, featureInstruction, fileRole,
-                dependencyFiles, existingContent, null);
+        return generateFileContent(filePath, fileRole, dependencyFiles, existingContent, null, null);
     }
 
     /**
-     * As above, plus {@code sharedContext}: run-constant ground truth (the API contract card)
-     * appended to the SYSTEM prompt rather than the user prompt.
+     * As above, plus two context blocks:
      *
-     * Placement is deliberate. The user prompt opens with filePath, so the per-call prefix
-     * diverges on its first line — anything appended there is re-billed on every one of the
-     * ~140 generation calls in a run. The system prompt is byte-identical across all of them,
-     * so a suffix on it extends the shared prefix and rides Gemini's implicit prefix cache
-     * instead. Same tokens delivered, a fraction of the cost.
+     * <p>{@code sharedContext} — run-constant ground truth (foundation/contract cards) appended to
+     * the SYSTEM prompt rather than the user prompt. Placement is deliberate: the user prompt opens
+     * with filePath, so the per-call prefix diverges on its first line — anything appended there is
+     * re-billed on every one of the ~140 generation calls in a run. The system prompt is
+     * byte-identical across all of them, so a suffix on it extends the shared prefix and rides
+     * Gemini's implicit prefix cache instead. Same tokens delivered, a fraction of the cost.
+     *
+     * <p>{@code featureContext} — the file's whole-feature context ("== FEATURE CONTEXT ==" identity
+     * + sibling files/roles with a YOU-ARE-HERE marker, followed by the "== FEATURE INSTRUCTION =="
+     * holistic brief). Built by the generator node from the file's {@link FeatureCard} plus the
+     * effective feature instruction. It rides the per-file USER prompt — it varies per file (the
+     * marker moves, the instruction may carry an update-run change directive), so it cannot join the
+     * cached system prefix. This replaces the former standalone featureInstruction parameter.
      */
     public String generateFileContent(String filePath,
-                                      String featureInstruction,
                                       String fileRole,
                                       Map<String, String> dependencyFiles,
                                       String existingContent,
-                                      String sharedContext) {
+                                      String sharedContext,
+                                      String featureContext) {
         boolean isUpdate = existingContent != null;
 
-        String system = PromptLoader.load(isUpdate ? "system/file_update.txt" : "system/file_generate.txt");
+        boolean isFrontend = filePath != null && (filePath.endsWith(".ts") || filePath.endsWith(".tsx"));
+        boolean isBackend  = filePath != null && filePath.endsWith(".java");
+        String system = PromptLoader.load(
+                isUpdate   ? "system/file_update.txt"
+              : isFrontend ? "system/file_generate_frontend.txt"
+              : isBackend  ? "system/file_generate_backend.txt"
+              :              "system/file_generate.txt");
         if (sharedContext != null && !sharedContext.isBlank()) {
             system = system + "\n\n" + sharedContext;
         }
@@ -389,12 +548,33 @@ public abstract class LlmGeneratorService {
 
         String user = PromptTemplate.from(PromptLoader.load("user/file_content.txt"))
                 .with("filePath",          filePath != null ? filePath : "")
-                .with("featureInstruction", featureInstruction)
+                .with("featureContext",     featureContext != null ? featureContext : "")
                 .with("fileRole",           fileRole != null ? fileRole : "")
                 .with("dependencySection",  formatFilesSection(dependencyFiles))
                 .with("existingSection",    existingSection)
                 .render();
 
+        return stripMarkdown(callLlm(system, user));
+    }
+
+    /**
+     * Generates ONE Playwright e2e spec file's raw content for a feature's user flow. Writes only
+     * the test SCRIPT — config/deps are deterministic scaffold elsewhere. Context is the feature
+     * flow + the route manifest + the available data-testid selectors + seeded login credentials.
+     */
+    public String generateE2eSpec(String featureName,
+                                  String featureInstruction,
+                                  String routesContext,
+                                  String selectorContext,
+                                  String credentialsContext) {
+        String system = PromptLoader.load("system/e2e_spec.txt");
+        String user = PromptTemplate.from(PromptLoader.load("user/e2e_spec.txt"))
+                .with("featureName",        featureName != null ? featureName : "")
+                .with("featureInstruction", featureInstruction != null ? featureInstruction : "")
+                .with("routes",             routesContext != null ? routesContext : "")
+                .with("selectors",          selectorContext != null ? selectorContext : "")
+                .with("credentials",        credentialsContext != null ? credentialsContext : "(none seeded)")
+                .render();
         return stripMarkdown(callLlm(system, user));
     }
 
@@ -440,6 +620,76 @@ public abstract class LlmGeneratorService {
     }
 
     /**
+     * Step 4 of the ARCHITECTURE.json completeness pass: upgrades detected-missing modules — backend
+     * (Java) OR frontend (React/TS) — from bare stubs into proper FileSpecs so the generator produces
+     * real files (a real admin layout, a real DTO), not placeholders. Stack-agnostic: each file's side
+     * is derived from its path. Best-effort — returns only the files it could spec (empty list on any
+     * failure); the caller falls back to a stub for anything not returned, so a miss always resolves.
+     *
+     * @param missingPaths       the referenced-but-absent workspace-relative paths (kept verbatim)
+     * @param referencingContext prose that named them (feature instructions + who referenced each)
+     * @param exemplar           an existing sibling file to mirror (e.g. SiteLayout); may be empty
+     * @param brief              business/category context
+     */
+    public List<FileSpec> specifyMissingFiles(List<String> missingPaths, String referencingContext,
+                                              String exemplar, BriefContext brief) {
+        if (missingPaths == null || missingPaths.isEmpty()) return List.of();
+
+        String system = PromptLoader.load("system/spec_missing_files.txt");
+        String user = PromptTemplate.from(PromptLoader.load("user/spec_missing_files.txt"))
+                .with("businessName",       brief.businessName())
+                .with("category",           brief.category())
+                .with("missingPaths",       String.join("\n", missingPaths))
+                .with("referencingContext", referencingContext == null ? "" : referencingContext)
+                .with("exemplar",           exemplar == null ? "" : exemplar)
+                .render();
+
+        try {
+            JsonNode result = LlmResponseParser.parseJsonObject(callLlm(system, user));
+            JsonNode files = result.path("files");
+            if (!files.isArray()) {
+                log.warn("[specifyMissingFiles] Response had no files[] array — caller will stub");
+                return List.of();
+            }
+            // Extract only the simple fields we need. Deliberately does NOT deserialize
+            // public_functions (a List<PublicFunction>): the model often emits it as free-form strings,
+            // which would fail whole-object binding and drop the file to a stub. The generator drives off
+            // `description` anyway, and imports_from below feeds the closure check.
+            List<FileSpec> out = new ArrayList<>();
+            for (JsonNode n : files) {
+                String path = n.path("file_path").asText(null);
+                if (path == null || path.isBlank()) continue;
+                String fileName = n.path("file_name").asText(
+                        path.contains("/") ? path.substring(path.lastIndexOf('/') + 1) : path);
+                // Stack-agnostic: file_type from the response, else inferred from the path — so a Java
+                // backend/… class and a React frontend/src/… module are both labelled correctly.
+                String fileType = n.path("file_type").asText(
+                        path.startsWith("backend/") ? "BACKEND" : "FRONTEND");
+                FileSpec.FileSpecBuilder b = FileSpec.builder()
+                        .fileName(fileName)
+                        .filePath(path)
+                        .fileType(fileType)
+                        .layer(n.path("layer").asText(null))
+                        .featureName(n.path("feature_name").asText(null))
+                        .description(n.path("description").asText(""))
+                        .status("PLANNED");
+                JsonNode imp = n.path("imports_from");
+                if (imp.isArray()) {
+                    List<String> importsFrom = new ArrayList<>();
+                    imp.forEach(x -> importsFrom.add(x.asText()));
+                    b.importsFrom(importsFrom);
+                }
+                out.add(b.build());
+            }
+            log.info("[specifyMissingFiles] Specced {}/{} missing file(s)", out.size(), missingPaths.size());
+            return out;
+        } catch (Exception e) {
+            log.warn("[specifyMissingFiles] Failed — caller will fall back to stubs: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
      * Merges the per-file structural detail from an enrichment response into the outline's
      * FileSpec entries (matched by file_path). The outline OWNS the file list: entries for
      * unknown paths are dropped with a warning, never added. A response without a "files"
@@ -458,12 +708,24 @@ public abstract class LlmGeneratorService {
                 .collect(Collectors.toMap(FileSpec::getFilePath, f -> f, (a, b) -> a));
 
         int merged = 0;
+        int dropped = 0;
         for (JsonNode entry : filesNode) {
             String path = entry.path("file_path").asText(null);
             FileSpec target = path == null ? null : byPath.get(path);
             if (target == null) {
-                log.warn("[enrichFeature] Detail for unknown file '{}' in feature '{}' — dropped "
-                        + "(the outline owns the file list)", path, feature.getFeatureName());
+                // G3 diagnostic: enrichment declared a file the outline never planned. Currently
+                // dropped ("outline owns the file list"). Log its stated intent (layer/type + role/
+                // description) so a run's [G3-DROP] lines reveal whether these are genuine, needed
+                // collaborators (→ worth backfilling) or hallucinated helpers (→ keep dropping),
+                // before deciding whether to add them to the spec. See docs G3.
+                dropped++;
+                String role = entry.path("file_role").asText(null);
+                if (role == null || role.isBlank()) role = entry.path("description").asText("");
+                log.warn("[enrichFeature] [G3-DROP] feature '{}' declared unplanned file '{}' "
+                        + "[type={}, layer={}] — dropped (outline owns the file list). Intent: {}",
+                        feature.getFeatureName(), path,
+                        entry.path("file_type").asText(""), entry.path("layer").asText(""),
+                        role.length() > 300 ? role.substring(0, 300) + "…" : role);
                 continue;
             }
             try {
@@ -484,8 +746,9 @@ public abstract class LlmGeneratorService {
                         path, feature.getFeatureName(), e.getMessage());
             }
         }
-        log.info("[enrichFeature] Merged structural detail for {}/{} files in feature '{}'",
-                merged, featureFiles.size(), feature.getFeatureName());
+        log.info("[enrichFeature] Merged structural detail for {}/{} files in feature '{}' "
+                + "({} unplanned file(s) dropped — see [G3-DROP])",
+                merged, featureFiles.size(), feature.getFeatureName(), dropped);
     }
 
     /**

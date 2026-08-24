@@ -163,7 +163,8 @@ public class ComposeLaunchService {
     /**
      * Exercises the live product the way a visitor and an owner would: fetches every
      * public endpoint anonymously, logs in with the credentials the seeder actually
-     * planted, and reads the admin surface with that token.
+     * planted, reads the admin surface with that token, and confirms every PROTECTED
+     * endpoint rejects an anonymous caller (the negative-authz probe — {@link #protectedRejectionFlows}).
      *
      * Every earlier gate is blind to what this catches. Circuit-house attempt 2 compiled
      * clean on both sides, booted, served the SPA — and still shipped a 403 on its own
@@ -187,6 +188,7 @@ public class ComposeLaunchService {
         String token = loginFlow(baseUrl, workspace, flows);
         if (token != null) flows.addAll(adminReadFlows(baseUrl, workspace, token));
         flows.addAll(orderWriteFlows(baseUrl, workspace));
+        flows.addAll(protectedRejectionFlows(baseUrl, workspace));
 
         writeFlowReport(workspace, baseUrl, flows);
 
@@ -294,6 +296,109 @@ public class ComposeLaunchService {
             }
         }
         return out;
+    }
+
+    /**
+     * NEGATIVE authz probe — the one the flows gate was missing. Every PROTECTED endpoint must REJECT an
+     * unauthenticated request with 401/403; anything else means the request reached the controller without a
+     * token, i.e. the endpoint is unguarded. This is the /api/admin/… path-drift hole (SecurityConfig guards
+     * /api/v1/admin/**, a controller serves /api/admin/**) — a real, verified leak that every earlier gate is
+     * blind to, including {@link #adminReadFlows} (which only checks admin works WITH a token).
+     *
+     * Probes the ACTUAL controller paths ({@link ApiInventory}), never the manifest paths, so a drifted path
+     * is tested exactly as served. "Protected" = the actual path is under /admin, OR the manifest tiers that
+     * method+path authenticated/admin. Security runs before path binding, so {id} params are throwaway.
+     */
+    private List<FlowResult> protectedRejectionFlows(String baseUrl, Path workspace) {
+        List<FlowResult> out = new ArrayList<>();
+        ApiInventory inv;
+        try {
+            inv = ApiInventory.extract(workspace.resolve("backend/src/main/java"));
+        } catch (Exception e) {
+            return out; // no inventory — skip rather than false-fail
+        }
+        Set<String> manifestProtected = manifestProtectedKeys(workspace);
+        for (ApiInventory.Endpoint ep : inv.endpoints()) {
+            if (ep.path() == null || ep.httpMethod() == null) continue;
+            if (!shouldBeProtected(ep.httpMethod(), ep.path(), manifestProtected)) continue;
+            String flow = "unauth " + ep.httpMethod() + " " + ep.path();
+            try {
+                int sc = requestNoAuth(baseUrl + substituteParams(ep.path()), ep.httpMethod()).statusCode();
+                if (isProperlyRejected(sc)) {
+                    out.add(new FlowResult(flow, true, sc + " (rejected — good)"));
+                } else {
+                    out.add(new FlowResult(flow, false, sc + " — reachable WITHOUT authentication; the "
+                            + "security matcher does not cover the path this controller actually serves"));
+                }
+            } catch (Exception e) {
+                out.add(new FlowResult(flow, false, "request failed: " + e.getMessage()));
+            }
+        }
+        return out;
+    }
+
+    /** 401/403 = the security layer correctly rejected an anonymous caller; anything else = it did not. */
+    static boolean isProperlyRejected(int statusCode) {
+        return statusCode == 401 || statusCode == 403;
+    }
+
+    /** Protected if the actual path is under /admin, or the manifest tiers this method+path auth/admin. */
+    static boolean shouldBeProtected(String method, String path, Set<String> manifestProtectedKeys) {
+        if (path != null && path.contains("/admin")) return true;
+        return method != null && path != null
+                && manifestProtectedKeys.contains(method.toUpperCase() + " " + path);
+    }
+
+    /** "METHOD path" keys for every manifest endpoint tiered authenticated or admin. */
+    static Set<String> protectedKeysFrom(List<ApiEndpoint> endpoints) {
+        Set<String> keys = new LinkedHashSet<>();
+        if (endpoints == null) return keys;
+        for (ApiEndpoint ep : endpoints) {
+            if (ep.getPath() == null || ep.getMethod() == null || ep.getAccess() == null) continue;
+            String access = ep.getAccess().trim().toLowerCase();
+            if (access.equals("authenticated") || access.equals("admin")) {
+                keys.add(ep.getMethod().toUpperCase() + " " + ep.getPath().trim());
+            }
+        }
+        return keys;
+    }
+
+    private Set<String> manifestProtectedKeys(Path workspace) {
+        try {
+            if (ArchitectureJsonUtil.exists(workspace)) {
+                ArchitectureSpec spec = ArchitectureJsonUtil.read(workspace);
+                List<ApiEndpoint> all = new ArrayList<>();
+                if (spec.getFiles() != null) {
+                    for (FileSpec f : spec.getFiles()) {
+                        if (f.getApiEndpoints() != null) all.addAll(f.getApiEndpoints());
+                    }
+                }
+                return protectedKeysFrom(all);
+            }
+        } catch (IOException ignored) {
+            // fall through to empty — the /admin path convention still covers the common case
+        }
+        return Set.of();
+    }
+
+    /** Replaces {param} path segments with a throwaway value — security runs before path binding. */
+    static String substituteParams(String path) {
+        return path.replaceAll("\\{[^}]+}", "1");
+    }
+
+    /** A request with NO Authorization header, for probing that protected paths reject anonymous callers. */
+    private HttpResponse<String> requestNoAuth(String url, String method)
+            throws IOException, InterruptedException {
+        HttpRequest.Builder b = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(10));
+        switch (method == null ? "GET" : method.toUpperCase()) {
+            case "POST", "PUT", "PATCH" -> b.header("Content-Type", "application/json")
+                    .method(method.toUpperCase(), HttpRequest.BodyPublishers.ofString("{}"));
+            case "DELETE" -> b.DELETE();
+            default -> b.GET();
+        }
+        return http.send(b.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     private void writeFlowReport(Path workspace, String baseUrl, List<FlowResult> flows) {

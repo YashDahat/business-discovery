@@ -4,6 +4,7 @@ import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.service.llm.ArchitectureSpec;
 import com.business.discovery.worker.service.llm.BriefContext;
 import com.business.discovery.worker.service.llm.FeatureSpec;
+import com.business.discovery.worker.service.llm.FileContract;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.util.WorkspaceReader;
 import org.junit.jupiter.api.Test;
@@ -152,6 +153,43 @@ class LlmGeneratorServiceBatchedSpecTest {
         assertThat(result.getFeatureInstruction()).isNotBlank();
         assertThat(file.getFileRole()).isNull();                       // untouched
         assertThat(file.getDescription()).isEqualTo("outline-level description");
+    }
+
+    // ── Contract reconciliation ───────────────────────────────────────────────
+
+    @Test
+    void reconcileContracts_parsesMembersAndMethods() {
+        FakeLlm llm = new FakeLlm();
+        llm.responses.add("""
+                {"files":[
+                  {"module":"backend/src/main/java/com/x/service/SubService.java","members":[],
+                   "methods":["createSubscription(request: CreateSubscriptionRequest): MemberSubscriptionDto"]},
+                  {"module":"frontend/src/components/classes/ClassSchedule.tsx",
+                   "members":[{"name":"classes","type":"FitnessClassDto[]"},
+                              {"name":"onSelectClass","type":"(c: FitnessClassDto) => void"}],
+                   "methods":[]}
+                ]}""");
+
+        List<FileContract> out = llm.reconcileContracts("mixed", "instruction", "[]", "", "");
+
+        assertThat(out).hasSize(2);
+        assertThat(out.get(0).methods()).extracting(FileContract.Method::signature)
+                .containsExactly("createSubscription(request: CreateSubscriptionRequest): MemberSubscriptionDto");
+        assertThat(out.get(0).members()).isEmpty();
+        assertThat(out.get(1).members()).extracting(FileContract.Member::name)
+                .containsExactly("classes", "onSelectClass");
+        assertThat(out.get(1).members().get(1).type()).isEqualTo("(c: FitnessClassDto) => void");
+    }
+
+    @Test
+    void reconcileContracts_retriesThenThrowsOnGarbage() {
+        FakeLlm llm = new FakeLlm();
+        llm.responses.add("not json");
+        llm.responses.add("{\"files\":\"not-an-array\"}");
+
+        assertThatThrownBy(() -> llm.reconcileContracts("mixed", "x", "[]", "", ""))
+                .isInstanceOf(WorkerException.class);
+        assertThat(llm.singleTurnCalls).isEqualTo(2);           // both attempts consumed
     }
 
     // ── Peer-summary fallback for not-yet-detailed features ──────────────────

@@ -1,14 +1,14 @@
 == FILE TO IMPLEMENT ==
 Path: {{filePath}}
 
-== DEPENDENCY FILES (verify your imports and signatures match these exactly) ==
-{{dependencySection}}
-
-{{existingSection}}
-== FEATURE INSTRUCTION (holistic brief for all files in this feature — use for context and inter-file contracts) ==
-{{featureInstruction}}
-
-== YOUR FILE'S ROLE IN THIS FEATURE (implement only this) ==
+== YOUR FILE — ROLE & EXACT CONTRACT (implement ONLY this file; expose EXACTLY the fields, methods, and endpoints listed — do not invent, rename, or add) ==
 {{fileRole}}
+{{featureContext}}
 
-Implement ONLY the file described in the role above. Follow the feature instruction for context on how other files in the feature work and what they expect from this file. Do not implement other files' content.
+== AVAILABLE MODULES & CONTRACTS (what you may import — names, paths, signatures, props, and where shown, bodies for reference) ==
+Where an item is prefixed with a RECONCILED INTERFACE line, that interface is AUTHORITATIVE: bind to it exactly. If a body shown below it differs (stale or divergent), follow the reconciled interface, NOT the body. Never copy a signature from a body that contradicts its reconciled interface.
+{{dependencySection}}
+{{existingSection}}
+Implement ONLY this file, exposing EXACTLY the contract in YOUR FILE — ROLE & EXACT CONTRACT above, governed by the FEATURE CONTEXT — it decides how this file must behave and fit the rest of the feature. Use the feature instruction for how the other files work and what they expect from this file. Do not implement other files' content.
+
+SIGNATURE AUTHORITY (strict): The reconciled contracts are the SINGLE source of truth for every cross-file signature. Expose EXACTLY the fields, methods, and endpoints in YOUR FILE — ROLE & EXACT CONTRACT, and when you CALL or IMPORT another module use EXACTLY the interface listed for it in AVAILABLE MODULES & CONTRACTS. If anything else — a dependency file body, an example, prose, or the feature context — conflicts with a listed contract, the LISTED CONTRACT WINS. Never invent, rename, retype, drop, or add a field/method/endpoint to make code compile or "look right"; if a needed signature is not listed, implement to the listed contract and leave the rest to the producer.

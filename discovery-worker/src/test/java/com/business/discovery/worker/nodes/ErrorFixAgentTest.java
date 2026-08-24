@@ -32,6 +32,10 @@ class ErrorFixAgentTest {
 
     private static final BuildResult PASS = new BuildResult(0, "");
     private static final BuildResult FAIL = new BuildResult(1, "compilation error in Foo.java");
+    // tsc-format failure for the frontend seed (runTscCheck) — has a real TS error line so the
+    // seed does not fall back to npm-build.
+    private static final BuildResult TSC_FAIL = new BuildResult(1,
+            "src/pages/A.tsx(1,2): error TS2339: Property 'x' does not exist.");
 
     @Mock private LlmGeneratorService proLlm;
     @Mock private BuildToolService buildTool;
@@ -108,17 +112,66 @@ class ErrorFixAgentTest {
     }
 
     @Test
-    void fix_frontend_uses_npmBuild_theAuthoritativeCheck() {
-        // Must match FrontendValidationNode's final check (tsc + vite bundling) —
-        // bare tsc once passed while vite build failed, trapping retries
-        when(buildTool.runNpmBuild(any())).thenReturn(FAIL, PASS);
+    void fix_frontend_seedsWithTsc_andFinalChecksWithNpmBuild() {
+        // The seed uses tsc (runTscCheck) so the agent gets the COMPLETE TypeScript error list; the
+        // final authoritative check is npm run build (tsc + vite bundling) — bare tsc once passed while
+        // vite build failed, trapping retries.
+        when(buildTool.runTscCheck(any())).thenReturn(TSC_FAIL);
+        when(buildTool.runNpmBuild(any())).thenReturn(PASS);
         stubLoop(true);
+
+        boolean result = agent.fix(FileType.FRONTEND, ctx);
+
+        assertThat(result).isTrue();
+        verify(buildTool).runTscCheck(tempDir.resolve("frontend"));   // seed = tsc
+        verify(buildTool).runNpmBuild(tempDir.resolve("frontend"));   // final = npm run build
+        verify(buildTool, never()).runMvnCompile(any());
+    }
+
+    // ── F3: deterministic input assembly into the trigger ──────────────────
+
+    @Test
+    void trigger_preReadsFilesNamedInErrors() throws Exception {
+        Path bar = tempDir.resolve("backend/src/main/java/com/foo/Bar.java");
+        Files.createDirectories(bar.getParent());
+        Files.writeString(bar, "package com.foo;\npublic class Bar { int SENTINEL_FIELD = 1; }");
+
+        BuildResult fail = new BuildResult(1,
+                "[ERROR] " + bar + ":[2,20] cannot find symbol\n  symbol: variable x\n");
+        when(buildTool.runMvnCompile(any())).thenReturn(fail, PASS);
+
+        ArgumentCaptor<String> trig = ArgumentCaptor.forClass(String.class);
+        when(proLlm.runFixAgentLoop(anyString(), trig.capture(), anyList(), any(), any(), anyInt()))
+                .thenReturn(true);
+
+        agent.fix(FileType.BACKEND, ctx);
+
+        assertThat(trig.getValue())
+                .contains("FILES NAMED IN THE ERRORS")
+                .contains("backend/src/main/java/com/foo/Bar.java")
+                .contains("SENTINEL_FIELD");   // the file's content was pre-read into the prompt
+    }
+
+    @Test
+    void trigger_listsDerivedFilesAsReferenceOnly_notEditableContent() throws Exception {
+        Path svc = tempDir.resolve("frontend/src/services/orderService.ts");
+        Files.createDirectories(svc.getParent());
+        Files.writeString(svc, "// GENERATED from the backend API contract\nexport const getAll = 1;\n");
+
+        when(buildTool.runTscCheck(any())).thenReturn(new BuildResult(1,
+                "src/services/orderService.ts(2,14): error TS2339: Property 'x' does not exist."));
+        when(buildTool.runNpmBuild(any())).thenReturn(PASS);
+
+        ArgumentCaptor<String> trig = ArgumentCaptor.forClass(String.class);
+        when(proLlm.runFixAgentLoop(anyString(), trig.capture(), anyList(), any(), any(), anyInt()))
+                .thenReturn(true);
 
         agent.fix(FileType.FRONTEND, ctx);
 
-        verify(buildTool, times(2)).runNpmBuild(tempDir.resolve("frontend"));
-        verify(buildTool, never()).runTscCheck(any());
-        verify(buildTool, never()).runMvnCompile(any());
+        // The derived service is named for reference but not dumped as an editable body.
+        assertThat(trig.getValue())
+                .contains("frontend/src/services/orderService.ts")
+                .contains("Derived/immutable");
     }
 
     // ── Auto-verify hook ──────────────────────────────────────────────────
@@ -147,6 +200,9 @@ class ErrorFixAgentTest {
         if (fileType == FileType.BACKEND) {
             when(buildTool.runMvnCompile(any())).thenReturn(FAIL, PASS);
         } else {
+            // Frontend seeds the loop with tsc (runTscCheck); tsc-format errors avoid the npm-build
+            // seed fallback. runNpmBuild is the final authoritative check.
+            when(buildTool.runTscCheck(any())).thenReturn(TSC_FAIL);
             when(buildTool.runNpmBuild(any())).thenReturn(FAIL, PASS);
         }
 
@@ -314,7 +370,7 @@ class ErrorFixAgentTest {
     // ── Tool specs ────────────────────────────────────────────────────────
 
     @Test
-    void agent_exposes_8_tools_including_strReplace_and_npmInstall() {
+    void agent_exposes_9_tools_including_bulkStrReplace() {
         when(buildTool.runMvnCompile(any())).thenReturn(FAIL, PASS);
         ArgumentCaptor<List<ToolSpecification>> toolsCaptor = ArgumentCaptor.forClass(List.class);
         when(proLlm.runFixAgentLoop(anyString(), anyString(), toolsCaptor.capture(), any(), any(), anyInt()))
@@ -324,7 +380,7 @@ class ErrorFixAgentTest {
 
         assertThat(toolsCaptor.getValue()).extracting(ToolSpecification::name)
                 .containsExactlyInAnyOrder(
-                        "str_replace", "write_file", "read_file", "run_compiler",
+                        "str_replace", "bulk_str_replace", "write_file", "read_file", "run_compiler",
                         "run_npm_install", "search_symbol", "read_architecture_spec", "list_files");
     }
 }

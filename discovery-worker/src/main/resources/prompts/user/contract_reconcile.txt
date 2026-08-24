@@ -1,0 +1,13 @@
+FEATURE: {{featureName}}
+
+FEATURE INSTRUCTION:
+{{featureInstruction}}
+
+FILES IN THIS FEATURE (reconcile their interfaces — one output entry per module):
+{{filesJson}}
+
+PEER CONTRACTS (interfaces of files in OTHER features these depend on — bind to these, do not redefine):
+{{peerContractsJson}}
+
+FOUNDATION CONTRACT (platform classes/types that already exist — fenced ground truth; bind to these EXACTLY, never redefine, and follow the identity convention below):
+{{foundationContract}}

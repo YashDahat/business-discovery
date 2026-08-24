@@ -59,13 +59,25 @@ public final class TsSdkGenerator {
     // ── Emission ──────────────────────────────────────────────────────────
 
     private static String emitFile(List<Endpoint> endpoints, Map<String, String> typeToPath) {
-        // imports: each referenced wire type from its type file
+        // imports: each referenced wire type from its type file — request, response, AND param
+        // types. Path/query params typed as enums (e.g. ReservationStatus) appear in the
+        // function signature via emitFunction but were previously never added to imports, producing
+        // TS2304 "Cannot find name 'ReservationStatus'" on the derived (fenced) service file that
+        // ErrorFixAgent cannot edit.
         Map<String, Set<String>> importsByDomain = new LinkedHashMap<>();
         for (Endpoint e : endpoints) {
             for (String t : new String[]{e.requestType(), e.responseType()}) {
                 if (t != null && typeToPath.containsKey(t)) {
                     String domain = TsTypeGenerator.domainOfPath(typeToPath.get(t));
                     importsByDomain.computeIfAbsent(domain, k -> new TreeSet<>()).add(t);
+                }
+            }
+            // Also import enum param types used in path/query param signatures
+            for (Param p : e.pathParams()) {
+                String ts = TsTypeGenerator.mapType(p.javaType(), typeToPath.keySet());
+                if (typeToPath.containsKey(ts)) {
+                    String domain = TsTypeGenerator.domainOfPath(typeToPath.get(ts));
+                    importsByDomain.computeIfAbsent(domain, k -> new TreeSet<>()).add(ts);
                 }
             }
         }

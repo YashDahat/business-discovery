@@ -59,6 +59,12 @@ public final class RolePrefixPatcher {
 
         boolean changed = false;
         for (Path file : javaFiles) {
+            // Skip foundation-owned files — they are closed for modification (OCP). The foundation's
+            // User.java, SecurityConfig.java, and auth/payment spine already implement authorities
+            // correctly for the hasAuthority("ADMIN") world. Patching them when the LLM happened
+            // to generate hasRole() elsewhere corrupts User.java's Lombok processing and breaks
+            // the SecurityConfig/hasAuthority contract the foundation relies on.
+            if (isFoundationOwned(file)) continue;
             try {
                 String content = Files.readString(file);
                 if (!content.contains(NEW_AUTHORITY)) continue;
@@ -111,6 +117,26 @@ public final class RolePrefixPatcher {
                 || arg.contains("getRole()")
                 || arg.matches(".*\\brole\\b.*");
         return referencesRole;
+    }
+
+    /**
+     * Returns true for files that belong to the foundation's auth/payment spine and must
+     * never be modified by this patcher. These files are correct by construction — patching
+     * them when the LLM used hasRole() elsewhere breaks the hasAuthority() contract the
+     * foundation's SecurityConfig relies on and can corrupt Lombok processing.
+     */
+    private static boolean isFoundationOwned(Path file) {
+        String name = file.getFileName().toString();
+        // Auth spine
+        if (name.equals("User.java") || name.equals("Role.java")
+                || name.equals("UserService.java") || name.equals("SecurityConfig.java")
+                || name.equals("JwtAuthFilter.java") || name.equals("AdminInitializer.java")
+                || name.startsWith("Jwt") || name.startsWith("PasswordEncoder")
+                || name.startsWith("Auth") || name.equals("UserRepository.java")) return true;
+        // Payment spine
+        if (name.startsWith("Payment") || name.equals("GatewayWebhookEvent.java")
+                || name.endsWith("PaymentGateway.java")) return true;
+        return false;
     }
 
     /** Index of the paren that closes the one opened just before startInclusive. */

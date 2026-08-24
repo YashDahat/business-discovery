@@ -10,7 +10,7 @@ import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 @Component
-@Order(16)
+@Order(17)
 @Slf4j
 @RequiredArgsConstructor
 public class GitPushNode implements WorkerNode {

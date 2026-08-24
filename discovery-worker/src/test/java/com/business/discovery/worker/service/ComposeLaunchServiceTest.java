@@ -1,6 +1,7 @@
 package com.business.discovery.worker.service;
 
 import com.business.discovery.worker.service.ComposeLaunchService.LaunchSpec;
+import com.business.discovery.worker.service.llm.ApiEndpoint;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -147,5 +148,55 @@ class ComposeLaunchServiceTest {
     void loginBodySendsIdentifierUnderEveryField() {
         String body = ComposeLaunchService.loginBody(java.util.List.of("username", "email"), "admin", "adminpass");
         assertThat(body).isEqualTo("{\"username\":\"admin\",\"email\":\"admin\",\"password\":\"adminpass\"}");
+    }
+
+    // ── Negative-authz probe (protected endpoints must reject anonymous callers) ─
+
+    @Test
+    void isProperlyRejectedOnlyFor401And403() {
+        assertThat(ComposeLaunchService.isProperlyRejected(401)).isTrue();
+        assertThat(ComposeLaunchService.isProperlyRejected(403)).isTrue();
+        assertThat(ComposeLaunchService.isProperlyRejected(200)).isFalse();
+        assertThat(ComposeLaunchService.isProperlyRejected(404)).isFalse();  // reached dispatcher = unguarded
+        assertThat(ComposeLaunchService.isProperlyRejected(500)).isFalse();
+    }
+
+    @Test
+    void adminPathIsProtectedByConventionEvenWithoutManifestTier() {
+        // the /api/admin/... drift (off /api/v1/admin) is caught by the path convention alone
+        assertThat(ComposeLaunchService.shouldBeProtected("GET", "/api/admin/inquiries", java.util.Set.of())).isTrue();
+        assertThat(ComposeLaunchService.shouldBeProtected("POST", "/api/admin/gallery", java.util.Set.of())).isTrue();
+    }
+
+    @Test
+    void nonAdminEndpointProtectedOnlyWhenManifestTiersIt() {
+        var keys = java.util.Set.of("GET /api/v1/orders/my-orders");
+        assertThat(ComposeLaunchService.shouldBeProtected("GET", "/api/v1/orders/my-orders", keys)).isTrue();
+        assertThat(ComposeLaunchService.shouldBeProtected("GET", "/api/v1/menu/items", keys)).isFalse(); // public
+    }
+
+    @Test
+    void protectedKeysFromKeepsAuthAndAdminTiersOnly() {
+        var keys = ComposeLaunchService.protectedKeysFrom(java.util.List.of(
+                ep("GET", "/api/v1/menu/items", "public"),
+                ep("GET", "/api/v1/orders/my-orders", "authenticated"),
+                ep("POST", "/api/v1/admin/gallery", "admin")));
+        assertThat(keys).containsExactlyInAnyOrder(
+                "GET /api/v1/orders/my-orders", "POST /api/v1/admin/gallery");
+    }
+
+    @Test
+    void substituteParamsReplacesPathVariables() {
+        assertThat(ComposeLaunchService.substituteParams("/api/v1/admin/orders/{orderId}/status"))
+                .isEqualTo("/api/v1/admin/orders/1/status");
+        assertThat(ComposeLaunchService.substituteParams("/api/gallery")).isEqualTo("/api/gallery");
+    }
+
+    private static ApiEndpoint ep(String method, String path, String access) {
+        ApiEndpoint e = new ApiEndpoint();
+        e.setMethod(method);
+        e.setPath(path);
+        e.setAccess(access);
+        return e;
     }
 }

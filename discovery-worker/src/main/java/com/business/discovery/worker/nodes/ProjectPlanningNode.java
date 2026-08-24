@@ -2,12 +2,14 @@ package com.business.discovery.worker.nodes;
 
 import com.business.discovery.worker.constants.FailureType;
 import com.business.discovery.worker.constants.FileType;
+import com.business.discovery.worker.constants.PlatformStack;
 import com.business.discovery.worker.context.WorkerContext;
 import com.business.discovery.worker.errorhandler.WorkerException;
 import com.business.discovery.worker.model.ArchitectBrief;
 import com.business.discovery.worker.model.BusinessEntity;
 import com.business.discovery.worker.service.llm.ArchitectureSpec;
 import com.business.discovery.worker.service.llm.BriefContext;
+import com.business.discovery.worker.service.llm.FeatureCard;
 import com.business.discovery.worker.service.llm.FeatureSpec;
 import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.FileSpec;
@@ -17,7 +19,10 @@ import com.business.discovery.worker.scaffold.ScaffoldModule;
 import com.business.discovery.worker.service.GitService;
 import com.business.discovery.worker.service.SpringInitializrClient;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.ContractReconciler;
+import com.business.discovery.worker.util.EnrichmentCardUtil;
 import com.business.discovery.worker.util.FeatureDependencyGraph;
+import com.business.discovery.worker.util.ManifestCompletenessChecker;
 import com.business.discovery.worker.util.SlugUtil;
 import com.business.discovery.worker.util.WorkspaceReader;
 import lombok.extern.slf4j.Slf4j;
@@ -54,6 +59,13 @@ public class ProjectPlanningNode implements WorkerNode {
 
     private static final int PROCESS_TIMEOUT_MINUTES = 5;
 
+    // Cycle self-heal budget: how many times to clear + re-enrich the back-edge owner IN-RUN,
+    // feeding it the exact cycle it just formed, before giving up and failing hard for a container
+    // retry. Each attempt is one Flash enrichment call, so this is a deliberately small ceiling —
+    // not a target. A container retry would only replay the same advisory prompt, so the in-run
+    // heal (which names the concrete cycle) is where a different attempt actually happens.
+    private static final int MAX_CYCLE_HEAL_ATTEMPTS = 2;
+
     // "mail" is included by default: briefs routinely produce Notification/Lead features whose
     // services autowire JavaMailSender — without the starter the app compiles but fails to boot
     // (caught by the smoke boot gate on multifit-aundh, 2026-07-04).
@@ -75,10 +87,9 @@ public class ProjectPlanningNode implements WorkerNode {
     // The platform stack is fixed — briefs describe the business, never the technology.
     // A brief-supplied stack (e.g. "Next.js frontend") once reached the planning prompt and
     // made the model return an empty spec; see docs/llm evidence on multifit-aundh attempt 1-4.
-    private static final Map<String, String> PLATFORM_TECH_STACK = Map.of(
-            "frontend", "React 19 + TypeScript on Vite, react-router-dom, Tailwind CSS",
-            "backend", "Spring Boot 3 (Java 17) + Spring Data JPA",
-            "database", "PostgreSQL");
+    // Single source of truth in PlatformStack (F6) — also pinned onto the brief at ingestion by
+    // DataLoaderNode, so this substitution is now belt-and-suspenders rather than the only guard.
+    private static final Map<String, String> PLATFORM_TECH_STACK = PlatformStack.STACK;
 
     // Frameworks that conflict with the platform stack — never installed even if the spec asks
     private static final Set<String> FORBIDDEN_NPM_PACKAGES = Set.of(
@@ -92,6 +103,12 @@ public class ProjectPlanningNode implements WorkerNode {
     // Deterministic, business-agnostic backend slices written at scaffold time (auth spine, ...).
     // Their files are stripped from the LLM manifest so the generator never shadows them.
     private final List<ScaffoldModule> scaffoldModules;
+
+    // Foundation repo cloned instead of running Spring Initializr + npm create vite.
+    // Contains auth/payment/cart spine + shadcn base set + all canonical configs pre-committed.
+    // Set WEBAPP_FOUNDATION_REPO to override the default (useful for forks or local testing).
+    @org.springframework.beans.factory.annotation.Value("${worker.foundation.repo:https://github.com/YashDahat/webapp-foundation.git}")
+    private String foundationRepo;
 
     public ProjectPlanningNode(@Qualifier("geminiPro") LlmGeneratorService llm,
                                @Qualifier("geminiFlash") LlmGeneratorService enrichLlm,
@@ -114,6 +131,34 @@ public class ProjectPlanningNode implements WorkerNode {
 
         BriefContext briefCtx = buildBriefContext(brief, business, ctx.getProjectHistory());
         ctx.setBriefCtx(briefCtx);
+
+        // ── Clone foundation BEFORE planning so the LLM sees real files ──────────
+        // With the foundation on disk before arch spec generation, the planning LLM
+        // can see the actual auth spine, payment spine, cart context, and shadcn
+        // components as real source files — not just as text instructions in the
+        // prompt. This gives better context: the LLM knows exactly what already
+        // exists and plans only the business-specific layer on top.
+        // Extra starters/deps from the spec are injected AFTER generation (below).
+        // On retry runs backend/pom.xml already exists → clone is skipped.
+        if (!Files.exists(workspace.resolve("backend/pom.xml"))) {
+            try {
+                cloneFoundation(workspace, slug, business.getTitle(),
+                        ctx.getGithubToken(), List.of(), null);
+                writeDockerArtifacts(workspace, slug);
+                log.info("[ProjectPlanningNode] Foundation cloned before planning — "
+                        + "LLM will see existing files as context");
+            } catch (IOException | InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new WorkerException(FailureType.INFRA,
+                        "Foundation pre-clone failed: " + e.getMessage(), e);
+            }
+        }
+
+        // ── Phase 1: structured fenced-symbol registry — parsed from the foundation contract cards
+        //    now on disk. Fed to the planner below as a closed fenced-symbol list and reused by the
+        //    Phase 2 reconciler. Empty (no-op) when the foundation predates the contract cards. ──
+        var foundationSymbols =
+                com.business.discovery.worker.util.FoundationSymbolRegistry.buildFromWorkspace(workspace);
 
         // ── Decide what to skip ───────────────────────────────────────────────
         boolean hasChanges = briefCtx.requestedChanges() != null && !briefCtx.requestedChanges().isBlank();
@@ -162,8 +207,13 @@ public class ProjectPlanningNode implements WorkerNode {
         }
 
         // ── Outline generation (retried in-process inside generateArchitectureSpec) ──
+        // Pass WorkspaceReader so the planning LLM can read foundation files on disk.
+        // The foundation was cloned above, so the LLM can now call read_file to inspect
+        // UserService.java, PaymentService.java, CartContext.tsx etc. before planning.
         if (!skipGeneration) {
-            spec = llm.generateArchitectureSpec(briefCtx, slug);
+            com.business.discovery.worker.util.WorkspaceReader reader =
+                    new com.business.discovery.worker.util.WorkspaceReader(workspace);
+            spec = llm.generateArchitectureSpec(briefCtx, slug, reader, foundationSymbols.renderForPlanner());
             int fileCount = spec.getFiles() == null ? 0 : spec.getFiles().size();
             // Belt-and-suspenders: the retry loop already guards this
             if (fileCount == 0) {
@@ -175,15 +225,59 @@ public class ProjectPlanningNode implements WorkerNode {
         // ── Enrich: one Pro call per feature — bounded output, resumable per-feature ──
         if (!skipEnrichment) {
             enrichFeatures(spec, briefCtx, workspace, ctx.getGithubBranch());
+        }
+
+        // ── Cross-reference validation: add missing referenced files to the spec (on-disk foundation/
+        //    scaffold guard) AND attach each to its referencing feature. Runs BEFORE reconciliation so
+        //    every backfilled file receives a reconciled ground-truth contract and an enrichment card;
+        //    unconditional so skip/resume runs still repair the manifest. ──
+        spec = validateCrossReferences(spec, workspace, briefCtx);
+
+        if (!skipEnrichment) {
+            // Reconcile cross-file contracts (Pro) into one ground truth BOTH generators bind to —
+            // after enrichment (interfaces now exist), before generation. Writes the reconciled
+            // interface into fileRole (read by both generators) + the structured fields. Best-effort:
+            // a failure keeps the planned interfaces. Idempotent, so it re-runs safely on retry.
+            try {
+                List<com.business.discovery.worker.service.llm.ContractRecord> contractRecords = new ArrayList<>();
+                int reconciled = ContractReconciler.reconcile(spec, llm,
+                        com.business.discovery.worker.util.FoundationContractCard.backendSection(workspace),
+                        com.business.discovery.worker.util.FoundationContractCard.frontendSection(workspace),
+                        contractRecords);
+                if (reconciled > 0) {
+                    log.info("[ProjectPlanningNode] Contract reconciliation set {} file contract(s)", reconciled);
+                    ArchitectureJsonUtil.write(workspace, spec);
+                    try {
+                        com.business.discovery.worker.util.ContractsDoc.write(workspace, contractRecords);
+                        log.info("[ProjectPlanningNode] CONTRACTS.json written — {} reconciled contract(s)",
+                                contractRecords.size());
+                    } catch (IOException e) {
+                        log.warn("[ProjectPlanningNode] Could not write CONTRACTS.json: {}", e.getMessage());
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("[ProjectPlanningNode] Contract reconciliation skipped — keeping planned interfaces: {}",
+                        e.getMessage());
+            }
+
             try {
                 writeEnrichmentDoc(workspace, spec, ctx.getAttemptNumber());
             } catch (IOException e) {
                 log.warn("[ProjectPlanningNode] Could not write enrichment doc: {}", e.getMessage());
             }
-        }
 
-        // ── Cross-reference validation: add stub entries for missing imports ──
-        spec = validateCrossReferences(spec);
+            // Machine-readable twin: docs/ENRICHMENT.json as Map<featureName, FeatureCard>. The
+            // generator nodes load this and inject each file's whole-feature context (siblings +
+            // roles + instruction) into its generation prompt, keyed by FileSpec.featureName.
+            try {
+                Map<String, FeatureCard> cards = EnrichmentCardUtil.build(spec);
+                EnrichmentCardUtil.write(workspace, cards);
+                log.info("[ProjectPlanningNode] ENRICHMENT.json written to docs/ — {} feature card(s)",
+                        cards.size());
+            } catch (IOException e) {
+                log.warn("[ProjectPlanningNode] Could not write ENRICHMENT.json: {}", e.getMessage());
+            }
+        }
 
         // ── Merge: preserve VALIDATED status from prior run ───────────────────
         spec = mergeWithExisting(spec, workspace);
@@ -192,45 +286,313 @@ public class ProjectPlanningNode implements WorkerNode {
         //    pre-written scaffold. Runs on every attempt; idempotent. ──
         stripScaffoldOwnedFiles(spec);
 
+        // ── Phase 2: deterministic foundation reconciler — strip fenced re-declarations, rewrite
+        //    domain user/payment references to the foundation handle, drop dangling foundation imports.
+        //    Runs before the manifest is built so generators never see a reconciled-away file. ──
+        com.business.discovery.worker.util.FoundationRefReconciler.reconcile(spec, foundationSymbols);
+
         ctx.setFileManifest(toManifest(spec));
 
         try {
-            // Scaffold only on first run — on retry the cloned repo already has these
-            if (!Files.exists(workspace.resolve("backend/pom.xml"))) {
-                ProjectDependencies deps = resolveDependencies(spec);
-                scaffoldSpringBoot(workspace, slug, business.getTitle(), deps.getSpringBootStarters(),
-                        deps.getMavenDependencies());
-                scaffoldVite(workspace, deps.getNpmPackages());
-                writeDockerArtifacts(workspace, slug);
-                log.info("[ProjectPlanningNode] CLI scaffold complete for '{}'", business.getTitle());
-            } else {
-                // Scaffold was already done on a prior attempt. Remove any Application.java
-                // that landed in a wrong sub-package (happens when packageName param was missing).
-                // Expected location: backend/src/main/java/com/<slug>/<ArtifactId>Application.java
-                Path expectedPackageDir = workspace.resolve("backend/src/main/java/com/" + slug);
-                Path javaRoot = workspace.resolve("backend/src/main/java");
-                if (Files.exists(javaRoot)) {
-                    try (var walk = Files.walk(javaRoot)) {
-                        walk.filter(p -> p.getFileName().toString().endsWith("Application.java"))
-                            .filter(p -> !p.getParent().equals(expectedPackageDir))
-                            .forEach(p -> {
-                                try {
-                                    Files.delete(p);
-                                    log.info("[ProjectPlanningNode] Removed stale Application.java at wrong package: {}", p);
-                                } catch (IOException e) {
-                                    log.warn("[ProjectPlanningNode] Could not remove stale Application.java: {}", p);
-                                }
-                            });
-                    }
+            // ── Inject extra deps the planning LLM declared in the spec ──────────
+            // The foundation baseline covers ~90% of projects. Any extra Spring Boot
+            // starters or raw Maven coords the LLM requested are injected here, now
+            // that the spec exists. The foundation was already cloned above.
+            ProjectDependencies deps = resolveDependencies(spec);
+            Path pom = workspace.resolve("backend/pom.xml");
+            List<String> extraStarters = deps.getSpringBootStarters().stream()
+                    .filter(s -> !DEFAULT_SPRING_STARTERS.contains(s))
+                    .toList();
+            if (!extraStarters.isEmpty()) {
+                injectExtraStarters(pom, extraStarters);
+            }
+            if (deps.getMavenDependencies() != null && !deps.getMavenDependencies().isEmpty()) {
+                injectSpecDeclaredDeps(pom, deps.getMavenDependencies());
+            }
+
+            // Remove any stale Application.java that landed in a wrong sub-package
+            // on a retry attempt (happens when packageName param was missing).
+            Path expectedPackageDir = workspace.resolve("backend/src/main/java/com/" + slug);
+            Path javaRoot = workspace.resolve("backend/src/main/java");
+            if (Files.exists(javaRoot)) {
+                try (var walk = Files.walk(javaRoot)) {
+                    walk.filter(p -> p.getFileName().toString().endsWith("Application.java"))
+                        .filter(p -> !p.getParent().equals(expectedPackageDir))
+                        .forEach(p -> {
+                            try {
+                                Files.delete(p);
+                                log.info("[ProjectPlanningNode] Removed stale Application.java at wrong package: {}", p);
+                            } catch (IOException e) {
+                                log.warn("[ProjectPlanningNode] Could not remove stale Application.java: {}", p);
+                            }
+                        });
                 }
             }
 
             ArchitectureJsonUtil.write(workspace, spec);
             writeHistoryStub(workspace, ctx, spec);
 
-        } catch (IOException | InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new WorkerException(FailureType.INFRA, "Scaffold failed: " + e.getMessage(), e);
+        } catch (IOException e) {
+            throw new WorkerException(FailureType.INFRA, "Post-planning setup failed: " + e.getMessage(), e);
+        }
+    }
+
+    // ── Foundation clone (replaces Spring Initializr + Vite + scaffold modules) ──────
+
+    /**
+     * Clones the webapp-foundation repo into the workspace and adapts it for this business:
+     * renames the {@code com.webappfoundation} placeholder package, updates pom.xml/app name,
+     * and runs {@code npm ci} (fast — package-lock.json is committed) to restore node_modules.
+     *
+     * <p>What this replaces vs the old flow:
+     * <ul>
+     *   <li>Spring Initializr download — foundation already has a working pom.xml</li>
+     *   <li>JWT + Razorpay pom injection — already in foundation pom.xml</li>
+     *   <li>AuthScaffoldModule (12 files) + PaymentScaffoldModule (16 files) — already committed</li>
+     *   <li>npm create vite + npm install (~60s) — already committed with package-lock.json</li>
+     *   <li>shadcn base set install (25 components) — already committed</li>
+     *   <li>Playwright scaffold + @playwright/test install — already committed</li>
+     *   <li>CartSpineScaffold (7 files) + context shims — already committed</li>
+     * </ul>
+     *
+     * <p>What still runs after this method:
+     * <ul>
+     *   <li>{@code injectSpecDeclaredDeps} — adds any extra Maven deps the planning LLM declared</li>
+     *   <li>{@code writeDockerArtifacts} — Dockerfile/compose/env are business-specific</li>
+     *   <li>{@code FrontendGeneratorNode.ensurePlaywrightScaffold} — no-ops (already present)</li>
+     *   <li>All generation nodes — run unchanged against the renamed package tree</li>
+     * </ul>
+     */
+    private void cloneFoundation(Path workspace, String slug, String businessName,
+                                 String githubToken,
+                                 List<String> extraStarters,
+                                 List<com.business.discovery.worker.service.llm.MavenCoordinate> specDeclaredDeps)
+            throws IOException, InterruptedException {
+
+        // Build authenticated clone URL
+        String authedUrl = foundationRepo;
+        if (githubToken != null && !githubToken.isBlank() && foundationRepo.startsWith("https://")) {
+            authedUrl = foundationRepo.replace("https://", "https://" + githubToken + "@");
+        }
+
+        // Clone to a TEMP directory — NOT to workspace directly.
+        // By the time this runs, GitWorkspaceNode has already done:
+        //   git init /workspace + git remote add origin <business-repo> + git fetch + git checkout
+        // So /workspace is already a live git repo pointing to the business's GitHub repo.
+        // Cloning the foundation INTO /workspace would fail (git refuses to clone into a
+        // non-empty dir) or, worse, overwrite the business repo's .git with the foundation's.
+        // Instead: clone to a sibling temp dir → copy files across → delete temp.
+        Path tempDir = workspace.resolveSibling("foundation-tmp");
+        try {
+            log.info("[ProjectPlanningNode] Cloning foundation from {} to temp dir", foundationRepo);
+            gitService.clone(authedUrl, tempDir);
+
+            // Copy every file from the foundation (excluding its .git) into the business workspace.
+            // The workspace .git is untouched — it still points to the business repo.
+            try (var walk = Files.walk(tempDir)) {
+                walk.filter(p -> !p.startsWith(tempDir.resolve(".git")))
+                    .filter(p -> !p.equals(tempDir))
+                    .forEach(src -> {
+                        Path dest = workspace.resolve(tempDir.relativize(src));
+                        try {
+                            if (Files.isDirectory(src)) {
+                                Files.createDirectories(dest);
+                            } else {
+                                Files.createDirectories(dest.getParent());
+                                Files.copy(src, dest, StandardCopyOption.REPLACE_EXISTING);
+                            }
+                        } catch (IOException e) {
+                            log.warn("[ProjectPlanningNode] Could not copy {} → {}: {}", src, dest, e.getMessage());
+                        }
+                    });
+            }
+            log.info("[ProjectPlanningNode] Foundation files copied into workspace");
+        } finally {
+            deleteRecursive(tempDir);
+        }
+
+        // ── Package rename: com.webappfoundation → com.<slug> ────────────────
+        String oldPkg  = "com.webappfoundation";
+        String newPkg  = "com." + slug;
+        String oldCls  = "WebAppFoundationApplication";
+        String newCls  = SlugUtil.toClassName(businessName) + "Application";
+
+        Path javaRoot = workspace.resolve("backend/src/main/java");
+        if (Files.isDirectory(javaRoot)) {
+            // 1. Rename the package directory itself
+            Path oldPkgDir = javaRoot.resolve("com/webappfoundation");
+            Path newPkgDir = javaRoot.resolve("com/" + slug);
+            if (Files.exists(oldPkgDir)) {
+                Files.createDirectories(newPkgDir.getParent());
+                java.nio.file.Files.move(oldPkgDir, newPkgDir,
+                        StandardCopyOption.REPLACE_EXISTING);
+                log.info("[ProjectPlanningNode] Renamed package dir {} → {}", oldPkgDir, newPkgDir);
+            }
+            // 2. Rewrite package declarations and class references in every Java file,
+            //    AND rename WebAppFoundationApplication.java → <BusinessName>Application.java.
+            //    Java requires the public class name to match its filename — without renaming
+            //    the file, BackendValidationNode fails with "class X is public, should be
+            //    declared in a file named X.java".
+            try (var walk = Files.walk(javaRoot)) {
+                walk.filter(p -> p.toString().endsWith(".java"))
+                    .forEach(p -> {
+                        try {
+                            String content = Files.readString(p);
+                            String updated = content
+                                    .replace(oldPkg, newPkg)
+                                    .replace(oldCls, newCls);
+                            if (!updated.equals(content)) Files.writeString(p, updated);
+                            // Rename the file itself when it carries the old class name
+                            String fname = p.getFileName().toString();
+                            if (fname.equals("WebAppFoundationApplication.java")) {
+                                Files.move(p, p.resolveSibling(newCls + ".java"),
+                                        StandardCopyOption.REPLACE_EXISTING);
+                                log.info("[ProjectPlanningNode] Renamed Application file → {}.java", newCls);
+                            }
+                        } catch (IOException e) {
+                            log.warn("[ProjectPlanningNode] Could not rewrite {}: {}", p, e.getMessage());
+                        }
+                    });
+            }
+        }
+
+        // ── pom.xml: update groupId, artifactId, name ────────────────────────
+        Path pom = workspace.resolve("backend/pom.xml");
+        if (Files.exists(pom)) {
+            String content = Files.readString(pom)
+                    .replace("<groupId>com.webappfoundation</groupId>",
+                             "<groupId>com." + slug + "</groupId>")
+                    .replace("<artifactId>webapp-foundation-backend</artifactId>",
+                             "<artifactId>" + slug + "-backend</artifactId>")
+                    .replace("<name>webapp-foundation</name>",
+                             "<name>" + slug + "backend</name>");
+            Files.writeString(pom, content);
+        }
+
+        // ── application.properties: update app name ───────────────────────────
+        Path appProps = workspace.resolve("backend/src/main/resources/application.properties");
+        if (Files.exists(appProps)) {
+            String content = Files.readString(appProps)
+                    .replace("spring.application.name=webappfoundation",
+                             "spring.application.name=" + slug);
+            Files.writeString(appProps, content);
+        }
+
+        // ── Inject any extra Maven deps the planning LLM declared ─────────────
+        if (specDeclaredDeps != null && !specDeclaredDeps.isEmpty()) {
+            injectSpecDeclaredDeps(pom, specDeclaredDeps);
+        }
+
+        // ── Inject business-specific Spring Boot starters beyond the foundation baseline ─
+        // The foundation already has: web, data-jpa, postgresql, lombok, validation,
+        // actuator, security, mail. Only inject extras the planning LLM requested.
+        // resolveDependencies() was already called by the caller; its starters list is
+        // passed in here so this method stays stateless.
+        injectExtraStarters(pom, extraStarters);
+
+        // mvnw must be executable for BackendValidationNode
+        workspace.resolve("backend/mvnw").toFile().setExecutable(true);
+
+        // ── Fence foundation frontend files so FrontendGeneratorNode never overwrites them ──
+        // Without the fence marker, the LLM treats AuthContext, api/client, lib/utils, and
+        // context shims as fair game and regenerates them with degraded typing — then
+        // ErrorFixAgent burns rounds re-fixing files the foundation already had correct.
+        // The marker is the first-line comment isFenced() checks before attempting LLM generation.
+        fenceFoundationFrontendFiles(workspace.resolve("frontend/src"));
+
+        // ── npm ci — restore node_modules from the committed lock file ─────────
+        // Much faster than npm install (~5s vs ~60s) because all versions are locked.
+        Path frontend = workspace.resolve("frontend");
+        log.info("[ProjectPlanningNode] Running npm ci in {}", frontend);
+        run(frontend, "npm", "ci");
+
+        log.info("[ProjectPlanningNode] Foundation clone complete — package {} → {}, class {} → {}",
+                oldPkg, newPkg, oldCls, newCls);
+    }
+
+    /**
+     * Injects Spring Boot starter dependencies that the planning LLM requested but aren't
+     * already in the foundation's pom.xml. Most starters follow the canonical pattern
+     * {@code org.springframework.boot:spring-boot-starter-<id>}; the method skips any
+     * that are already present to remain idempotent across retries.
+     *
+     * <p>Examples of extras a planning LLM might request: cache, websocket, batch,
+     * oauth2-client, data-redis, data-elasticsearch. The foundation baseline (web, data-jpa,
+     * postgresql, lombok, validation, actuator, security, mail) covers ~90% of projects;
+     * this handles the remaining specialised starters.
+     */
+    private void injectExtraStarters(Path pomPath, List<String> extraStarters) throws IOException {
+        if (extraStarters == null || extraStarters.isEmpty()) return;
+        if (!Files.exists(pomPath)) return;
+        String pom = Files.readString(pomPath);
+        StringBuilder toAdd = new StringBuilder();
+        for (String starter : extraStarters) {
+            // Spring Boot starters follow: org.springframework.boot:spring-boot-starter-<id>
+            // Some starters (e.g. "postgresql") are actually driver starters under a different
+            // groupId — skip those; they're either in the foundation or handled by keyword injection.
+            String artifactId = starter.startsWith("spring-boot-starter-")
+                    ? starter : "spring-boot-starter-" + starter;
+            if (pom.contains("<artifactId>" + artifactId + "</artifactId>")
+                    || toAdd.toString().contains(artifactId)) continue;
+            toAdd.append("\t\t<dependency>\n")
+                 .append("\t\t\t<groupId>org.springframework.boot</groupId>\n")
+                 .append("\t\t\t<artifactId>").append(artifactId).append("</artifactId>\n")
+                 .append("\t\t</dependency>\n");
+            log.info("[ProjectPlanningNode] Injected extra starter: {}", artifactId);
+        }
+        if (toAdd.isEmpty()) return;
+        Files.writeString(pomPath, pom.replace("</dependencies>", toAdd + "\t</dependencies>"));
+    }
+
+    /**
+     * Prepends the foundation fence marker to every TypeScript/TSX file in the foundation's
+     * {@code frontend/src} tree that is NOT a business-specific generated file. This prevents
+     * {@code FrontendGeneratorNode.isFenced()} from letting the LLM overwrite foundation files
+     * like {@code AuthContext.tsx}, {@code api/client.ts}, {@code lib/utils.ts}, and cart/context
+     * shims with degraded LLM versions, which previously burned ErrorFixAgent rounds re-fixing
+     * files that the foundation already had correct.
+     *
+     * <p>Only foundation-owned paths are fenced — specifically {@code src/context/},
+     * {@code src/api/}, {@code src/lib/}, and {@code src/cart/}. Generated app files
+     * ({@code src/pages/}, {@code src/components/}, {@code src/hooks/}, etc.) are NOT touched
+     * so the LLM can still generate them freely.
+     */
+    private void fenceFoundationFrontendFiles(Path frontendSrc) {
+        String marker = "// " + com.business.discovery.worker.nodes.FrontendGeneratorNode.FOUNDATION_FENCE_MARKER
+                + " — do not edit by hand.\n";
+        // Exactly the foundation-owned directories — nothing else.
+        // 'shell' = SiteHeader, SiteFooter, SiteLayout (configurable via props, never LLM-regenerated).
+        // 'context', 'api', 'lib', 'cart' = AuthContext, apiClient, utils, cart spine.
+        List<String> foundationDirs = List.of("context", "api", "lib", "cart", "shell");
+        for (String dir : foundationDirs) {
+            Path dirPath = frontendSrc.resolve(dir);
+            if (!Files.isDirectory(dirPath)) continue;
+            try (var walk = Files.walk(dirPath)) {
+                walk.filter(p -> p.toString().endsWith(".tsx") || p.toString().endsWith(".ts"))
+                    .forEach(p -> {
+                        try {
+                            String content = Files.readString(p);
+                            // Idempotent — skip if already fenced
+                            if (content.startsWith("// GENERATED")) return;
+                            Files.writeString(p, marker + content);
+                        } catch (IOException e) {
+                            log.warn("[ProjectPlanningNode] Could not fence {}: {}", p, e.getMessage());
+                        }
+                    });
+            } catch (IOException e) {
+                log.warn("[ProjectPlanningNode] Could not walk {} for fencing: {}", dirPath, e.getMessage());
+            }
+        }
+        log.info("[ProjectPlanningNode] Foundation frontend files fenced in: {}", foundationDirs);
+    }
+
+    /** Recursively deletes a path tree (used to remove the nested .git after clone). */
+    private static void deleteRecursive(Path root) throws IOException {
+        try (var walk = Files.walk(root)) {
+            walk.sorted(java.util.Comparator.reverseOrder())
+                .forEach(p -> {
+                    try { Files.delete(p); } catch (IOException ignored) {}
+                });
         }
     }
 
@@ -876,52 +1238,96 @@ public class ProjectPlanningNode implements WorkerNode {
                 gitService.commitEnrichmentCheckpoint(workspace, feature.getFeatureName(), branch);
             }
         }
-        enforceAcyclicFeatureDependencies(spec, ordered, workspace);
+        enforceAcyclicFeatureDependencies(spec, ordered, workspace, briefCtx,
+                filesByFeature, workspaceReader, branch);
 
         log.info("[ProjectPlanningNode] Feature enrichment complete — {} features processed", features.size());
     }
 
     /**
      * Safety net behind the per-feature direction constraint: if the enriched spec still contains a
-     * dependency cycle, fail HERE — at planning time, before a single Java file is generated —
+     * dependency cycle, resolve it HERE — at planning time, before a single Java file is generated —
      * rather than letting it surface at container boot four stages later (codegen → compile →
      * image build → smoke), which is what a Spring bean cycle costs when it escapes.
      *
-     * <p>Before throwing, the back-edge feature's enrichment is cleared and checkpointed so a
-     * container retry re-enriches just that feature. On the retry its dependent is still enriched
-     * and still declares the forward edge, so the direction constraint is now injected into the
-     * prompt that previously had none — the retry gets a genuinely different attempt rather than
-     * replaying the same failure until the task is marked FAILED.
+     * <p><b>In-run self-heal (Option B).</b> On a cycle we clear and re-enrich ONLY the back-edge
+     * owner — the cycle member enriched LAST, since the earlier ones could not have seen it to
+     * depend on it — feeding the exact cycle path into its prompt. A bare container retry would
+     * replay the same advisory constraint the model already ignored (a coin-flip); naming the
+     * concrete cycle turns the replay into a genuinely different attempt. This repeats up to
+     * {@link #MAX_CYCLE_HEAL_ATTEMPTS} times, re-checking after each pass and naturally following the
+     * back-edge owner if a different cycle surfaces.
+     *
+     * <p>Every heal pass checkpoints the spec (and pushes it on a branch) so that if the loop still
+     * cannot converge, the terminal hard-fail below leaves the back-edge owner cleared — a container
+     * retry then resumes and re-enriches just it, preserving the prior fail-fast contract as the
+     * last resort.
      */
     private void enforceAcyclicFeatureDependencies(ArchitectureSpec spec,
                                                    List<FeatureSpec> ordered,
-                                                   Path workspace) {
+                                                   Path workspace,
+                                                   BriefContext briefCtx,
+                                                   Map<String, List<FileSpec>> filesByFeature,
+                                                   WorkspaceReader workspaceReader,
+                                                   String branch) {
         List<FeatureSpec> features = spec.getFeatures();
-        List<String> cycle = FeatureDependencyGraph.findCycle(features);
-        if (cycle.isEmpty()) return;
-
-        String path = String.join(" → ", cycle);
 
         Map<String, Integer> enrichmentOrder = new HashMap<>();
         for (int i = 0; i < ordered.size(); i++) {
             enrichmentOrder.put(ordered.get(i).getFeatureName(), i);
         }
-        // The back edge belongs to whichever feature in the cycle was enriched LAST — the earlier
-        // ones could not have seen it to depend on it.
-        String backEdgeOwner = cycle.stream()
-                .distinct()
-                .max(Comparator.comparingInt(name -> enrichmentOrder.getOrDefault(name, -1)))
-                .orElse(null);
 
-        log.error("[ProjectPlanningNode] Feature dependency cycle: {} — back edge owned by '{}'",
-                path, backEdgeOwner);
+        List<String> cycle = FeatureDependencyGraph.findCycle(features);
+        for (int heal = 1; heal <= MAX_CYCLE_HEAL_ATTEMPTS && !cycle.isEmpty(); heal++) {
+            String path = String.join(" → ", cycle);
+            String backEdgeOwner = lastEnrichedInCycle(cycle, enrichmentOrder);
+            FeatureSpec owner = findFeature(features, backEdgeOwner);
+            List<FileSpec> ownerFiles = filesByFeature.getOrDefault(backEdgeOwner, List.of());
 
-        for (FeatureSpec f : features) {
-            if (f.getFeatureName() != null && f.getFeatureName().equals(backEdgeOwner)) {
-                f.setFeatureInstruction(null);
-                f.setDependsOnFeatures(null);
-                break;
+            // Nothing re-enrichable (unknown owner or no files) — drop to the terminal hard-fail.
+            if (owner == null || ownerFiles.isEmpty()) break;
+
+            log.warn("[ProjectPlanningNode] Feature dependency cycle (self-heal {}/{}): {} — "
+                    + "clearing and re-enriching back-edge owner '{}' with the cycle named in its prompt",
+                    heal, MAX_CYCLE_HEAL_ATTEMPTS, path, backEdgeOwner);
+
+            owner.setFeatureInstruction(null);
+            owner.setDependsOnFeatures(null);
+
+            Set<String> dependents = FeatureDependencyGraph.dependentsOf(backEdgeOwner, features);
+            Map<String, Object> peerSummaries = buildPeerSummariesExcluding(
+                    buildAllPeerSummaries(features, filesByFeature), backEdgeOwner);
+
+            try {
+                enrichLlm.enrichFeature(owner, ownerFiles, peerSummaries, briefCtx,
+                        workspaceReader, dependents, path);
+            } catch (WorkerException e) {
+                log.warn("[ProjectPlanningNode] Self-heal re-enrichment of '{}' failed on attempt {}: {}",
+                        backEdgeOwner, heal, e.getMessage());
+                break;   // leave owner cleared; terminal hard-fail handles the retry handoff
             }
+
+            checkpointHealedFeature(spec, workspace, branch, backEdgeOwner);
+            cycle = FeatureDependencyGraph.findCycle(features);
+        }
+
+        if (cycle.isEmpty()) {
+            log.info("[ProjectPlanningNode] Feature dependency graph is acyclic — enforcement passed");
+            return;
+        }
+
+        // Did not converge within the heal budget: clear the current back-edge owner and fail hard
+        // so a container retry re-enriches just it, resuming from the last checkpoint written above.
+        String path = String.join(" → ", cycle);
+        String backEdgeOwner = lastEnrichedInCycle(cycle, enrichmentOrder);
+
+        log.error("[ProjectPlanningNode] Feature dependency cycle unresolved after {} self-heal attempt(s): "
+                + "{} — back edge owned by '{}'", MAX_CYCLE_HEAL_ATTEMPTS, path, backEdgeOwner);
+
+        FeatureSpec owner = findFeature(features, backEdgeOwner);
+        if (owner != null) {
+            owner.setFeatureInstruction(null);
+            owner.setDependsOnFeatures(null);
         }
         try {
             ArchitectureJsonUtil.write(workspace, spec);
@@ -933,8 +1339,45 @@ public class ProjectPlanningNode implements WorkerNode {
         throw new WorkerException(FailureType.CODE,
                 "Feature dependency cycle: " + path + ". '" + backEdgeOwner + "' wires back into a"
                 + " feature that already depends on it, which is a Spring bean cycle that crashes the"
-                + " app at boot. Cleared its enrichment for retry — it must return its result to the"
-                + " shared controller (or publish an event) instead of calling back.");
+                + " app at boot. Self-heal re-enriched it " + MAX_CYCLE_HEAL_ATTEMPTS + "x with the"
+                + " cycle named in its prompt and it still wired back; cleared its enrichment for retry"
+                + " — it must return its result to the shared controller (or publish an event) instead"
+                + " of calling back.");
+    }
+
+    /**
+     * The cycle member enriched LAST owns the back edge — the earlier ones could not have seen it to
+     * depend on it. {@code distinct()} because a cycle path repeats its start node at the end.
+     */
+    private static String lastEnrichedInCycle(List<String> cycle, Map<String, Integer> enrichmentOrder) {
+        return cycle.stream()
+                .distinct()
+                .max(Comparator.comparingInt(name -> enrichmentOrder.getOrDefault(name, -1)))
+                .orElse(null);
+    }
+
+    private static FeatureSpec findFeature(List<FeatureSpec> features, String featureName) {
+        if (featureName == null) return null;
+        return features.stream()
+                .filter(f -> featureName.equals(f.getFeatureName()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    /** Persist + push after a self-heal re-enrich, mirroring the per-feature enrichment checkpoint. */
+    private void checkpointHealedFeature(ArchitectureSpec spec, Path workspace,
+                                         String branch, String featureName) {
+        try {
+            ArchitectureJsonUtil.write(workspace, spec);
+            log.info("[ProjectPlanningNode] Checkpoint written after self-heal re-enrich: {}", featureName);
+        } catch (IOException e) {
+            throw new WorkerException(FailureType.INFRA,
+                    "Checkpoint write failed after self-heal re-enrich of " + featureName
+                    + ": " + e.getMessage(), e);
+        }
+        if (branch != null && !branch.isBlank()) {
+            gitService.commitEnrichmentCheckpoint(workspace, featureName, branch);
+        }
     }
 
     /** BACKEND and SHARED enrich before FRONTEND so frontend sees real backend API summaries. */
@@ -993,7 +1436,7 @@ public class ProjectPlanningNode implements WorkerNode {
                 .toList();
     }
 
-    private ArchitectureSpec validateCrossReferences(ArchitectureSpec spec) {
+    private ArchitectureSpec validateCrossReferences(ArchitectureSpec spec, Path workspace, BriefContext briefCtx) {
         Set<String> knownPaths = spec.getFiles().stream()
                 .map(FileSpec::getFilePath)
                 .filter(Objects::nonNull)
@@ -1001,26 +1444,198 @@ public class ProjectPlanningNode implements WorkerNode {
 
         List<FileSpec> toAdd = new ArrayList<>();
 
-        for (FileSpec file : spec.getFiles()) {
-            if (file.getImportsFrom() == null) continue;
-            for (String importPath : file.getImportsFrom()) {
-                if (importPath == null || knownPaths.contains(importPath)) continue;
-                if (toAdd.stream().anyMatch(f -> importPath.equals(f.getFilePath()))) continue;
+        // Enforcement Point A: detect referenced-but-unplanned modules on each side (on-disk aware so a
+        // foundation file is never stubbed), then an LLM speccing pass (step 4) upgrades each miss into a
+        // proper FileSpec so the generator builds a real file. Anything the LLM can't spec falls back to a
+        // bare stub so the reference still resolves. See docs/architecture-json-completeness-plan.md.
+        //   Frontend: prose- + on-disk-aware (catches wrappers like AdminLayout named only in prose).
+        //   Backend:  imports_from path diff, on-disk aware (well-populated paths; no prose scan). Does
+        //             NOT catch classes invented only at generation time — that is a gen-time concern.
+        List<ManifestCompletenessChecker.MissingRef> missingFe =
+                pending(ManifestCompletenessChecker.findMissingFrontend(spec, workspace), knownPaths, toAdd);
+        if (!missingFe.isEmpty()) {
+            applyMissing(missingFe, specifyMissing(spec, workspace, missingFe, briefCtx,
+                    "frontend/src/shell/SiteLayout.tsx"), toAdd, knownPaths, "frontend", spec);
+        }
 
-                log.warn("[ProjectPlanningNode] Missing manifest entry: {} (imported by {})",
-                        importPath, file.getFilePath());
-                toAdd.add(buildStubEntry(importPath));
-                knownPaths.add(importPath);
-            }
+        List<ManifestCompletenessChecker.MissingRef> missingBe =
+                pending(ManifestCompletenessChecker.findMissingBackend(spec, workspace), knownPaths, toAdd);
+        if (!missingBe.isEmpty()) {
+            applyMissing(missingBe, specifyMissing(spec, workspace, missingBe, briefCtx, null),
+                    toAdd, knownPaths, "backend", spec);
         }
 
         if (!toAdd.isEmpty()) {
             List<FileSpec> all = new ArrayList<>(spec.getFiles());
             all.addAll(toAdd);
             spec.setFiles(all);
-            log.info("[ProjectPlanningNode] Added {} missing stub entries to manifest", toAdd.size());
+            log.info("[ProjectPlanningNode] Added {} missing manifest entries (specced or stubbed)", toAdd.size());
+        }
+
+        // Symbol-level hook check: a useXxx named in enrichment prose that no service backs, no file
+        // declares, and the foundation does not ship — the abs-fitness useCreateGymClass defect. A
+        // service-backed hook is NOT flagged (the mechanical generator will emit it). Warn only: the
+        // remedy is capability-only enrichment prose, not a stub file (a hook wrapping nothing is worse
+        // than the dangling reference). See docs/frontend-hook-generation-and-prompt-segregation.md §5b.
+        List<ManifestCompletenessChecker.DanglingHook> danglingHooks =
+                ManifestCompletenessChecker.findDanglingHooks(spec, workspace);
+        for (ManifestCompletenessChecker.DanglingHook dh : danglingHooks) {
+            log.warn("[ProjectPlanningNode] Dangling hook '{}' named in enrichment prose but no service backs it, "
+                    + "no file declares it, and the foundation does not ship it — referenced by {}. Enrichment must "
+                    + "name the capability, not a hook symbol (feature_enrichment.txt).", dh.hookName(), dh.referencedBy());
         }
         return spec;
+    }
+
+    /** Drops misses already known or queued, preserving detection order. */
+    private static List<ManifestCompletenessChecker.MissingRef> pending(
+            List<ManifestCompletenessChecker.MissingRef> found, Set<String> knownPaths, List<FileSpec> toAdd) {
+        return found.stream()
+                .filter(mr -> !knownPaths.contains(mr.importPath()))
+                .filter(mr -> toAdd.stream().noneMatch(f -> mr.importPath().equals(f.getFilePath())))
+                .collect(Collectors.toList());
+    }
+
+    /** Adds a proper spec per miss when the LLM produced one, else a bare stub; records the path. */
+    private void applyMissing(List<ManifestCompletenessChecker.MissingRef> missing,
+            Map<String, FileSpec> specced, List<FileSpec> toAdd, Set<String> knownPaths, String side,
+            ArchitectureSpec spec) {
+        Map<String, FileSpec> byPath = new HashMap<>();
+        Map<String, FeatureSpec> featuresByName = new HashMap<>();
+        if (spec.getFiles() != null) {
+            for (FileSpec f : spec.getFiles()) if (f.getFilePath() != null) byPath.put(f.getFilePath(), f);
+        }
+        if (spec.getFeatures() != null) {
+            for (FeatureSpec f : spec.getFeatures()) if (f.getFeatureName() != null) featuresByName.put(f.getFeatureName(), f);
+        }
+        for (ManifestCompletenessChecker.MissingRef mr : missing) {
+            FileSpec entry = specced.get(mr.importPath());
+            if (entry != null) {
+                log.info("[ProjectPlanningNode] Specced missing {} file: {} (referenced by {})",
+                        side, mr.importPath(), mr.referencedBy());
+            } else {
+                log.warn("[ProjectPlanningNode] Missing {} file stubbed (LLM did not spec it): {} (referenced by {})",
+                        side, mr.importPath(), mr.referencedBy());
+                entry = buildStubEntry(mr.importPath());
+            }
+            // G2: attach the added file to its referencing feature so the reconciler — which iterates
+            // feature.filePaths — gives it a ground-truth contract and the enrichment card includes it.
+            attachToFeature(entry, mr, byPath, featuresByName);
+            toAdd.add(entry);
+            knownPaths.add(mr.importPath());
+        }
+    }
+
+    /**
+     * Assigns a backfilled file to an owning feature and registers its path in that feature's
+     * {@code filePaths}, so ContractReconciler (which only iterates {@code feature.getFilePaths()})
+     * reconciles it and EnrichmentCardUtil emits a card for it. Owner precedence: an explicit
+     * {@code feature:<name>} referrer, else the {@code featureName} of the first referencing FileSpec
+     * that carries one. No-op when neither resolves — the file is still added to the spec, just
+     * outside any feature (the pre-G2 behavior). Does not overwrite a featureName the speccing LLM
+     * already set.
+     */
+    private void attachToFeature(FileSpec entry, ManifestCompletenessChecker.MissingRef mr,
+            Map<String, FileSpec> byPath, Map<String, FeatureSpec> featuresByName) {
+        String owner = null;
+        for (String ref : mr.referencedBy()) {
+            if (ref.startsWith("feature:")) { owner = ref.substring("feature:".length()); break; }
+        }
+        if (owner == null) {
+            for (String ref : mr.referencedBy()) {
+                FileSpec rf = byPath.get(ref);
+                if (rf != null && rf.getFeatureName() != null) { owner = rf.getFeatureName(); break; }
+            }
+        }
+        if (owner == null) return;
+
+        if (entry.getFeatureName() == null || entry.getFeatureName().isBlank()) {
+            entry.setFeatureName(owner);
+        }
+        FeatureSpec feature = featuresByName.get(owner);
+        if (feature == null) return;
+
+        List<String> paths = feature.getFilePaths();
+        if (paths == null) {
+            paths = new ArrayList<>();
+            feature.setFilePaths(paths);
+        }
+        if (!paths.contains(entry.getFilePath())) {
+            try {
+                paths.add(entry.getFilePath());
+            } catch (UnsupportedOperationException immutable) {   // Jackson can hand back a fixed list
+                List<String> mutable = new ArrayList<>(paths);
+                mutable.add(entry.getFilePath());
+                feature.setFilePaths(mutable);
+            }
+        }
+        log.info("[ProjectPlanningNode] Attached backfilled file {} to feature '{}' "
+                + "(reconciler + enrichment card will now include it)", entry.getFilePath(), owner);
+    }
+
+    /**
+     * Step 4: asks the (Flash) LLM to turn detected-missing modules (frontend OR backend) into proper
+     * FileSpecs. Assembles the referencing context — who referenced each, the referencing files'
+     * descriptions (the consumer's intent), and the instructions of any feature that named a miss —
+     * plus an optional on-disk exemplar (e.g. SiteLayout) to mirror. Returns specced files keyed by
+     * path; failures yield an empty map so the caller stubs. Never throws.
+     */
+    private Map<String, FileSpec> specifyMissing(ArchitectureSpec spec, Path workspace,
+            List<ManifestCompletenessChecker.MissingRef> missing, BriefContext briefCtx, String exemplarRel) {
+        Map<String, FileSpec> byFilePath = new HashMap<>();
+        if (spec.getFiles() != null) {
+            for (FileSpec f : spec.getFiles()) if (f.getFilePath() != null) byFilePath.put(f.getFilePath(), f);
+        }
+
+        StringBuilder ctx = new StringBuilder();
+        for (ManifestCompletenessChecker.MissingRef mr : missing) {
+            ctx.append(mr.importPath()).append("  <- referenced by: ")
+               .append(String.join(", ", mr.referencedBy())).append('\n');
+            for (String ref : mr.referencedBy()) {                 // the consumer's intent
+                FileSpec rf = byFilePath.get(ref);
+                if (rf != null && rf.getDescription() != null && !rf.getDescription().isBlank()) {
+                    ctx.append("    [").append(rf.getFileName()).append("] ").append(rf.getDescription()).append('\n');
+                }
+            }
+        }
+        // Instructions of the features that referenced a miss — where shared wrappers like <AdminLayout>
+        // and their intent (nav, auth enforcement) are described.
+        Set<String> refFeatures = missing.stream()
+                .flatMap(mr -> mr.referencedBy().stream())
+                .filter(s -> s.startsWith("feature:"))
+                .map(s -> s.substring("feature:".length()))
+                .collect(Collectors.toSet());
+        if (spec.getFeatures() != null) {
+            for (FeatureSpec f : spec.getFeatures()) {
+                if (refFeatures.contains(f.getFeatureName())
+                        && f.getFeatureInstruction() != null && !f.getFeatureInstruction().isBlank()) {
+                    ctx.append("\n[feature ").append(f.getFeatureName()).append("]\n")
+                       .append(f.getFeatureInstruction()).append('\n');
+                }
+            }
+        }
+        String exemplar = exemplarRel == null ? "" : readExemplar(workspace, exemplarRel);
+        List<String> paths = missing.stream()
+                .map(ManifestCompletenessChecker.MissingRef::importPath).collect(Collectors.toList());
+
+        Map<String, FileSpec> byPath = new HashMap<>();
+        try {
+            for (FileSpec fs : enrichLlm.specifyMissingFiles(paths, ctx.toString(), exemplar, briefCtx)) {
+                if (fs.getFilePath() != null) byPath.put(fs.getFilePath(), fs);
+            }
+        } catch (Exception e) {
+            log.warn("[ProjectPlanningNode] specifyMissingFiles threw — falling back to stubs: {}", e.getMessage());
+        }
+        return byPath;
+    }
+
+    private String readExemplar(Path workspace, String rel) {
+        try {
+            Path p = workspace.resolve(rel);
+            return Files.exists(p) ? Files.readString(p) : "";
+        } catch (IOException e) {
+            return "";
+        }
     }
 
     private FileSpec buildStubEntry(String filePath) {

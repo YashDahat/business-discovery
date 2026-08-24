@@ -68,7 +68,11 @@ public class AuthScaffoldModule implements ScaffoldModule {
                 Pattern.compile("^SecurityConfig(uration)?\\.java$"),
                 Pattern.compile("^Jwt.*\\.java$"),
                 Pattern.compile("^PasswordEncoder.*\\.java$"),
-                Pattern.compile("^AdminInitializer\\.java$")
+                Pattern.compile("^AdminInitializer\\.java$"),
+                // Foundation provides SpaController — closed for modification, open for extension.
+                // LLM must never plan or regenerate it; if it slips through the prompt guard,
+                // stripScaffoldOwnedFiles removes it from the manifest here.
+                Pattern.compile("^SpaController\\.java$")
         );
     }
 

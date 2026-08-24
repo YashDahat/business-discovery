@@ -7,8 +7,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
@@ -40,7 +42,16 @@ public final class UiImportRewriter {
 
     /** Returns true if any file was modified. */
     public static boolean fix(Path frontendSrc, UiComponentInventory inventory) {
-        if (!Files.exists(frontendSrc) || inventory.isEmpty()) return false;
+        return fix(frontendSrc, inventory, NodeModuleExportRegistry.empty());
+    }
+
+    /**
+     * As {@link #fix(Path, UiComponentInventory)}, additionally adding a missing import (rule 3) for a
+     * capitalized JSX tag that resolves either in the local shadcn inventory or in {@code registry}
+     * (a node_modules export → its package).
+     */
+    public static boolean fix(Path frontendSrc, UiComponentInventory inventory, NodeModuleExportRegistry registry) {
+        if (!Files.exists(frontendSrc) || (inventory.isEmpty() && registry.isEmpty())) return false;
         boolean[] changed = {false};
         try (Stream<Path> files = Files.walk(frontendSrc)) {
             files.filter(Files::isRegularFile)
@@ -50,7 +61,7 @@ public final class UiImportRewriter {
                  .forEach(file -> {
                      try {
                          String original = Files.readString(file);
-                         String rewritten = rewrite(original, inventory, file.getFileName().toString());
+                         String rewritten = rewrite(original, inventory, registry, file.getFileName().toString());
                          if (!rewritten.equals(original)) {
                              Files.writeString(file, rewritten);
                              changed[0] = true;
@@ -65,9 +76,11 @@ public final class UiImportRewriter {
         return changed[0];
     }
 
-    static String rewrite(String content, UiComponentInventory inventory, String fileLabel) {
+    static String rewrite(String content, UiComponentInventory inventory,
+                          NodeModuleExportRegistry registry, String fileLabel) {
         content = fixUiPathCasing(content, inventory, fileLabel);
         content = relocatePhantomRadixImports(content, inventory, fileLabel);
+        content = addMissingComponentImports(content, inventory, registry, fileLabel);
         return content;
     }
 
@@ -169,5 +182,82 @@ public final class UiImportRewriter {
                     + content.substring(m.end());
         }
         return "import { " + String.join(", ", names) + " } from '@/components/ui/" + stem + "';\n" + content;
+    }
+
+    // ── Rule 3: add a missing import for a used-but-unimported capitalized JSX tag ──────────────
+    private static final Pattern JSX_TAG = Pattern.compile("<([A-Z][A-Za-z0-9]*)\\b");
+
+    /**
+     * A capitalized JSX tag ({@code <Card}, {@code <ShoppingCart}) that is used but neither imported nor
+     * declared in the file needs an import. Resolve it against the local shadcn inventory FIRST (→
+     * {@code @/components/ui/<file>}, so a local component always wins over a same-named lucide icon),
+     * then the node_modules {@code registry} (→ its package). Names from the same package merge into one
+     * import line. Only provably-resolvable, unambiguous names are added; everything else is left for tsc.
+     */
+    private static String addMissingComponentImports(String content, UiComponentInventory inventory,
+                                                     NodeModuleExportRegistry registry, String fileLabel) {
+        Set<String> tags = new LinkedHashSet<>();
+        Matcher t = JSX_TAG.matcher(content);
+        while (t.find()) tags.add(t.group(1));
+        if (tags.isEmpty()) return content;
+
+        Map<String, List<String>> shadcnAdds = new LinkedHashMap<>(); // ui stem → names
+        Map<String, List<String>> pkgAdds = new LinkedHashMap<>();    // package → names
+        for (String name : tags) {
+            if (isImportedInFile(content, name) || isLocallyDeclared(content, name)) continue;
+            String uiStem = findUiFileExporting(name, inventory);
+            if (uiStem != null) {
+                shadcnAdds.computeIfAbsent(uiStem, k -> new ArrayList<>()).add(name);
+            } else {
+                registry.packageFor(name).ifPresent(pkg ->
+                        pkgAdds.computeIfAbsent(pkg, k -> new ArrayList<>()).add(name));
+            }
+        }
+        if (shadcnAdds.isEmpty() && pkgAdds.isEmpty()) return content;
+
+        String result = content;
+        for (Map.Entry<String, List<String>> e : shadcnAdds.entrySet()) {
+            log.info("[UiImportRewriter] {}: add {} from @/components/ui/{}", fileLabel, e.getValue(), e.getKey());
+            result = mergeUiImport(result, e.getKey(), e.getValue());
+        }
+        for (Map.Entry<String, List<String>> e : pkgAdds.entrySet()) {
+            log.info("[UiImportRewriter] {}: add {} from {}", fileLabel, e.getValue(), e.getKey());
+            result = mergePackageImport(result, e.getKey(), e.getValue());
+        }
+        return result;
+    }
+
+    /** True if {@code name} is bound by any import statement (checks the clause before {@code from}). */
+    private static boolean isImportedInFile(String content, String name) {
+        Matcher im = Pattern.compile("import\\b([^;]*?)\\bfrom\\b", Pattern.DOTALL).matcher(content);
+        Pattern word = Pattern.compile("\\b" + Pattern.quote(name) + "\\b");
+        while (im.find()) {
+            if (word.matcher(im.group(1)).find()) return true;
+        }
+        return false;
+    }
+
+    /** True if {@code name} is declared locally (const/let/var/function/class/interface/type/enum). */
+    private static boolean isLocallyDeclared(String content, String name) {
+        return Pattern.compile(
+                "\\b(?:const|let|var|function|class|interface|type|enum)\\s+" + Pattern.quote(name) + "\\b")
+                .matcher(content).find();
+    }
+
+    /** Adds names to an existing {@code from '<pkg>'} import, or prepends a new import line. */
+    private static String mergePackageImport(String content, String pkg, List<String> names) {
+        Matcher m = Pattern.compile(
+                "import\\s*\\{([^}]*)}\\s*from\\s*['\"]" + Pattern.quote(pkg) + "['\"];?").matcher(content);
+        if (m.find()) {
+            List<String> merged = new ArrayList<>();
+            for (String part : m.group(1).split(",")) {
+                if (!part.trim().isEmpty()) merged.add(part.trim());
+            }
+            for (String name : names) if (!merged.contains(name)) merged.add(name);
+            return content.substring(0, m.start())
+                    + "import { " + String.join(", ", merged) + " } from '" + pkg + "';"
+                    + content.substring(m.end());
+        }
+        return "import { " + String.join(", ", names) + " } from '" + pkg + "';\n" + content;
     }
 }
