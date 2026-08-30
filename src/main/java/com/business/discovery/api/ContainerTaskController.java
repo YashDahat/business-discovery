@@ -39,6 +39,7 @@ public class ContainerTaskController {
     private final ContainerPoolManager poolManager;
     private final ContainerMonitorService containerMonitorService;
     private final DockerClient dockerClient;
+    private final com.business.discovery.services.sandbox.SandboxManager sandboxManager;
 
     // ─────────────────────────────────────────────────────
     // POOL ENDPOINTS
@@ -447,9 +448,12 @@ public class ContainerTaskController {
 
         poolManager.releaseAllSlots();
 
+        int sandboxes = sandboxManager.destroyAllLive();
+
         return ResponseEntity.ok(Map.of(
                 "stopped", running.size(),
-                "message", running.size() + " containers stopped and removed",
+                "sandboxesStopped", sandboxes,
+                "message", running.size() + " containers + " + sandboxes + " sandboxes stopped and removed",
                 "poolStatus", Map.of(
                         "active", poolManager.activeSlots(),
                         "available", poolManager.availableSlots()

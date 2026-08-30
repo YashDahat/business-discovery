@@ -118,6 +118,11 @@ public class ArchitectBrief {
     @Column(name = "chat_session_id")
     private Long chatSessionId;
 
+    // GitHub repo Cline manages for this project. Durable home for a Cline-created repo when the brief
+    // has no ContainerTask yet; otherwise the latest task's repo url is the fallback (see RepoScopeResolver).
+    @Column(name = "github_repo_url")
+    private String githubRepoUrl;
+
     @CreationTimestamp
     @Column(name = "created_at", updatable = false)
     private LocalDateTime createdAt;

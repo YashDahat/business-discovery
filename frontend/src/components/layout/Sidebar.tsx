@@ -1,5 +1,6 @@
+import { useEffect, useState } from 'react'
 import { NavLink } from 'react-router-dom'
-import { Activity, Cpu, Play, TrendingUp, Building2, BarChart2, Shield, MapPin } from 'lucide-react'
+import { Activity, Cpu, Play, TrendingUp, Building2, BarChart2, Shield, MapPin, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useContainerPool } from '@/hooks/useContainerPool'
 import { useAuth } from '@/context/AuthContext'
@@ -17,9 +18,16 @@ const NAV_ITEMS = [
   { to: '/scraper',    icon: MapPin,    label: 'Scraper'         },
 ]
 
+const COLLAPSE_KEY = 'ops-sidebar-collapsed'
+
 export function Sidebar() {
   const { data: pool } = useContainerPool()
   const { user } = useAuth()
+  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSE_KEY) === '1')
+
+  useEffect(() => {
+    localStorage.setItem(COLLAPSE_KEY, collapsed ? '1' : '0')
+  }, [collapsed])
 
   // Show only the sections the current role may reach; a client's business item points
   // straight at their own business detail (no list) and is relabelled "My Business".
@@ -38,10 +46,31 @@ export function Sidebar() {
     : NAV_ITEMS
 
   return (
-    <aside className="w-[360px] shrink-0 h-full border-r border-[#1e1e1e] bg-[#0a0a0a] flex flex-col">
-      <div className="px-4 py-5 border-b border-[#1e1e1e]">
-        <span className="text-sm font-semibold text-white tracking-tight">Discovery</span>
-        <span className="ml-1 text-sm font-semibold text-[#00ff88]">Ops</span>
+    <aside
+      className={cn(
+        'shrink-0 h-full border-r border-[#1e1e1e] bg-[#0a0a0a] flex flex-col transition-[width] duration-200',
+        collapsed ? 'w-[64px]' : 'w-[360px]'
+      )}
+    >
+      <div className={cn(
+        'flex items-center border-b border-[#1e1e1e] py-5',
+        collapsed ? 'justify-center px-0' : 'justify-between px-4'
+      )}>
+        {!collapsed && (
+          <span>
+            <span className="text-sm font-semibold text-white tracking-tight">Discovery</span>
+            <span className="ml-1 text-sm font-semibold text-[#00ff88]">Ops</span>
+          </span>
+        )}
+        <button
+          onClick={() => setCollapsed(c => !c)}
+          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+          className="text-[#555] hover:text-white transition-colors"
+        >
+          {collapsed
+            ? <PanelLeftOpen className="h-4 w-4" />
+            : <PanelLeftClose className="h-4 w-4" />}
+        </button>
       </div>
 
       <nav className="flex-1 overflow-y-auto py-2">
@@ -50,17 +79,19 @@ export function Sidebar() {
             key={to}
             to={to}
             end={to === '/'}
+            title={collapsed ? label : undefined}
             className={({ isActive }) =>
               cn(
-                'flex items-center gap-3 px-4 py-2.5 text-sm transition-colors',
+                'flex items-center py-2.5 text-sm transition-colors',
+                collapsed ? 'justify-center px-0' : 'gap-3 px-4',
                 isActive
-                  ? 'text-white border-l-2 border-[#00ff88] bg-[#111] pl-[14px]'
+                  ? cn('text-white border-l-2 border-[#00ff88] bg-[#111]', !collapsed && 'pl-[14px]')
                   : 'text-[#666] hover:text-[#ccc] border-l-2 border-transparent hover:bg-[#0f0f0f]'
               )
             }
           >
             <Icon className="h-4 w-4 shrink-0" />
-            {label}
+            {!collapsed && label}
           </NavLink>
         ))}
       </nav>
@@ -68,8 +99,11 @@ export function Sidebar() {
       <div className="flex flex-col gap-3 border-t border-[#1e1e1e] p-3">
         {/* System status — green when the backend is reachable; container count in tooltip */}
         <div
-          className="flex items-center gap-2 rounded-lg border border-[#1e1e1e] bg-[#0d0d0d] px-3 py-2"
-          title={pool ? `${pool.activeSlots}/${pool.poolSize} containers active` : undefined}
+          className={cn(
+            'flex items-center rounded-lg border border-[#1e1e1e] bg-[#0d0d0d] py-2',
+            collapsed ? 'justify-center px-0' : 'gap-2 px-3'
+          )}
+          title={pool ? `${pool.activeSlots}/${pool.poolSize} containers active` : 'connecting…'}
         >
           <span
             className={cn(
@@ -77,12 +111,14 @@ export function Sidebar() {
               pool ? 'bg-[#00ff88] animate-pulse' : 'bg-[#666]'
             )}
           />
-          <span className="font-mono text-xs text-[#888]">
-            {pool ? 'all systems online' : 'connecting…'}
-          </span>
+          {!collapsed && (
+            <span className="font-mono text-xs text-[#888]">
+              {pool ? 'all systems online' : 'connecting…'}
+            </span>
+          )}
         </div>
 
-        <UserBadge />
+        <UserBadge compact={collapsed} />
       </div>
     </aside>
   )

@@ -12,11 +12,7 @@ import { useAuth } from '@/context/AuthContext'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { ErrorState } from '@/components/shared/ErrorState'
 import { DemoButton } from '@/components/shared/DemoButton'
-import {
-  RequestChangesPanel,
-  REQUEST_CHANGES_PANEL_WIDTH,
-  REQUEST_CHANGES_PANEL_COLLAPSED_WIDTH,
-} from '@/components/shared/RequestChangesPanel'
+import { ProjectChatPanel } from '@/components/shared/ProjectChatPanel'
 import { Section } from '@/components/shared/Section'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
@@ -656,7 +652,7 @@ export default function BusinessDetailPage() {
   const [activeTab, setActiveTab] = useState<typeof TABS[number]['id']>('overview')
   const [pollForBrief, setPollForBrief] = useState(false)
   const [logsOpen, setLogsOpen] = useState(false)
-  const [chatPanelOpen, setChatPanelOpen] = useState(false)
+  const [projectChatOpen, setProjectChatOpen] = useState(false)
 
   const { data, isLoading, isError } = useBusinessDetail(businessId ?? '', pollForBrief)
 
@@ -682,15 +678,13 @@ export default function BusinessDetailPage() {
   const canRespawn = !!brief && (latestTask?.status === 'FAILED' || latestTask?.status === 'COMPLETED')
   // Pipeline actions (generate/run/stop/retry/respawn/request-changes/redeploy) are operator-only.
   const isOperator = user?.role === 'OPERATOR'
-  const showChatPanel = isOperator && !!(brief && latestTask)
-  const chatGutter = !showChatPanel ? 0
-    : chatPanelOpen ? REQUEST_CHANGES_PANEL_WIDTH
-    : REQUEST_CHANGES_PANEL_COLLAPSED_WIDTH
+  // Cline Q&A panel — needs a brief but not a task (you can ask about a brief before generation).
+  // Overlaps the page content (floats on top) rather than reserving a gutter.
+  const showProjectChat = isOperator && !!brief
 
   return (
     <div
-      className="flex flex-col gap-4 max-w-5xl transition-[margin-right] duration-200"
-      style={chatGutter ? { marginRight: chatGutter } : undefined}
+      className="flex flex-col gap-4 max-w-5xl"
     >
       {/* Back */}
       <button
@@ -756,15 +750,6 @@ export default function BusinessDetailPage() {
           <span className="text-[10px] font-mono uppercase tracking-widest text-[#444]">
             // PIPELINE ACTIONS
           </span>
-
-          {showChatPanel && (
-            <button
-              onClick={() => setChatPanelOpen(v => !v)}
-              className="px-5 py-2 rounded-full bg-[#00ff88] text-black text-sm font-semibold hover:bg-[#00e67a] transition-colors"
-            >
-              Request Changes
-            </button>
-          )}
 
           {latestTask?.githubPrUrl && (
             <a href={latestTask.githubPrUrl} target="_blank" rel="noopener noreferrer"
@@ -989,14 +974,12 @@ export default function BusinessDetailPage() {
         </div>
       )}
 
-      {/* Request Changes panel */}
-      {showChatPanel && (
-        <RequestChangesPanel
+      {/* Ask Cline (project Q&A) panel — right edge */}
+      {showProjectChat && (
+        <ProjectChatPanel
           briefId={brief!.id}
-          businessId={b.id}
-          isTaskActive={ACTIVE_STATUSES.has(latestTask?.status ?? '')}
-          isOpen={chatPanelOpen}
-          onToggle={() => setChatPanelOpen(v => !v)}
+          isOpen={projectChatOpen}
+          onToggle={() => setProjectChatOpen(v => !v)}
         />
       )}
     </div>
