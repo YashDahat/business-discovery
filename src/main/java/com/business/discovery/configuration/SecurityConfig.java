@@ -1,6 +1,9 @@
 package com.business.discovery.configuration;
 
+import com.business.discovery.security.McpAuthFilter;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
+import org.springframework.core.annotation.Order;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -13,6 +16,7 @@ import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.web.SecurityFilterChain;
+import org.springframework.security.web.access.intercept.AuthorizationFilter;
 import org.springframework.security.web.context.HttpSessionSecurityContextRepository;
 import org.springframework.security.web.context.SecurityContextRepository;
 
@@ -65,7 +69,45 @@ public class SecurityConfig {
         return config.getAuthenticationManager();
     }
 
+    /**
+     * Spring Boot auto-registers any {@link jakarta.servlet.Filter} bean into the GLOBAL servlet chain.
+     * Without this, {@link McpAuthFilter} would run on every request (not just /internal/mcp/**) and 401
+     * everything lacking an MCP grant — including login. Disabling the auto-registration keeps the bean
+     * available for {@link #mcpSecurityFilterChain} only.
+     */
     @Bean
+    public FilterRegistrationBean<McpAuthFilter> mcpAuthFilterRegistration(McpAuthFilter filter) {
+        FilterRegistrationBean<McpAuthFilter> registration = new FilterRegistrationBean<>(filter);
+        registration.setEnabled(false);
+        return registration;
+    }
+
+    /**
+     * Dedicated stateless chain for the MCP tool endpoints the Cline sidecar calls. These carry no
+     * session cookie — auth is the two-layer internal-token + signed-grant check in {@link McpAuthFilter},
+     * which sets the acting user in the SecurityContext so the same role model applies. Ordered ahead of
+     * the main chain so /internal/mcp/** is matched here first.
+     */
+    @Bean
+    @Order(1)
+    public SecurityFilterChain mcpSecurityFilterChain(HttpSecurity http,
+                                                      McpAuthFilter mcpAuthFilter) throws Exception {
+        http
+                .securityMatcher("/internal/mcp/**")
+                .csrf(csrf -> csrf.disable())
+                .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .authorizeHttpRequests(auth -> auth.anyRequest().authenticated())
+                .addFilterBefore(mcpAuthFilter, AuthorizationFilter.class)
+                .httpBasic(basic -> basic.disable())
+                .formLogin(form -> form.disable())
+                .logout(logout -> logout.disable())
+                .exceptionHandling(ex -> ex
+                        .authenticationEntryPoint((req, res, e) -> res.sendError(HttpServletResponse.SC_UNAUTHORIZED)));
+        return http.build();
+    }
+
+    @Bean
+    @Order(2)
     public SecurityFilterChain securityFilterChain(HttpSecurity http,
                                                    SecurityContextRepository contextRepository) throws Exception {
         http

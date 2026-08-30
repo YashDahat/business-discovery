@@ -82,6 +82,21 @@
 			<scope>compile</scope>
 		</dependency>
 
+		<!-- Semantic chat memory: in-process embeddings (all-MiniLM, ONNX) + pgvector store -->
+		<dependency>
+			<groupId>dev.langchain4j</groupId>
+			<artifactId>langchain4j-embeddings-all-minilm-l6-v2</artifactId>
+			<version>1.13.0-beta23</version>
+			<scope>compile</scope>
+		</dependency>
+
+		<dependency>
+			<groupId>dev.langchain4j</groupId>
+			<artifactId>langchain4j-pgvector</artifactId>
+			<version>1.13.0-beta23</version>
+			<scope>compile</scope>
+		</dependency>
+
 		<dependency>
 			<groupId>org.springframework.boot</groupId>
 			<artifactId>spring-boot-starter-webmvc</artifactId>

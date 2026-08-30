@@ -1,6 +1,7 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    # Custom image: postgres:16-alpine + pgvector (same base → existing pgdata volume unchanged).
+    build: ./postgres
     container_name: phase1-db
     environment:
       POSTGRES_DB: business_discovery
@@ -31,6 +32,7 @@ services:
       BUILD: 1            # smoke test builds the generated project's image
       INFO: 1             # docker compose queries /info before operations
       AUTH: 1             # docker login/push to GHCR sends auth through the daemon
+      EXEC: 1             # Cline sandbox: master runs commands/file ops via `docker exec`
       POST: 1
       DELETE: 1
     volumes:
@@ -56,6 +58,37 @@ services:
         condition: service_started
     networks:
       - shared-network
+
+  # Cline SDK sidecar — project chat (Plan mode). Deliberately NOT given .env: it must never
+  # hold the Gemini key. Its Cline provider points back at the app's OpenAI-compatible proxy.
+  cline-sidecar:
+    build: ./cline-sidecar
+    container_name: cline-sidecar
+    environment:
+      PORT: "8091"
+      CLINE_GEMINI_BASE_URL: "http://app:${SERVER_PORT}"
+      SPRING_BASE_URL: "http://app:${SERVER_PORT}"
+      CLINE_INTERNAL_TOKEN: "${CLINE_INTERNAL_TOKEN}"
+      CLINE_MODEL: "${CLINE_PROXY_GEMINI_MODEL:-gemini-2.5-pro}"
+      CLINE_PROVIDER_ID: "${CLINE_PROVIDER_ID:-gemini}"
+    depends_on:
+      app:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:8091/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - shared-network
+
+  # Cline execution sandbox image — BUILD ONLY (profile), never started by `up`. The master spawns
+  # per-brief instances from this image via the Docker API. Build it with:
+  #   docker compose --profile build-only build sandbox
+  sandbox:
+    build: ./sandbox
+    image: ${SANDBOX_IMAGE:-discovery-sandbox:latest}
+    profiles: ["build-only"]
 
 volumes:
   pgdata:

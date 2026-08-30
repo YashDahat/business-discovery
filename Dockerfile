@@ -17,7 +17,8 @@ COPY --from=frontend-build /frontend/dist ./src/main/resources/static/
 RUN ./mvnw clean package -DskipTests
 
 # Stage 3: Runtime
-FROM eclipse-temurin:21-jre-alpine
+# Debian/glibc (not alpine/musl) — langchain4j all-MiniLM pulls onnxruntime native libs built for glibc.
+FROM eclipse-temurin:21-jre
 WORKDIR /app
 COPY --from=builder /app/target/*.jar app.jar
 EXPOSE 8080

@@ -23,13 +23,36 @@ export interface ChatMessageView {
   content: string
 }
 
-export const getBriefChat = (briefId: string) =>
-  apiClient.get<ChatMessageView[]>(`/api/v3/coder/brief/${briefId}/chat`).then(r => r.data)
+// Cline-backed, read-only project Q&A. Separate from the change-request thread above:
+// this never resets the worker task / regenerates the site. Shares the same brief
+// chat_memory session, so history renders with the same ChatMessageView shape.
+export interface ClineChatResult { sessionId: number; reply: string }
 
-export interface ChatSendResult { sessionId: number; reply: string; taskId: string }
+export const getClineChat = (briefId: string) =>
+  apiClient.get<ChatMessageView[]>(`/api/v4/cline/brief/${briefId}/chat`).then(r => r.data)
 
-export const sendBriefChatMessage = (briefId: string, message: string) =>
-  apiClient.post<ChatSendResult>(`/api/v3/coder/brief/${briefId}/chat`, { message }).then(r => r.data)
+export const sendClineChatMessage = (briefId: string, message: string, signal?: AbortSignal) =>
+  apiClient.post<ClineChatResult>(`/api/v4/cline/brief/${briefId}/chat`, { message }, { signal }).then(r => r.data)
+
+// Start a fresh chat session for the brief (clear chat / new session).
+export const startNewClineSession = (briefId: string) =>
+  apiClient.post<{ sessionId: number }>(`/api/v4/cline/brief/${briefId}/chat/new`).then(r => r.data)
+
+// Live stepper feed: the MCP tool operations (git/code/web/brief) Cline performs during a turn.
+// Polled while a message is in flight; turnSeq changes each turn so stale steps can be discarded.
+export type ClineStepStatus = 'running' | 'done' | 'error'
+export interface ClineStep {
+  id: string
+  tool: string
+  label: string
+  status: ClineStepStatus
+  detail?: string | null
+  ts: number
+}
+export interface ClineStepsView { turnSeq: number; steps: ClineStep[] }
+
+export const getClineSteps = (briefId: string) =>
+  apiClient.get<ClineStepsView>(`/api/v4/cline/brief/${briefId}/steps`).then(r => r.data)
 
 export type BriefGenerationStatus = 'GENERATING' | 'COMPLETED' | 'FAILED' | 'NOT_STARTED'
 export interface BriefStatusResponse { status: BriefGenerationStatus; businessId: string; error?: string }
