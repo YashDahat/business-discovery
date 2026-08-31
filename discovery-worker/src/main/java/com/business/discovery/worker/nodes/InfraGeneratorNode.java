@@ -11,6 +11,7 @@ import com.business.discovery.worker.service.llm.FileEntry;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.service.llm.generator.LlmGeneratorService;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.EnvVarScanner;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.core.annotation.Order;
@@ -98,6 +99,11 @@ public class InfraGeneratorNode implements WorkerNode {
             }
 
             writeCiWorkflowIfAbsent(workspace);
+
+            // Seed typed defaults (booleans/ints/URLs) from application.properties into any blank
+            // .env.example values, so the runtime smoke harness never poisons a typed @Value with a
+            // placeholder string (e.g. S3_PATH_STYLE= → demo-placeholder → "Invalid boolean value").
+            EnvVarScanner.backfillEnvExampleDefaults(workspace);
         } catch (WorkerException e) {
             throw e;
         } catch (IOException e) {

@@ -80,8 +80,9 @@ class FrontendHookGeneratorTest {
     @Test
     void singleArgMutationWrapsAndInvalidates() {
         String c = gen("frontend/src/services/bookingService.ts", BOOKING_SERVICE);
-        assertThat(c).contains("export function useCreateBooking(): { mutate: (vars: CreateBookingRequest) => void; "
-                + "mutateAsync: (vars: CreateBookingRequest) => Promise<BookingDto>;");
+        assertThat(c).contains("export function useCreateBooking(): "
+                + "{ mutate: (vars: CreateBookingRequest, options?: MutateOptions<BookingDto, Error, CreateBookingRequest>) => void; "
+                + "mutateAsync: (vars: CreateBookingRequest, options?: MutateOptions<BookingDto, Error, CreateBookingRequest>) => Promise<BookingDto>;");
         assertThat(c).contains("mutationFn: (request: CreateBookingRequest) => createBooking(request)");
         assertThat(c).contains("queryClient.invalidateQueries({ queryKey: ['booking'] })");
     }
@@ -90,7 +91,8 @@ class FrontendHookGeneratorTest {
     void twoArgMutationWrapsIntoOneObject() {
         String c = gen("frontend/src/services/classService.ts", CLASS_SERVICE);
         assertThat(c).contains("export function useUpdateGymClass(): "
-                + "{ mutate: (vars: { classId: number; request: GymClassDto }) => void;");
+                + "{ mutate: (vars: { classId: number; request: GymClassDto }, "
+                + "options?: MutateOptions<GymClassDto, Error, { classId: number; request: GymClassDto }>) => void;");
         assertThat(c).contains(
                 "mutationFn: ({ classId, request }: { classId: number; request: GymClassDto }) => updateGymClass(classId, request)");
     }
@@ -98,9 +100,22 @@ class FrontendHookGeneratorTest {
     @Test
     void voidDeleteMutation() {
         String c = gen("frontend/src/services/classService.ts", CLASS_SERVICE);
-        assertThat(c).contains("export function useDeleteGymClass(): { mutate: (vars: number) => void; "
-                + "mutateAsync: (vars: number) => Promise<void>;");
+        assertThat(c).contains("export function useDeleteGymClass(): "
+                + "{ mutate: (vars: number, options?: MutateOptions<void, Error, number>) => void; "
+                + "mutateAsync: (vars: number, options?: MutateOptions<void, Error, number>) => Promise<void>;");
         assertThat(c).contains("mutationFn: (classId: number) => deleteGymClass(classId)");
+    }
+
+    @Test
+    void mutateAcceptsOptionalOptionsArgSoTwoArgCallsCompile() {
+        // Regression for brief 9312afa6 #1: pages call mutate(vars, { onSuccess, onError }); the emitted
+        // mutate/mutateAsync must declare the optional MutateOptions second arg or every such call is TS2554.
+        String c = gen("frontend/src/services/bookingService.ts", BOOKING_SERVICE);
+        assertThat(c).contains("import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';");
+        assertThat(c).contains("import type { MutateOptions } from '@tanstack/react-query';");
+        assertThat(c).contains("options?: MutateOptions<BookingDto, Error, CreateBookingRequest>) => void;");
+        // the runtime body still forwards the real TanStack mutate/mutateAsync unchanged
+        assertThat(c).contains("return { mutate, mutateAsync, isPending, isError, error };");
     }
 
     @Test
@@ -115,6 +130,7 @@ class FrontendHookGeneratorTest {
         String c = gen("frontend/src/services/classService.ts", CLASS_SERVICE);
         // class file has both a query and mutations → all three react-query symbols
         assertThat(c).contains("import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';");
+        assertThat(c).contains("import type { MutateOptions } from '@tanstack/react-query';");
         assertThat(c).contains("import { getGymClass, createGymClass, updateGymClass, deleteGymClass } from '@/services/classService';");
         assertThat(c).contains("import type { GymClassDto } from '@/types/gym';");
     }
@@ -124,6 +140,7 @@ class FrontendHookGeneratorTest {
         String c = gen("frontend/src/services/bookingService.ts", BOOKING_SERVICE);
         // booking has a query and a mutation → useQuery + useMutation + useQueryClient
         assertThat(c).contains("import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';");
+        assertThat(c).contains("import type { MutateOptions } from '@tanstack/react-query';");
         assertThat(c).contains("import type { BookingDto, CreateBookingRequest } from '@/types/booking';");
     }
 

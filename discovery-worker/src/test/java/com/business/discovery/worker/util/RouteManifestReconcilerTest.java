@@ -164,7 +164,8 @@ class RouteManifestReconcilerTest {
         RouteManifestReconciler.reconcile(workspace);
 
         assertThat(Files.readString(workspace.resolve("frontend/src/AppRoutes.tsx")))
-                .contains("<ProtectedRoute><AdminOrdersPage /></ProtectedRoute>");
+                .contains("<Route element={<ProtectedRoute allowedRoles={['ADMIN']}><AdminLayout /></ProtectedRoute>}>")
+                .contains("<Route path=\"/admin/orders\" element={<AdminOrdersPage />} />");
     }
 
     @Test

@@ -98,6 +98,10 @@ public class FrontendValidationNode implements WorkerNode {
         //       (SiteConfig is nested { header, footer }) → siteConfig.footer.phone, for fields that
         //       live in exactly one section (see F4 in docs/frontend-error-patterns-abs-fitness.md).
         boolean siteConfigFixed = com.business.discovery.worker.util.SiteConfigAccessPatcher.fix(frontendSrc);
+        //   5f. AdminLayoutWrapperPatcher: admin pages self-wrap <AdminLayout>…</AdminLayout>, but
+        //       AdminLayout is an Outlet layout-route (no children) mounted once by AppRoutes — strip
+        //       the wrapper to <>…</> and drop the import (issue #2 in the frontend solution plan).
+        boolean adminLayoutFixed = com.business.discovery.worker.util.AdminLayoutWrapperPatcher.fix(frontendSrc);
         //   6. TypeScriptImportFixer: registry-driven correction of wrong @/ and relative import
         //      paths (resolved to where each symbol is actually exported) and default↔named
         //      mismatches (TS2613/TS2614). Runs per-file during generation; re-applying it here on
@@ -108,7 +112,8 @@ public class FrontendValidationNode implements WorkerNode {
                         frontendSrc, ctx.getWorkspaceDir()));
 
         if (exportsFixed || packagesFixed || jsxImportsFixed || uiImportsFixed || svcImportsFixed
-                || envFixed || tanstackFixed || frameworkNavFixed || siteConfigFixed || tsImportsFixed) {
+                || envFixed || tanstackFixed || frameworkNavFixed || siteConfigFixed || adminLayoutFixed
+                || tsImportsFixed) {
             BuildResult postFix = buildTool.runNpmBuild(frontendDir);
             if (postFix.success()) {
                 log.info("[FrontendValidationNode] npm build passed after mechanical fixes — skipping ErrorFixAgent");

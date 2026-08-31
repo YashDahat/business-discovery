@@ -65,6 +65,35 @@ class ComposeLaunchServiceTest {
     }
 
     @Test
+    void blankTypedVarGetsPropertiesDefaultNotPlaceholder() throws Exception {
+        // The boot-death class: S3_PATH_STYLE= filled with demo-placeholder crashes a boolean @Value.
+        // application.properties declares the developer's real default — use it instead.
+        writeProps("""
+                s3.path-style=${S3_PATH_STYLE:true}
+                s3.endpoint=${S3_ENDPOINT:http://minio:9000}
+                razorpay.key.secret=${RAZORPAY_KEY_SECRET:}
+                """);
+        Files.writeString(workspace.resolve(".env.example"), """
+                S3_PATH_STYLE=
+                S3_ENDPOINT=
+                RAZORPAY_KEY_SECRET=
+                """);
+
+        service.prepareEnvFile(workspace);
+
+        String env = Files.readString(workspace.resolve(".env"));
+        assertThat(env).contains("S3_PATH_STYLE=true");                 // typed boolean default, not demo-placeholder
+        assertThat(env).contains("S3_ENDPOINT=http://minio:9000");      // default may itself contain ':'
+        assertThat(env).contains("RAZORPAY_KEY_SECRET=demo-placeholder"); // empty default → still a real secret
+    }
+
+    private void writeProps(String body) throws Exception {
+        Path p = workspace.resolve("backend/src/main/resources/application.properties");
+        Files.createDirectories(p.getParent());
+        Files.writeString(p, body);
+    }
+
+    @Test
     void preservesCommentsAndBlankLines() throws Exception {
         Files.writeString(workspace.resolve(".env.example"), """
                 # Database

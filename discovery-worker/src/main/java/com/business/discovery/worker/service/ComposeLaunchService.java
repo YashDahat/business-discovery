@@ -5,6 +5,7 @@ import com.business.discovery.worker.service.llm.ArchitectureSpec;
 import com.business.discovery.worker.service.llm.FileSpec;
 import com.business.discovery.worker.util.ApiInventory;
 import com.business.discovery.worker.util.ArchitectureJsonUtil;
+import com.business.discovery.worker.util.EnvVarScanner;
 import com.business.discovery.worker.util.SeededCredentialFinder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -817,9 +818,15 @@ public class ComposeLaunchService {
 
     /**
      * Ensures a usable .env exists: derives it from .env.example when absent and
-     * fills blank values with demo placeholders. JWT_SECRET gets a real random key
-     * (JJWT rejects short keys at runtime — a placeholder string would fail the boot gate
-     * for the wrong reason).
+     * fills blank values. JWT_SECRET gets a real random key (JJWT rejects short keys at runtime —
+     * a placeholder string would fail the boot gate for the wrong reason).
+     *
+     * For any other blank value, prefer the typed default declared in application.properties
+     * ({@code ${KEY:default}}) over the generic {@code demo-placeholder} string. A blank
+     * {@code S3_PATH_STYLE} filled with {@code demo-placeholder} crashes boot because a boolean
+     * @Value cannot parse it; seeding the developer's own {@code true} default is both type-correct
+     * and intentional. Genuine secrets have an empty default in application.properties, so they fall
+     * through to {@code demo-placeholder} as before.
      */
     void prepareEnvFile(Path workspace) throws IOException {
         Path envFile = workspace.resolve(".env");
@@ -835,6 +842,9 @@ public class ComposeLaunchService {
             return;
         }
 
+        Path propsFile = workspace.resolve("backend/src/main/resources/application.properties");
+        Map<String, String> typedDefaults = EnvVarScanner.envDefaultsFromProperties(propsFile);
+
         List<String> out = new ArrayList<>();
         for (String line : lines) {
             String trimmed = line.trim();
@@ -849,7 +859,8 @@ public class ComposeLaunchService {
             if (key.equals("JWT_SECRET") && value.length() < 44) {
                 out.add(key + "=" + randomBase64Secret());
             } else if (value.isEmpty()) {
-                out.add(key + "=demo-placeholder");
+                String typedDefault = typedDefaults.get(key);
+                out.add(key + "=" + (typedDefault != null ? typedDefault : "demo-placeholder"));
             } else {
                 out.add(line);
             }

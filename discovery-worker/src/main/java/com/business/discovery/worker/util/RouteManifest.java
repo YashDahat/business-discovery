@@ -37,8 +37,26 @@ public final class RouteManifest {
      * — routes.ts must emit ZERO import statements or the eslint import-x/no-cycle gate
      * would flag routes.ts → pages → components → routes.ts. Only App.tsx imports pages.
      */
+    /**
+     * A page's access gate — the single thing the route table needs to decide how to wrap it.
+     * {@code PUBLIC} reachable by anyone; {@code AUTH} login-required (still inside site chrome);
+     * {@code ADMIN} login-required AND role ADMIN (rendered inside the admin layout). Replaces the
+     * old {@code admin: boolean}, which could not express "login required, not admin" — the gap that
+     * left {@code /checkout} and {@code /account} ungated.
+     */
+    public enum RouteGate { PUBLIC, AUTH, ADMIN }
+
+    /** Page keys that require login but are not admin (rendered inside SiteLayout under an auth guard). */
+    private static final Set<String> AUTH_KEYS = Set.of("CHECKOUT", "ACCOUNT");
+
+    /** Page keys reachable via dedicated UI (header cart button, etc.) — kept out of the primary nav. */
+    private static final Set<String> NON_NAV_KEYS = Set.of("CHECKOUT", "CART");
+
     public record Entry(String key, String path, String page, String importPath,
-                        String label, boolean admin, boolean nav) {}
+                        String label, RouteGate gate, boolean nav) {
+        /** Convenience for the many admin/non-admin call sites. */
+        public boolean admin() { return gate == RouteGate.ADMIN; }
+    }
 
     private final List<Entry> entries;
 
@@ -170,7 +188,13 @@ public final class RouteManifest {
             nav = !detail;
         }
         if (detail) path = path + "/:id";
-        return new Entry(key, path, component, importPath, label, admin, nav);
+
+        RouteGate gate = admin ? RouteGate.ADMIN
+                : AUTH_KEYS.contains(key) ? RouteGate.AUTH
+                : RouteGate.PUBLIC;
+        if (NON_NAV_KEYS.contains(key)) nav = false;   // checkout/cart reached via dedicated UI, not primary nav
+
+        return new Entry(key, path, component, importPath, label, gate, nav);
     }
 
     private static List<String> tokens(String component) {
@@ -204,14 +228,15 @@ public final class RouteManifest {
           .append("They are the COMPLETE route set — a route not listed below DOES NOT EXIST. Rules:\n")
           .append("  - Every <Link to=...> and navigate(...) target MUST be ROUTES.<KEY> imported\n")
           .append("    from '@/routes' — never a bare path string literal.\n")
-          .append("  - Header/public nav: routeTable.filter(r => r.nav && !r.admin).\n")
-          .append("    AdminLayout sidebar: routeTable.filter(r => r.nav && r.admin).\n")
+          .append("  - Header/public nav: routeTable.filter(r => r.nav && r.gate !== 'admin').\n")
+          .append("    AdminLayout sidebar: routeTable.filter(r => r.nav && r.gate === 'admin').\n")
           .append("  - Never write App.tsx or routes.ts — both are generated from the plan.\n\n")
           .append("── ROUTES (key · path · page · flags) ──\n");
         for (Entry e : entries) {
             sb.append("  ROUTES.").append(e.key()).append(" = \"").append(e.path()).append("\"  → ")
               .append(e.page());
-            if (e.admin()) sb.append("  [admin]");
+            if (e.gate() == RouteGate.ADMIN) sb.append("  [admin]");
+            else if (e.gate() == RouteGate.AUTH) sb.append("  [auth]");
             if (e.nav()) sb.append("  [nav: \"").append(e.label()).append("\"]");
             sb.append('\n');
         }

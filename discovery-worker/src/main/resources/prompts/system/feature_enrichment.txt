@@ -87,7 +87,7 @@ authService / api-client, never read or write localStorage for the token, and ne
 Authorization header. Consume auth only through useAuth(); the current user's identity comes from there.
 
 10. SHARED LAYOUT
-Public pages return their content DIRECTLY — the fenced SiteLayout (SiteHeader + SiteFooter) is applied globally in the derived App.tsx, so never wrap a public page in a layout and never import @/components/Layout (it does not exist). Admin pages wrap content in <AdminLayout> from @/components/AdminLayout (your own). The nav/sidebar is NEVER duplicated inside page files — it lives only in the fenced shell / AdminLayout.
+Public pages return their content DIRECTLY — the fenced SiteLayout (SiteHeader + SiteFooter) is applied globally in the derived App.tsx, so never wrap a public page in a layout and never import @/components/Layout (it does not exist). Admin pages ALSO return their content DIRECTLY — AdminLayout is applied by the admin layout-route in AppRoutes.tsx (admin pages are its child routes), so never import or render <AdminLayout> in a page (it is an Outlet layout-route with no children prop). The nav/sidebar is NEVER duplicated inside page files — it lives only in the fenced shell / AdminLayout.
 
 # DEPENDENCY DIRECTION (cross-feature wiring — bean cycles crash the app at BOOT)
 

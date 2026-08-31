@@ -5,7 +5,10 @@ import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -25,6 +28,12 @@ public final class EnvVarScanner {
     // Matches @Value("${key}") and @Value("${key:default}") — captures the property key
     private static final Pattern VALUE_ANNOTATION =
             Pattern.compile("@Value\\(\"?\\$\\{([^}:]+)(?::[^}]*)?}\"?\\)");
+
+    // Matches ${ENV_VAR:default} placeholders in application.properties — captures env var name + default.
+    // Env var names are upper-snake by convention; the default runs up to the closing brace and may
+    // itself contain ':' (e.g. ${S3_ENDPOINT:http://minio:9000}).
+    private static final Pattern ENV_PLACEHOLDER =
+            Pattern.compile("\\$\\{([A-Z0-9_]+):([^}]*)}");
 
     private EnvVarScanner() {}
 
@@ -114,6 +123,73 @@ public final class EnvVarScanner {
             }
         } catch (IOException e) {
             log.warn("[EnvVarScanner] Could not augment .env.example: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Extracts the developer-provided defaults declared in application.properties
+     * (the {@code default} in every {@code ${ENV_VAR:default}} placeholder). Only non-empty
+     * defaults are returned — an empty default (e.g. {@code ${RAZORPAY_KEY_SECRET:}}) signals a
+     * real secret with no usable stand-in. First occurrence wins on duplicates.
+     *
+     * These defaults are the single source of truth for typed config: {@code ${S3_PATH_STYLE:true}}
+     * means "true" is a valid boolean value, so it is the correct thing to seed into .env — far
+     * safer than a generic placeholder string that a boolean/int @Value cannot parse.
+     */
+    public static Map<String, String> envDefaultsFromProperties(Path propsFile) {
+        Map<String, String> defaults = new LinkedHashMap<>();
+        if (propsFile == null || !Files.exists(propsFile)) return defaults;
+        try {
+            Matcher m = ENV_PLACEHOLDER.matcher(Files.readString(propsFile));
+            while (m.find()) {
+                String name = m.group(1);
+                String def = m.group(2);
+                if (!def.isEmpty()) defaults.putIfAbsent(name, def);
+            }
+        } catch (IOException e) {
+            log.warn("[EnvVarScanner] Could not read defaults from {}: {}", propsFile, e.getMessage());
+        }
+        return defaults;
+    }
+
+    /**
+     * Backfills blank values in .env.example using the typed defaults declared in
+     * application.properties. Prevents a runtime boot-death class: the smoke harness fills any
+     * blank env var with the string {@code demo-placeholder}, which a typed @Value binding cannot
+     * parse — e.g. {@code S3_PATH_STYLE=} → {@code demo-placeholder} → "Invalid boolean value".
+     * Seeding the real default ({@code S3_PATH_STYLE=true}) keeps the blank branch from ever firing.
+     *
+     * Secrets stay blank: they have an empty default in application.properties, so they are absent
+     * from the defaults map and the smoke harness still supplies a placeholder for them.
+     */
+    public static void backfillEnvExampleDefaults(Path workspace) {
+        Path envExample = workspace.resolve(".env.example");
+        Path propsFile = workspace.resolve("backend/src/main/resources/application.properties");
+        if (!Files.exists(envExample)) return;
+
+        Map<String, String> defaults = envDefaultsFromProperties(propsFile);
+        if (defaults.isEmpty()) return;
+
+        try {
+            List<String> lines = Files.readAllLines(envExample);
+            int filled = 0;
+            for (int i = 0; i < lines.size(); i++) {
+                String trimmed = lines.get(i).trim();
+                if (trimmed.isEmpty() || trimmed.startsWith("#") || !trimmed.contains("=")) continue;
+                int eq = trimmed.indexOf('=');
+                String key = trimmed.substring(0, eq).trim();
+                String value = trimmed.substring(eq + 1).trim();
+                if (value.isEmpty() && defaults.containsKey(key)) {
+                    lines.set(i, key + "=" + defaults.get(key));
+                    filled++;
+                }
+            }
+            if (filled > 0) {
+                Files.writeString(envExample, String.join("\n", lines) + "\n");
+                log.info("[EnvVarScanner] Backfilled {} typed default(s) into .env.example from application.properties", filled);
+            }
+        } catch (IOException e) {
+            log.warn("[EnvVarScanner] Could not backfill .env.example defaults: {}", e.getMessage());
         }
     }
 

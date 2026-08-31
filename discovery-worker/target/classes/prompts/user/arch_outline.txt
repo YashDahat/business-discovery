@@ -109,7 +109,7 @@ ALWAYS include these baseline files regardless of business type (these you DO pl
 - frontend/src/components/AdminLayout.tsx (COMPONENT) — YOUR admin sidebar shell (checks role ADMIN)
 - frontend/src/pages/LoginPage.tsx and frontend/src/pages/SignupPage.tsx (PAGE) — call useAuth()
   login / register; never re-declare the auth context
-- frontend/src/pages/AdminDashboardPage.tsx (PAGE) — the /admin landing (wrapped in AdminLayout)
+- frontend/src/pages/AdminDashboardPage.tsx (PAGE) — the /admin landing (rendered inside AdminLayout via the admin layout-route; the page returns its content directly)
 Do NOT plan frontend/src/routes.ts or frontend/src/App.tsx — both are derived from this plan.
 
 IMPORTANT — imports_from and depends_on must use FULL relative file paths (e.g.

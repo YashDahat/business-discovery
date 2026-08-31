@@ -171,8 +171,8 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    navigate(...) target MUST be ROUTES.<KEY> imported from '@/routes' — NEVER a bare path
    string literal, and never a route absent from the manifest (it does not exist). Nav
    rendering comes from the same file: Header/public nav maps
-   routeTable.filter(r => r.nav && !r.admin); AdminLayout's sidebar maps
-   routeTable.filter(r => r.nav && r.admin) — never hardcode nav links. routes.ts imports
+   routeTable.filter(r => r.nav && r.gate !== 'admin'); AdminLayout's sidebar maps
+   routeTable.filter(r => r.nav && r.gate === 'admin') — never hardcode nav links. routes.ts imports
    nothing, so importing it can never create a cycle.
 8. LOCAL IMPORTS ARE A CLOSED SET — THE MODULE CATALOG IS EXHAUSTIVE: when a "MODULES THAT
    ALREADY EXIST" section is present in your dependency context, it lists every local module
@@ -243,8 +243,12 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    - Public Page.tsx returns its content DIRECTLY — no Layout wrapper needed. The foundation's
      SiteLayout (with SiteHeader + SiteFooter) is applied globally in App.tsx via a nested Route,
      so every public page already has Header + Footer. Never import or render <Layout> in a public page.
-   - Admin*Page.tsx wraps in <AdminLayout> from @/components/AdminLayout — this provides the admin
-     sidebar. Never inline nav or sidebar inside a page.
+   - Admin*Page.tsx ALSO returns its content DIRECTLY — no wrapper. AdminLayout (admin sidebar +
+     header) is applied by the admin layout-route in AppRoutes.tsx (the admin pages are its child
+     routes), so every admin page already has the admin chrome. NEVER import or render <AdminLayout>
+     in a page: it is an Outlet layout-route with NO children prop — wrapping page content in it fails
+     to compile (TS2559 '{ children }') and would double-render the chrome. Never inline nav or sidebar
+     inside a page either.
    - src/config/siteConfig.ts MUST be generated for every project — it configures the SiteHeader
      and SiteFooter with the business's brand name, nav links, CTA, contact details, social links,
      and Tailwind design tokens (bgClass, textClass, accentClass etc.). Import SiteConfig type from

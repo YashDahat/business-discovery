@@ -116,13 +116,15 @@ public final class RouteManifestGenerator {
         }
         sb.append("} as const;\n\n");
 
+        sb.append("export type RouteGate = 'public' | 'auth' | 'admin';\n\n");
+
         sb.append("export interface RouteEntry {\n")
           .append("  key: keyof typeof ROUTES;\n")
           .append("  path: string;\n")
           .append("  page: string;        // component name, e.g. 'AdminOrdersPage'\n")
           .append("  importPath: string;  // string metadata only — App.tsx does the importing\n")
           .append("  label: string;\n")
-          .append("  admin: boolean;\n")
+          .append("  gate: RouteGate;     // 'public' | 'auth' (login) | 'admin' (login + role)\n")
           .append("  nav: boolean;\n")
           .append("}\n\n");
 
@@ -133,8 +135,8 @@ public final class RouteManifestGenerator {
               .append(", page: '").append(e.page())
               .append("', importPath: '").append(e.importPath())
               .append("', label: '").append(e.label().replace("'", "\\'"))
-              .append("', admin: ").append(e.admin())
-              .append(", nav: ").append(e.nav())
+              .append("', gate: '").append(gateLiteral(e.gate()))
+              .append("', nav: ").append(e.nav())
               .append(" },\n");
         }
         sb.append("];\n");
@@ -244,20 +246,35 @@ public final class RouteManifestGenerator {
     // ── AppRoutes.tsx (derived) ─────────────────────────────────────────────
 
     /**
-     * The route table — every page mounted at its path. Admin routes stand alone (their page
-     * components carry AdminLayout); public routes are wrapped in the foundation SiteLayout so
-     * Header + Footer render globally. Re-derived every attempt from the reconciled manifest, and
-     * carries {@link RouteManifest#PLAN_MARKER} so it is never hand-edited or LLM-rewritten.
+     * The route table — every page mounted at its path, bucketed by gate into three groups:
+     * admin routes render inside a single {@code AdminLayout} layout-route guarded by
+     * {@code allowedRoles={['ADMIN']}}; public routes are wrapped in the foundation SiteLayout so
+     * Header + Footer render globally; auth-only routes (login required, not admin) sit in a nested
+     * guard INSIDE SiteLayout so a redirected guest still sees site chrome. Re-derived every attempt
+     * from the reconciled manifest, and carries {@link RouteManifest#PLAN_MARKER} so it is never
+     * hand-edited or LLM-rewritten. (Admin pages therefore render ONLY their content — the
+     * AdminLayoutWrapperPatcher strips any leftover {@code <AdminLayout>} self-wrap from page bodies.)
      */
     public static String emitAppRoutes(RouteManifest manifest, Flags flags) {
+        List<RouteManifest.Entry> adminRoutes = manifest.entries().stream()
+                .filter(e -> e.gate() == RouteManifest.RouteGate.ADMIN).toList();
+        List<RouteManifest.Entry> authRoutes = manifest.entries().stream()
+                .filter(e -> e.gate() == RouteManifest.RouteGate.AUTH).toList();
+        List<RouteManifest.Entry> publicNonCatch = manifest.entries().stream()
+                .filter(e -> e.gate() == RouteManifest.RouteGate.PUBLIC && !"*".equals(e.path())).toList();
+        List<RouteManifest.Entry> catchAll = manifest.entries().stream()
+                .filter(e -> e.gate() == RouteManifest.RouteGate.PUBLIC && "*".equals(e.path())).toList();
+        boolean siteGroup = !publicNonCatch.isEmpty() || !authRoutes.isEmpty() || !catchAll.isEmpty();
+
         StringBuilder sb = new StringBuilder();
         sb.append(RouteManifest.PLAN_MARKER).append('\n');
         sb.append("// The complete route table, derived from the plan. Rendered by the App.tsx shell\n");
         sb.append("// inside the provider tree. Re-derived every attempt — never edit by hand.\n\n");
         sb.append("import { Routes, Route, Outlet } from 'react-router-dom'\n");
         if (flags.hasProtected()) sb.append("import ProtectedRoute from './components/ProtectedRoute'\n");
-        // Foundation shell — SiteLayout wraps all public routes; admin routes use their own layout
+        // Foundation shell — SiteLayout wraps public routes; the admin group uses its own layout.
         sb.append("import { SiteLayout } from '@/shell'\n");
+        if (!adminRoutes.isEmpty()) sb.append("import AdminLayout from '@/components/AdminLayout'\n");
         sb.append("import siteConfig from '@/config/siteConfig'\n");
         sb.append('\n');
         for (RouteManifest.Entry e : manifest.entries()) {
@@ -266,36 +283,52 @@ public final class RouteManifestGenerator {
         sb.append('\n');
 
         sb.append("export default function AppRoutes() {\n  return (\n");
-        String routesIndent = "    ";
+        String i = "    ";
+        sb.append(i).append("<Routes>\n");
 
-        java.util.List<RouteManifest.Entry> adminRoutes = manifest.entries().stream()
-                .filter(RouteManifest.Entry::admin).toList();
-        java.util.List<RouteManifest.Entry> publicRoutes = manifest.entries().stream()
-                .filter(e -> !e.admin()).toList();
-
-        sb.append(routesIndent).append("<Routes>\n");
-
-        // Admin routes — no SiteLayout, pages use AdminLayout internally
-        for (RouteManifest.Entry e : adminRoutes) {
-            String element = "<" + e.page() + " />";
-            if (flags.hasProtected()) element = "<ProtectedRoute>" + element + "</ProtectedRoute>";
-            sb.append(routesIndent).append("  <Route path=\"").append(e.path())
-              .append("\" element={").append(element).append("} />\n");
+        // Admin group — guard + admin chrome once, at the group level. AdminLayout renders <Outlet/>.
+        if (!adminRoutes.isEmpty()) {
+            String adminEl = flags.hasProtected()
+                    ? "<ProtectedRoute allowedRoles={['ADMIN']}><AdminLayout /></ProtectedRoute>"
+                    : "<AdminLayout />";
+            sb.append(i).append("  <Route element={").append(adminEl).append("}>\n");
+            for (RouteManifest.Entry e : adminRoutes) emitLeaf(sb, i + "    ", e);
+            sb.append(i).append("  </Route>\n");
         }
 
-        // Public routes — wrapped in SiteLayout shell (Header + Footer from foundation)
-        if (!publicRoutes.isEmpty()) {
-            sb.append(routesIndent).append("  <Route element={<SiteLayout config={siteConfig}><Outlet /></SiteLayout>}>\n");
-            sb.append(routesIndent).append("    {/* Outlet receives the matched child route */}\n");
-            for (RouteManifest.Entry e : publicRoutes) {
-                sb.append(routesIndent).append("    <Route path=\"").append(e.path())
-                  .append("\" element={<").append(e.page()).append(" />} />\n");
+        // Site group — SiteLayout chrome for everything public-facing.
+        if (siteGroup) {
+            sb.append(i).append("  <Route element={<SiteLayout config={siteConfig}><Outlet /></SiteLayout>}>\n");
+            sb.append(i).append("    {/* Outlet receives the matched child route */}\n");
+            for (RouteManifest.Entry e : publicNonCatch) emitLeaf(sb, i + "    ", e);
+
+            // Auth group — login required, still inside site chrome (order: SiteLayout outside, guard inside).
+            if (!authRoutes.isEmpty()) {
+                if (flags.hasProtected()) {
+                    sb.append(i).append("    <Route element={<ProtectedRoute><Outlet /></ProtectedRoute>}>\n");
+                    for (RouteManifest.Entry e : authRoutes) emitLeaf(sb, i + "      ", e);
+                    sb.append(i).append("    </Route>\n");
+                } else {
+                    for (RouteManifest.Entry e : authRoutes) emitLeaf(sb, i + "    ", e);
+                }
             }
-            sb.append(routesIndent).append("  </Route>\n");
+
+            for (RouteManifest.Entry e : catchAll) emitLeaf(sb, i + "    ", e);   // catch-all last
+            sb.append(i).append("  </Route>\n");
         }
 
-        sb.append(routesIndent).append("</Routes>\n");
+        sb.append(i).append("</Routes>\n");
         sb.append("  )\n}\n");
         return sb.toString();
+    }
+
+    private static void emitLeaf(StringBuilder sb, String indent, RouteManifest.Entry e) {
+        sb.append(indent).append("<Route path=\"").append(e.path())
+          .append("\" element={<").append(e.page()).append(" />} />\n");
+    }
+
+    /** Enum → the routes.ts string-literal gate value. */
+    private static String gateLiteral(RouteManifest.RouteGate gate) {
+        return gate.name().toLowerCase();
     }
 }
