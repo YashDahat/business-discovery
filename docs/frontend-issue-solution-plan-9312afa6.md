@@ -197,7 +197,14 @@ Take `siteConfig.ts` off the LLM's plate the same way `routes.ts` / `App.tsx` / 
 
 ---
 
-## 4. `InquiryType` type-as-value (enum used as runtime value)
+## 4. `InquiryType` type-as-value (enum used as runtime value) — ✅ IMPLEMENTED 2026-09-01 (version-proof `…Values` tuple)
+
+> **Status.** Legs 1–3 implemented + unit-verified.
+> - **Leg 1 (mechanical):** `TsTypeGenerator.emitEnum` now emits each backend enum as `export const X = {…} as const` + `export type X = typeof X[keyof typeof X]` + `export const XValues = [...] as const` (the version-proof zod tuple). Test: `TsGeneratorsTest.emitsEnumAsConstObjectDerivedTypeAndValuesTuple` green.
+> - **Leg 2 (import correctness):** prompt rule `3c` in `file_generate_frontend.txt` (enums are const objects — value-import them; use `z.enum(XValues)` / `XValues.map` / `X.MEMBER`; never re-list literals) + new **`EnumValueImportPatcher`** wired at `FrontendValidationNode` step 5g — upgrades `import type { X }` → `import { X }` when X (or `XValues`) is used as a value, splitting mixed imports and leaving type-only usages/generated files alone. Test: `EnumValueImportPatcherTest` (5) green.
+> - **Leg 3:** updated `TsGeneratorsTest`'s enum assertion to the new format (added a direct `emitEnum` test since the enclosing test has a pre-existing, unrelated nullability failure at `:107`).
+> - **zod form:** `z.enum(XValues)` — verified valid + non-deprecated in the installed zod v3.25 AND v4 (see Confirmed).
+
 
 **Issue.** Backend enum surfaces on the frontend as a TypeScript **string-union type alias** (`type InquiryType = 'A' | 'B'`), then pages use it as a **value** — `z.nativeEnum(InquiryType)`, `Object.values(InquiryType)` — which has no runtime object. Recurs (same class as MenuCategory-as-enum in prior runs).
 
@@ -256,15 +263,85 @@ export type InquiryType = typeof InquiryType[keyof typeof InquiryType];
 
 **Gap.** The planned card pins **prop shapes**, but callback **parameter types** (id vs object) still drift between the page and the child it renders. Coverage is partial.
 
+**Real root cause (verified).** The contract is fully specified — and it is the *contract itself* that trips the model. `ContractReconciler` (a Pro call) mixed conventions **within one component**; `docs/ARCHITECTURE.json` for `ClassTable` reconciles to:
+```
+onEdit:   (fitnessClass: FitnessClassDto) => void   // the full OBJECT
+onDelete: (classId: number) => void                // the ID
+```
+The child `ClassTable` implements this exactly. The parent page is *shown* the same contract (via `PlannedComponentPropsCard`), yet writes both handlers **symmetrically** — `handleEditClass(item)` and `handleDeleteClass(item)` — because edit/delete "should" look alike. Passing `handleDeleteClass` to `onDelete: (id: number)` is TS2322, across all 4 admin pages. The agent's fix flipped the page to `handleDeleteClass(classId: number)` + an internal `classes.find(c => c.id === classId)`. So: the contract is correct and visible, but its **intra-component object-vs-id asymmetry** fights the model's symmetry instinct — a "shown-but-ignored" failure the planned card can't prevent because it faithfully relays the asymmetry.
+
+### Solution (planned) — normalize row-action callbacks to ONE shape (mechanical + prompt)
+
+Kill the asymmetry rather than hope the model honors it: make every row-action callback on a list/table component take the **full row object** — the shape the model naturally writes and the table trivially has in hand.
+
+**1. New `RowActionContractNormalizer` (primary, mechanical).** A deterministic pass after `ContractReconciler`, over each component's reconciled `public_functions` + `file_role` RECONCILED-CONTRACT string. For a list/table component (has an `items: XDto[]` prop), rewrite the single parameter of each **row-action** callback to the row DTO — `on<Verb>: (item: XDto) => void` — so `onDelete: (classId: number)` → `onDelete: (fitnessClass: FitnessClassDto)`. Written back into the spec so BOTH the child and the parent page bind to the symmetric contract. Same family as the other reconciliation passes; zero LLM; idempotent (already-`(item: XDto)` is a byte-identical no-op — double-run test).
+
+**Which callbacks it may touch — narrow, two gates (skip when unsure).** The `items: XDto[]` prop is the anchor, but "any single-param `on<Verb>`" is too broad: tables also carry `onSort: (column: string)`, `onPageChange: (page: number)`, `onSearch: (query: string)`, `onSelectAll: (checked: boolean)`, and rewriting those to the DTO is nonsense — worse than a no-op, it corrupts a working contract into a type error that points at the *component*, not the normalizer. So a callback is rewritten only when BOTH gates pass:
+- **Gate 1 — name.** A **deny-list is checked first** (`onSort`, `onPageChange`, `onPage`, `onSearch`, `onFilter`, `onColumnSort`, `onSelectAll`, …); then the verb must **exactly** match a row-action allowlist (`onEdit`, `onDelete`, `onView`, `onSelect`, `onRowClick`, `onArchive`, `onApprove`, `onReject`, plus the one intentional prefix `onToggle*`). Exact match matters because `onSelectAll` starts with the allowlisted `onSelect` — a prefix match would re-admit the nastiest case; the deny-list + exact-match closes it.
+- **Gate 2 — parameter evidence.** Inspect the single param: already the row DTO → **no-op**; an id-like primitive (name `id` or `*Id`, type `number`/`string`) → **rewrite** to `(item: XDto)`; anything else → **skip**. This is the second line of defense — `onSelectAll: (checked: boolean)` fails here too (boolean, name not id-like).
+
+Multi-parameter callbacks (`onQuantityChange: (id: number, qty: number)`) are out of scope by the "single parameter" condition and are **left untouched** — not first-param-rewritten. (A consistent ideal would be `(item: XDto, qty: number)`, but that's deferred to v2.) A new row-action verb is handled by adding it to the allowlist, not by loosening the predicate.
+
+**2. Prompt rule (`feature_enrichment.txt` + `file_generate_frontend.txt`).** "Row-action callbacks on a table/list (`onEdit`/`onDelete`/`onView`/…) ALL take the full row object — `(item: XDto) => void`, never a bare id. The list already has the object; the handler reads `item.id` as needed. Keep every row-action callback's signature identical." **This leg targets the *source*, not a downstream consumer.** The asymmetry originates in `ContractReconciler` (a Pro call); steering it there is the one case among the five issues where the prompt fixes the actual origin — so if it lands, the normalizer rarely fires and the whole class mostly disappears at the reconciliation step. It carries more weight here than the prompt legs in #2/#3, which only steer a consumer of an already-correct contract.
+
+**3. Result.** Child: `onClick={() => onDelete(fitnessClass)}` (trivial, it has the object). Page: symmetric `handleEdit(item)` / `handleDelete(item) => deleteClass(item.id)` — no `.find()` lookup, no asymmetry to drift from.
+
+**Both legs stay** even though leg 2 hits the source: `ContractReconciler` is a Pro call and will occasionally emit a mixed convention regardless of the prompt, so the mechanical normalizer is the guarantee, not the optimization.
+
+**Why mechanical, not prompt-only.** The contract is LLM-reconciled and inconsistently conventioned; a deterministic normalizer guarantees symmetric row-action signatures so parent and child cannot disagree — the same single-source-of-truth principle as #2–#4. A prompt alone leaves the asymmetry in the reconciled contract for the model to re-misread.
+
+### Confirmed
+
+- **The object form is a superset, so "recommended" is not a coin-flip.** A handler given the object can read `item.id`; a handler given the id must *search* for the object — the agent's manual fix (`handleDeleteClass(classId)` + `classes.find(c => c.id === classId)`) is the id form paying its cost in the caller. Choosing object eliminates the lookup rather than relocating it.
+- **The page always has the row objects** (it renders the table from `classes`/`trainers`/… arrays), so passing the object costs nothing.
+- **The DTO is derivable** from the component's `items: XDto[]` prop, so the normalizer never has to guess the target type.
+- **Both parent and child already read the reconciled spec**, so normalizing it once fixes both sides — no separate page-side and component-side edits.
+- **Bias = skip, not rewrite (inverted from #4).** In #4's import patcher, over-firing cost a redundant import; here, over-rewriting silently turns a correct contract into a nonsensical one whose type error blames the component. So both gates must pass, and anything uncertain is left to the prompt + ErrorFixAgent.
+
+### Open choice
+
+Convention direction: **full row object for every row-action callback** (recommended — matches the model's instinct and needs no lookup) vs. **bare id for every callback** (more RESTful, but forces an object lookup for edit-style actions that need to populate a form). Recommend the object form for v1.
+
 ---
 
-## 6. lucide-react hallucinated icon (`SwimmingPool` → `Waves`)
+## 6. lucide-react hallucinated icon (`SwimmingPool` → `Waves`) — ✅ IMPLEMENTED 2026-09-01
+
+> **Status.** Legs 1–3 implemented + unit-verified (`LucideIconValidatorTest`, 8/8).
+> - **Registry accessor:** new `NodeModuleExportRegistry.exportsOfPackage(frontendDir, "lucide-react")` returns the RAW per-package export set (does NOT collapse ambiguous symbols, so `Route` — exported by both lucide-react and react-router-dom — is retained), reusing the existing private `exportsOf`.
+> - **Leg 2 (mechanical) — new `LucideIconValidator`** wired at `FrontendValidationNode` step 5h (after `EnumValueImportPatcher`, before `TypeScriptImportFixer`). Validates every `import { … } from 'lucide-react'` against the real export set. **Tier A** (certain typo — case-insensitive / `Icon` add-strip / singular-plural normalizing to exactly ONE real export) rewrites the import spec AND every un-aliased JSX/value usage; `fix()` returns true only for Tier A (a build-fixing change → triggers the rebuild). **Tier B** (no certain normalization, e.g. `SwimmingPool`) inserts a `// FIXME[invalid-icon]` comment above the import naming the bad symbol + registry-verified candidates (lexical edit-distance ≤3, a tiny concept→lucide hint table tokenizing the invented name, generic fallback — all validated against the real set so a suggestion is never itself fake), leaving the import untouched so the build stays red and the agent runs. Never guesses a semantic replacement itself; idempotent (won't duplicate an existing FIXME); skips `// GENERATED` and `components/ui/` files.
+> - **Leg 1 (prompt):** `file_generate_frontend.txt` rule 11 — lucide icons must be real, no `SwimmingPool`/`Gym`/`Treadmill`/`Yoga` etc., with an always-valid fallback set and "never guess a PascalCase name from the business domain."
+> - **Leg 3 (agent prompt):** `fix_file.txt` rule 8 — honor a `// FIXME[invalid-icon]` comment by replacing the named symbol (import + all usages) with ONE of the listed real icons, never inventing another, and removing the comment when fixed.
+
 
 **Issue.** The generator imported a lucide export that doesn't exist.
 
 **Already-available solution.** `NodeModuleExportRegistry` (scans real `node_modules` exports scoped to `package.json`) + `UiImportRewriter` (`FrontendValidationNode.java:84`) — the generic fix for *missing* imports: it adds an import for a symbol used but never imported (e.g. a lucide icon dropped into JSX).
 
 **Gap.** The registry/rewriter only **adds a missing import** or moves radix→shadcn. It does **not validate that an already-imported named symbol actually exists** in the package, nor replace a non-existent one — so a hallucinated `SwimmingPool` import falls through to tsc + the agent.
+
+**Real root cause (verified).** The model invented `SwimmingPool`; lucide-react has no such export (it ships `Waves` for water). This is a **semantic** hallucination, not a typo — there is no lexical path from `SwimmingPool` to `Waves`, so only a model (the ErrorFixAgent, which fixed it) can bridge it. That distinction is the whole difficulty of #6 and separates it from the other four: the mechanical layer can *detect* the bad name but cannot *derive* the right one.
+
+**Two constraints found while scoping:**
+- **A mechanical "correct" replacement is not generally possible.** A generic fallback keeps the build green but a `Circle` on the "Swimming Pool" facility card is a client-visible regression the agent would have fixed better. Near-match (typo/casing/`Icon`-suffix) is a *different* class and rarely fires here anyway — lucide v1.28 already exports the `*Icon` aliases (`PencilIcon`, `CalendarIcon`, `Trash2Icon` are all valid in the repo). So the mechanical lever is genuinely weaker here than in #1–#5.
+- **The existing registry can't be used as-is to validate.** `NodeModuleExportRegistry.packageFor()` **drops ambiguous symbols** (exported by ≥2 scoped packages). `Route` is exported by BOTH `lucide-react` and `react-router-dom` — and the repo really does `import { Route } from 'lucide-react'` — so a validator built on that map would falsely flag a *valid* import. The validator needs a **raw per-package export set** (a new accessor over the existing `exportsOf(...)`), not the ambiguity-collapsed map.
+
+### Solution (planned) — prevention-first, mechanical net that only acts when it can be right
+
+**1. Prevention (prompt — the primary lever here).** In `file_generate_frontend.txt`: use ONLY real lucide-react icons; there is no `SwimmingPool`/`Gym`/`Treadmill`/`Yoga` icon — NEVER invent a domain icon. Give a small curated always-valid set for common concepts (`Dumbbell`, `Waves`, `Users`, `Star`, `Calendar`, `Clock`, `MapPin`, `Phone`, `Mail`, `Award`, `Heart`, …) and "if unsure, pick a generic one from this list." This attacks the source; unlike #2/#3 the prompt is the main fix because the residue can't be mechanically corrected well.
+
+**2. Mechanical net — new `LucideIconValidator`** in `FrontendValidationNode`'s deterministic pass, over the **raw** lucide-react export set (new `NodeModuleExportRegistry.exportsOfPackage("lucide-react")`). For each `import { … } from 'lucide-react'`, find names not in the real set and split the work along the seam between *deterministic* and *semantic* — **fix what it can be certain of, annotate the rest for the agent**:
+- **Tier A — high-confidence normalization (auto-fix).** A name that resolves to exactly ONE real export under case-insensitive / `Icon` add-strip / singular-plural normalization → rewrite the import AND all JSX/value usages. Deterministic, always correct; saves the round entirely for trivial typos.
+- **Tier B — invalid, no certain normalization → ANNOTATE + DEFER (does not touch the build).** The layer cannot know that `SwimmingPool` should be `Waves` — that is a semantic judgment. So instead of guessing (and risking a wrong-but-green `Circle`), it inserts a structured comment directly above the offending import naming the invalid symbol and **registry-verified** candidate replacements, then leaves the pick to the ErrorFixAgent. The build stays red on the invalid import, so the agent runs anyway — but now it is handed the diagnosis and real options rather than having to discover the bad name from tsc and re-enumerate lucide's exports itself (which it can't reliably do → it could pick another fake). Example:
+  ```tsx
+  // FIXME[invalid-icon]: 'SwimmingPool' is not exported by lucide-react. Replace it (import + all
+  //   usages) with one of these real icons: Waves, Droplets, Droplet, Activity.
+  import { SwimmingPool } from 'lucide-react';
+  ```
+  **Candidate generation (all values validated against the real export set, so a suggestion is never itself fake):** (i) lexical near-matches by edit distance; (ii) a small **concept→lucide** hint table that tokenizes the invented name and maps common domain concepts to real icons (`swim`/`pool`/`water` → `Waves`, `Droplets`; `gym`/`fitness`/`workout` → `Dumbbell`, `Activity`; `yoga` → `PersonStanding`; `treadmill`/`cardio` → `Activity`, `Footprints`; …); (iii) a generic real fallback set (`Star`, `Sparkles`, `Circle`) so the comment always offers *something* valid. The table is curated but tiny and auditable, and — crucially — it only *suggests*; the agent makes the call with usage context, so an imperfect suggestion is corrected rather than shipped.
+
+This resolves the reliability-vs-cosmetics trade the rest of the plan avoided: **no wrong icon is ever auto-shipped** (Tier B never rewrites), yet the agent's fix is grounded, cheap, and correct-on-first-try because the deterministic registry work is done for it.
+
+**Small ErrorFixAgent prompt note.** Add one line to the agent's guidance: "if a `// FIXME[invalid-icon]` comment is present, replace the named symbol (import + all usages) with one of the listed real icons — do not invent a new one." Ensures the pre-computed candidates are honored (the agent already did `SwimmingPool→Waves` unaided, so this only makes it faster and safer).
 
 ---
 

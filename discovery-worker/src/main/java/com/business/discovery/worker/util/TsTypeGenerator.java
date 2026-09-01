@@ -132,10 +132,7 @@ public final class TsTypeGenerator {
 
         for (TypeDef def : defs) {
             if (def.isEnum()) {
-                sb.append("export type ").append(def.name()).append(" = ")
-                  .append(String.join(" | ", def.enumConstants().stream()
-                          .map(c -> "'" + c + "'").toList()))
-                  .append(";\n\n");
+                sb.append(emitEnum(def.name(), def.enumConstants()));
             } else {
                 sb.append("export interface ").append(def.name()).append(" {\n");
                 for (Field f : dedupeFields(def.name(), def.fields(), known.keySet())) {
@@ -147,6 +144,37 @@ public final class TsTypeGenerator {
                 sb.append("}\n\n");
             }
         }
+        return sb.toString();
+    }
+
+    /**
+     * A backend enum, emitted so it is usable in BOTH type and value positions — the type-only union
+     * we used before had no runtime existence, so any consumer that needed the values (dropdown
+     * options, a zod schema, {@code Object.values}) had to hand-duplicate the literals:
+     *
+     * <pre>
+     * export const InquiryType = { GENERAL: 'GENERAL', ... } as const;         // the value
+     * export type InquiryType = typeof InquiryType[keyof typeof InquiryType];  // the type (same name)
+     * export const InquiryTypeValues = ['GENERAL', ...] as const;              // z.enum(...) + dropdowns
+     * </pre>
+     *
+     * Values are the constant NAMES — identical to the union we emitted before and to Jackson's default
+     * serialization, so the wire contract is unchanged. The {@code Values} tuple is version-proof for
+     * zod: {@code z.enum(InquiryTypeValues)} type-checks under zod v3 (Readonly tuple overload) AND v4
+     * (readonly string[] overload) and is not deprecated in either, unlike {@code z.nativeEnum}.
+     */
+    static String emitEnum(String name, List<String> constants) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("export const ").append(name).append(" = {\n");
+        for (String c : constants) {
+            sb.append("  ").append(c).append(": '").append(c).append("',\n");
+        }
+        sb.append("} as const;\n\n");
+        sb.append("export type ").append(name)
+          .append(" = typeof ").append(name).append("[keyof typeof ").append(name).append("];\n\n");
+        sb.append("export const ").append(name).append("Values = [")
+          .append(String.join(", ", constants.stream().map(c -> "'" + c + "'").toList()))
+          .append("] as const;\n\n");
         return sb.toString();
     }
 

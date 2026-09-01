@@ -94,6 +94,27 @@ class TsGeneratorsTest {
         assertThat(TsTypeGenerator.mapType("SomethingWeird", known)).isEqualTo("unknown");
     }
 
+    // ── Enum emission (const object + derived type + version-proof values tuple) ──
+
+    @Test
+    void emitsEnumAsConstObjectDerivedTypeAndValuesTuple() {
+        String ts = TsTypeGenerator.emitEnum("InquiryType",
+                List.of("GENERAL", "MEMBERSHIP", "TRAINING", "COMPLAINT"));
+
+        // runtime const object — usable as a value (Object.values / X.MEMBER / z.nativeEnum)
+        assertThat(ts).contains("export const InquiryType = {")
+                .contains("  GENERAL: 'GENERAL',")
+                .contains("  MEMBERSHIP: 'MEMBERSHIP',")
+                .contains("  COMPLAINT: 'COMPLAINT',")
+                .contains("} as const;");
+        // same-named derived type — usable in type positions
+        assertThat(ts).contains("export type InquiryType = typeof InquiryType[keyof typeof InquiryType];");
+        // version-proof tuple for z.enum(...) + dropdowns (valid + non-deprecated in zod v3 AND v4)
+        assertThat(ts).contains("export const InquiryTypeValues = ['GENERAL', 'MEMBERSHIP', 'TRAINING', 'COMPLAINT'] as const;");
+        // the old type-only union is gone
+        assertThat(ts).doesNotContain("'GENERAL' | 'MEMBERSHIP'");
+    }
+
     // ── Type file emission ────────────────────────────────────────────────
 
     @Test
@@ -114,11 +135,18 @@ class TsGeneratorsTest {
         // the invented-field class: 'features' can never appear
         assertThat(membership).doesNotContain("features");
 
-        // enum lands with its domain, referenced cross-file if needed
+        // enum lands with its domain as a const object + derived type + version-proof values tuple,
+        // so it resolves in BOTH value and type positions (no more type-only union)
         String enumHome = result.files().values().stream()
                 .filter(c -> c.contains("export type BookingStatus"))
                 .findFirst().orElseThrow();
-        assertThat(enumHome).contains("'CONFIRMED' | 'CANCELLED_BY_USER'");
+        assertThat(enumHome).contains("export const BookingStatus = {")
+                .contains("CONFIRMED: 'CONFIRMED',")
+                .contains("CANCELLED_BY_USER: 'CANCELLED_BY_USER',")
+                .contains("} as const;")
+                .contains("export type BookingStatus = typeof BookingStatus[keyof typeof BookingStatus];")
+                .contains("export const BookingStatusValues = ['CONFIRMED', 'CANCELLED_BY_USER'] as const;")
+                .doesNotContain("'CONFIRMED' | 'CANCELLED_BY_USER'");   // the old type-only union is gone
     }
 
     // circuit-house 2026-07-12: ApiInventory attributes nested-class fields to the outer

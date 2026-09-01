@@ -55,6 +55,20 @@ public final class NodeModuleExportRegistry {
         return Optional.ofNullable(symbolToPackage.get(symbol));
     }
 
+    /**
+     * The RAW, un-collapsed export-name set of a SINGLE package (empty if the package is absent or its
+     * {@code .d.ts} is unreadable). Unlike {@link #packageFor}, this does NOT drop symbols shared with
+     * other scoped packages — {@code Route} is exported by BOTH {@code lucide-react} and
+     * {@code react-router-dom}, so the ambiguity-collapsed map would wrongly omit it. A validator asking
+     * "does {@code lucide-react} really export this name?" needs the package's true surface, not the map.
+     * Used by {@link LucideIconValidator} (issue #6, docs/frontend-issue-solution-plan-9312afa6.md).
+     */
+    public static Set<String> exportsOfPackage(Path frontendDir, String pkg) {
+        Path nodeModules = frontendDir.resolve("node_modules");
+        if (!Files.isDirectory(nodeModules)) return Set.of();
+        return exportsOf(nodeModules, pkg, new ObjectMapper());
+    }
+
     public boolean isEmpty() { return symbolToPackage.isEmpty(); }
     public int size()        { return symbolToPackage.size(); }
 

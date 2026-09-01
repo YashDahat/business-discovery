@@ -102,6 +102,16 @@ public class FrontendValidationNode implements WorkerNode {
         //       AdminLayout is an Outlet layout-route (no children) mounted once by AppRoutes — strip
         //       the wrapper to <>…</> and drop the import (issue #2 in the frontend solution plan).
         boolean adminLayoutFixed = com.business.discovery.worker.util.AdminLayoutWrapperPatcher.fix(frontendSrc);
+        //   5g. EnumValueImportPatcher: backend enums are const objects (value+type); a consumer that
+        //       reads their values (X.MEMBER / Object.values / z.enum(XValues)) must value-import them —
+        //       upgrade `import type { X }` → `import { X }` where used as a value (issue #4).
+        boolean enumImportsFixed = com.business.discovery.worker.util.EnumValueImportPatcher.fix(frontendSrc);
+        //   5h. LucideIconValidator: a hallucinated lucide-react icon (SwimmingPool — no such export)
+        //       is either auto-normalized when it's a certain typo (Tier A) or annotated with a
+        //       // FIXME[invalid-icon] + real candidates for the agent (Tier B, build stays red) — the
+        //       validator never guesses a semantic replacement itself (issue #6).
+        boolean lucideIconsFixed = com.business.discovery.worker.util.LucideIconValidator.fix(frontendSrc,
+                com.business.discovery.worker.util.NodeModuleExportRegistry.exportsOfPackage(frontendDir, "lucide-react"));
         //   6. TypeScriptImportFixer: registry-driven correction of wrong @/ and relative import
         //      paths (resolved to where each symbol is actually exported) and default↔named
         //      mismatches (TS2613/TS2614). Runs per-file during generation; re-applying it here on
@@ -113,7 +123,7 @@ public class FrontendValidationNode implements WorkerNode {
 
         if (exportsFixed || packagesFixed || jsxImportsFixed || uiImportsFixed || svcImportsFixed
                 || envFixed || tanstackFixed || frameworkNavFixed || siteConfigFixed || adminLayoutFixed
-                || tsImportsFixed) {
+                || enumImportsFixed || lucideIconsFixed || tsImportsFixed) {
             BuildResult postFix = buildTool.runNpmBuild(frontendDir);
             if (postFix.success()) {
                 log.info("[FrontendValidationNode] npm build passed after mechanical fixes — skipping ErrorFixAgent");

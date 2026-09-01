@@ -104,6 +104,17 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
        when the DTO field is (`z.string().min(1)`); if you deliberately keep a field optional for UX, coerce
        it to the DTO type at submit: `field: values.field ?? ''` for a required string field, `?? null` for a
        nullable one.
+3c. ENUMS FROM @/types ARE CONST OBJECTS, NOT type-only unions. Each backend enum is generated as a
+   runtime `export const X = { MEMBER: 'MEMBER', ... } as const` + a same-named `export type X` + a
+   tuple `export const XValues = ['MEMBER', ...] as const`. So an enum is BOTH a value and a type:
+   - IMPORT IT AS A VALUE when you read its values — `import { X, XValues } from '@/types/<domain>'`,
+     NOT `import type`. `import type` an enum then using `X.MEMBER` / `Object.values(X)` / `z.enum(...)`
+     is a hard error ("'X' cannot be used as a value because it was imported using 'import type'").
+     `import type { X }` is fine ONLY when X appears solely as a type annotation.
+   - FOR ZOD, use `z.enum(XValues)` (the generated tuple — valid in every zod version). For dropdown
+     options iterate `XValues.map(...)`; for a specific member use `X.MEMBER`.
+   - NEVER re-list the literal strings (`z.enum(['MEMBER', ...])`, `const opts: X[] = ['MEMBER', ...]`)
+     or cast a literal `'MEMBER' as X` — the generated `X` / `XValues` are the single source of truth.
 4. IMPORT FORM — match the export form of the target file exactly (TS2614 otherwise):
    - `export default function Foo()` or `export default Foo` → import as `import Foo from './Foo'`
      DEFAULT import — NO braces. This is by far the most common form for component files.
@@ -208,8 +219,13 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    because the route declares no :param. Only use useParams() when the route is path-parameterised
    (<Route path="/checkout/:id">). A mismatch fetches with an empty id, loads no data, and renders
    the error/empty state.
-
-# AUTH & ROLES — TWO ROLES (USER, ADMIN), GUEST-FIRST (each rule fixes a real wiring defect)
+11. LUCIDE ICONS MUST BE REAL — NEVER INVENT A DOMAIN ICON: import from 'lucide-react' ONLY names
+    that truly exist in the library. There is NO SwimmingPool, Gym, Treadmill, Yoga, Dumbell (it is
+    Dumbbell), Membership, or Trainer icon — inventing one is an unfixable compile error (it has no
+    export to resolve). When you need an icon for a concept, pick the closest REAL lucide icon; if
+    unsure, choose a generic one from this always-valid set: Dumbbell, Activity, Waves, Droplets,
+    Users, User, Star, Award, Calendar, CalendarDays, Clock, MapPin, Phone, Mail, Heart, CheckCircle,
+    Flame, Sparkles, Circle. Do NOT guess a PascalCase name from the business domain. — TWO ROLES (USER, ADMIN), GUEST-FIRST (each rule fixes a real wiring defect)
 1. TWO ROLES ONLY: `user.role` is the string `'USER'` or `'ADMIN'` (never an array, never other values).
    Everyone who signs up is a USER; the single ADMIN is seeded server-side — never build an "admin signup".
 2. GUEST-FIRST — NEVER GATE PUBLIC FLOWS: browsing, add-to-cart, checkout, ordering and booking MUST work

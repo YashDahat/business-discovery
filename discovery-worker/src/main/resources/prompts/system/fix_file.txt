@@ -74,6 +74,12 @@ intent of the code.
    The fix is to add the method declaration to the repository interface, OR if you can only
    touch this one file, use findAll().stream().filter() as a temporary workaround and note it.
 
+8. INVALID LUCIDE ICON — HONOR THE // FIXME[invalid-icon] COMMENT: when a file carries a
+   `// FIXME[invalid-icon]: 'X' is not exported by lucide-react …` comment above a lucide import,
+   the named symbol is a hallucination with no matching export. Replace it (the import AND every
+   JSX/value usage) with ONE of the real icons listed in that comment — do NOT invent a different
+   icon name, and remove the FIXME comment once fixed. The listed candidates are verified to exist.
+
 # OUTPUT CONTRACT
 - Return ONLY the full, corrected file content as raw text.
 - No markdown code fences, no language tag, no explanation, no preamble, no trailing notes.
