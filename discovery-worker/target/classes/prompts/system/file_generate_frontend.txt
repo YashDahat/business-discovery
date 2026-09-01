@@ -225,7 +225,25 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
     export to resolve). When you need an icon for a concept, pick the closest REAL lucide icon; if
     unsure, choose a generic one from this always-valid set: Dumbbell, Activity, Waves, Droplets,
     Users, User, Star, Award, Calendar, CalendarDays, Clock, MapPin, Phone, Mail, Heart, CheckCircle,
-    Flame, Sparkles, Circle. Do NOT guess a PascalCase name from the business domain. — TWO ROLES (USER, ADMIN), GUEST-FIRST (each rule fixes a real wiring defect)
+    Flame, Sparkles, Circle. Do NOT guess a PascalCase name from the business domain.
+12. ERROR & UNTYPED-CALLBACK PARAMS — NEVER `: any` (strict mode is on): under strict TS a caught
+    error is `unknown`, so NEVER write `catch (e: any)`. Write `catch (error)` and read a message via
+    `error instanceof Error ? error.message : 'Something went wrong'` before use (accessing `error.message`
+    on an un-narrowed catch var is TS18046). A callback param the compiler cannot type on its own (a
+    third-party SDK handler with no exported type, e.g. a Razorpay `handler: (response) => …`) must be
+    typed explicitly — NEVER left implicit (TS7006) and NEVER `: any`: if you read known fields off it,
+    declare a small local `interface` for the payload and annotate the param with it (e.g.
+    `interface RazorpayResponse { razorpay_order_id: string; razorpay_payment_id: string; razorpay_signature: string }`
+    then `handler: (response: RazorpayResponse) => …`); only when the shape is genuinely opaque, annotate
+    `: unknown` and narrow before access (bare `: unknown` + property access is TS18046). Params that ARE
+    contextually typed (a `mutate` options `onError`/`onSuccess`, an array `.map`, a JSX event handler) need
+    no annotation — do not add one.
+13. CALENDAR IS react-day-picker v10 — NO `initialFocus`: the `initialFocus` prop was REMOVED in
+    react-day-picker v10, so `<Calendar initialFocus … />` is a TS2322 ("Property 'initialFocus' does not
+    exist"). To focus the calendar when its popover opens, use `autoFocus` instead (`<Calendar mode="single"
+    autoFocus … />`). Never pass `initialFocus` to `<Calendar>` or `<DayPicker>`.
+
+# AUTH & ROLES — TWO ROLES (USER, ADMIN), GUEST-FIRST (each rule fixes a real wiring defect)
 1. TWO ROLES ONLY: `user.role` is the string `'USER'` or `'ADMIN'` (never an array, never other values).
    Everyone who signs up is a USER; the single ADMIN is seeded server-side — never build an "admin signup".
 2. GUEST-FIRST — NEVER GATE PUBLIC FLOWS: browsing, add-to-cart, checkout, ordering and booking MUST work

@@ -112,6 +112,10 @@ public class FrontendValidationNode implements WorkerNode {
         //       validator never guesses a semantic replacement itself (issue #6).
         boolean lucideIconsFixed = com.business.discovery.worker.util.LucideIconValidator.fix(frontendSrc,
                 com.business.discovery.worker.util.NodeModuleExportRegistry.exportsOfPackage(frontendDir, "lucide-react"));
+        //   5i. DayPickerPropPatcher: react-day-picker v10 removed the initialFocus prop; the model still
+        //       emits the pre-v10 shadcn idiom <Calendar initialFocus/> (TS2322). Rewrite it to the v10
+        //       replacement <Calendar autoFocus/> on <Calendar>/<DayPicker> tags only (issue #7).
+        boolean dayPickerFixed = com.business.discovery.worker.util.DayPickerPropPatcher.fix(frontendSrc);
         //   6. TypeScriptImportFixer: registry-driven correction of wrong @/ and relative import
         //      paths (resolved to where each symbol is actually exported) and default↔named
         //      mismatches (TS2613/TS2614). Runs per-file during generation; re-applying it here on
@@ -123,7 +127,7 @@ public class FrontendValidationNode implements WorkerNode {
 
         if (exportsFixed || packagesFixed || jsxImportsFixed || uiImportsFixed || svcImportsFixed
                 || envFixed || tanstackFixed || frameworkNavFixed || siteConfigFixed || adminLayoutFixed
-                || enumImportsFixed || lucideIconsFixed || tsImportsFixed) {
+                || enumImportsFixed || lucideIconsFixed || dayPickerFixed || tsImportsFixed) {
             BuildResult postFix = buildTool.runNpmBuild(frontendDir);
             if (postFix.success()) {
                 log.info("[FrontendValidationNode] npm build passed after mechanical fixes — skipping ErrorFixAgent");

@@ -345,7 +345,12 @@ This resolves the reliability-vs-cosmetics trade the rest of the plan avoided: *
 
 ---
 
-## 7. react-day-picker v10 `initialFocus` removed (2 occ, `BookingFilter`)
+## 7. react-day-picker v10 `initialFocus` removed (2 occ, `BookingFilter`) — ✅ IMPLEMENTED 2026-09-01
+
+> **Status.** Both legs implemented + unit-verified (`DayPickerPropPatcherTest`, 7/7); rewrite proven with `tsc`.
+> - **Verified against the real repo + react-day-picker@10.0.1:** the project pins `^10.0.1`; `initialFocus` is gone from the v10 `.d.ts`; `autoFocus?: boolean` is its documented replacement. Reproduced `<Calendar initialFocus/>` → **TS2322** "Property 'initialFocus' does not exist … DayPickerProps"; rewrite to `<Calendar autoFocus/>` → `tsc` clean. (The wrapper types props as `React.ComponentProps<typeof DayPicker>`, so page-level `initialFocus` is rejected even though the foundation wrapper itself is fine.)
+> - **Leg 1 (mechanical) — new `DayPickerPropPatcher`** wired at `FrontendValidationNode` step 5i. Rewrites the `initialFocus` prop → `autoFocus` **only inside a `<Calendar …>` / `<DayPicker …>` opening tag** (negative lookahead excludes `<CalendarIcon>`/`<CalendarDays>`; a same-named variable elsewhere is left alone), with a brace/quote-aware tag-end scan so a `>` inside `onSelect={(d) => …}` isn't mistaken for the tag close. Handles bare `initialFocus` and `initialFocus={true}`; idempotent; skips `// GENERATED` and `components/ui/` files. Preserves the focus-on-open UX the agent otherwise dropped by deleting the prop.
+> - **Leg 2 (prompt)** — `file_generate_frontend.txt` rule 13: `initialFocus` was removed in react-day-picker v10 (`<Calendar initialFocus/>` is TS2322); use `autoFocus`; never pass `initialFocus` to `<Calendar>`/`<DayPicker>`.
 
 **Issue.** `initialFocus` was dropped from the Calendar/day-picker API in v10; page code still passes it.
 
@@ -355,7 +360,14 @@ This resolves the reliability-vs-cosmetics trade the rest of the plan avoided: *
 
 ---
 
-## 8. Implicit `any` on catch / callback params
+## 8. Implicit `any` on catch / callback params — ✅ CLOSED 2026-09-01 (dissolved by #1 + prompt leg)
+
+> **Status.** Verified against the real `9312afa6` run + repo; no mechanical pass warranted.
+> - **The dominant cluster is dissolved by the committed #1 fix.** The run log shows **zero TS7006** — the implicit-any params lived inside `mutate(vars, { onSuccess, onError })`, and the **TS2554** "expected 1 arg, got 2" (13 occ / 7 files) rejected the whole call first, masking them. With #1's `MutateOptions<TData, Error, TVars>` widening now in `FrontendHookGenerator`, those callbacks are contextually typed — no implicit any and no callback deletion needed.
+> - **Residual (final repo): exactly 2 explicit `: any`**, both at genuinely-untyped boundaries — `catch (error: any)` (`SignupForm.tsx:54`) and a Razorpay `handler: (response: any)` (`CheckoutForm.tsx:58`). `tsconfig.app.json` has `strict:true` (noImplicitAny on) but `noUnusedParameters:false`.
+> - **No patcher** — a catch var is already `unknown` under strict (forcing a narrowing rewrite risks changing behavior of code reading `.message`), and an external SDK callback can't be typed mechanically without the lib's types.
+> - **Prompt leg added** (`file_generate_frontend.txt` rule 12): never `catch (e: any)` → `catch (error)` + `error instanceof Error ? error.message : '…'`; an untyped third-party SDK callback param → a small local `interface` when you read known fields (else `: unknown` + narrow), never implicit/`: any`; contextually-typed params (mutate `onError`/`onSuccess`, `.map`, JSX handlers) get no annotation.
+> - **Verified with `tsc --noEmit` under the repo's real `strict:true` config** (2026-09-01): baseline clean; rule 12's `catch` fix compiles; bare `: unknown` + property access on the Razorpay `response` FAILS `TS18046` ×3 (so "narrow before access" is load-bearing); a local `RazorpayResponse` interface compiles — hence rule 12 prefers a local interface for field-reading SDK callbacks.
 
 **Issue.** Under strict TS, `err`/`error`/`booking` callback params were implicitly `any`.
 
