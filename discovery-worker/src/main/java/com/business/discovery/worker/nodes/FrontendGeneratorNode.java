@@ -534,14 +534,23 @@ public class FrontendGeneratorNode implements WorkerNode {
                 com.business.discovery.worker.util.RouteManifestGenerator.emitAppRoutes(manifest, flags));
         Files.writeString(frontendSrc.resolve("AppProviders.tsx"),
                 com.business.discovery.worker.util.RouteManifestGenerator.emitAppProviders(flags));
+
+        // siteConfig.ts is CONFIG against the fixed foundation SiteConfig contract — derive it (brand
+        // + nav from the manifest, contact from the brief) instead of letting the LLM guess the shape.
+        Files.createDirectories(frontendSrc.resolve("config"));
+        Files.writeString(frontendSrc.resolve("config/siteConfig.ts"),
+                com.business.discovery.worker.util.SiteConfigGenerator.emit(manifest, ctx.getBriefCtx(), hasAuth));
+
         log.info("[FrontendGeneratorNode] Route registry derived — {} routes into routes.ts + "
                 + "AppRoutes.tsx (App.tsx shell frozen)", manifest.entries().size());
 
         manifestPaths.add("frontend/src/routes.ts");
+        manifestPaths.add("frontend/src/config/siteConfig.ts");
         markDerived(ctx, workspace, "frontend/src/routes.ts", true);
         markDerived(ctx, workspace, "frontend/src/App.tsx", false);
         markDerived(ctx, workspace, "frontend/src/AppRoutes.tsx", true);
         markDerived(ctx, workspace, "frontend/src/AppProviders.tsx", true);
+        markDerived(ctx, workspace, "frontend/src/config/siteConfig.ts", true);
 
         this.routeCardSection = com.business.discovery.worker.util.RouteManifest.PROMPT_KEY
                 + "\n" + manifest.toPromptSection();
@@ -587,8 +596,9 @@ public class FrontendGeneratorNode implements WorkerNode {
     private boolean isFenced(String path, FileSpec spec, Path workspace) {
         String p = path.replace('\\', '/');
         if (p.equals("frontend/src/routes.ts") || p.equals("frontend/src/App.tsx")
-                || p.equals("frontend/src/AppRoutes.tsx") || p.equals("frontend/src/AppProviders.tsx")) {
-            // The route registry (routes.ts, App.tsx shell, AppRoutes, AppProviders) is worker-owned.
+                || p.equals("frontend/src/AppRoutes.tsx") || p.equals("frontend/src/AppProviders.tsx")
+                || p.equals("frontend/src/config/siteConfig.ts")) {
+            // The route registry (routes.ts, App.tsx shell, AppRoutes, AppProviders) + siteConfig.ts is worker-owned.
             // Fence by ON-DISK EXISTENCE, not just "did synthesis run this attempt" — an empty-plan
             // update run leaves the registry in place, and un-fencing it there is exactly how a
             // partial re-derivation dropped the cart route and admin pages.

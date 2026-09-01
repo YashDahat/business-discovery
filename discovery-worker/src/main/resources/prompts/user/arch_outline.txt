@@ -102,8 +102,8 @@ frontend/FOUNDATION_CONTRACT.md are the single source of truth:
 ALWAYS include these baseline files regardless of business type (these you DO plan):
 - backend/src/main/java/com/{{slug}}/exception/GlobalExceptionHandler.java (EXCEPTION)
 - backend/src/main/java/com/{{slug}}/dto/ErrorResponse.java (DTO)
-- frontend/src/config/siteConfig.ts (UTIL) — configures the fenced SiteHeader/SiteFooter; the ONLY
-  place business-specific shell content lives
+- frontend/src/config/siteConfig.ts — DERIVED by the worker (brand + nav from the route table,
+  contact from the brief); do NOT plan or generate it. Pages import { siteConfig } and read it.
 - frontend/src/components/ProtectedRoute.tsx (COMPONENT) — YOUR route guard (NOT in the foundation):
   one component reading useAuth(), prop allowedRoles?: string[], reused for signed-in and admin routes
 - frontend/src/components/AdminLayout.tsx (COMPONENT) — YOUR admin sidebar shell (checks role ADMIN)

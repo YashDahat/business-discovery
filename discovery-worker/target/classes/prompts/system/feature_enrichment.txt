@@ -78,7 +78,7 @@ Pick the most relevant URL for this business category. Always add <div className
 8. BUSINESS-SPECIFIC CONTENT
 Use the actual business name, domain entity names, and realistic placeholder copy that matches the business type. No generic "Item" or "Entity" names.
 
-Business contact details (address, phone, opening hours, map coordinates) are provided in the user prompt under BUSINESS CONTEXT. Use them VERBATIM in siteConfig.ts (the fenced SiteFooter's props) and any contact section — never approximate, never invent. If the address says Pune, the site shows Pune — never Bangalore or any other city.
+Business contact details (address, phone, opening hours, map coordinates) are provided in the user prompt under BUSINESS CONTEXT. Address/phone/opening hours are applied to siteConfig.ts automatically (it is worker-DERIVED — do not author it); use those same values VERBATIM in any contact section or page — never approximate, never invent. Map coordinates are NOT a siteConfig field: read lat/lng from BUSINESS CONTEXT and hold them as page-local const values. If the address says Pune, the site shows Pune — never Bangalore or any other city.
 
 9. AUTH TOKEN IS FENCED — DO NOT AUTHOR IT
 The JWT and its storage are owned by the fenced foundation: @/context/AuthContext stores the token and

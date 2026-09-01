@@ -249,16 +249,18 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
      in a page: it is an Outlet layout-route with NO children prop — wrapping page content in it fails
      to compile (TS2559 '{ children }') and would double-render the chrome. Never inline nav or sidebar
      inside a page either.
-   - src/config/siteConfig.ts MUST be generated for every project — it configures the SiteHeader
-     and SiteFooter with the business's brand name, nav links, CTA, contact details, social links,
-     and Tailwind design tokens (bgClass, textClass, accentClass etc.). Import SiteConfig type from
-     '@/shell'. This file is the ONLY place business-specific shell content lives.
+   - src/config/siteConfig.ts is DERIVED by the worker (brand + nav from the route table, contact
+     from the brief) — do NOT generate, plan, or overwrite it; import { siteConfig } from '@/config/siteConfig'
+     and READ it. You may still author page content freely.
      ACCESSING siteConfig — NESTED, not flat. `SiteConfig` is `{ header, footer }`; reading a field
      directly off `siteConfig` fails with TS2339 (`siteConfig.phone` DOES NOT EXIST). Contact details
      live under footer: `siteConfig.footer.phone` / `.email` / `.address` / `.openingHours`, plus
      `.tagline` / `.quickLinks` / `.socialLinks`. Branding/nav live under header:
      `siteConfig.header.brandName` / `.navLinks` / `.ctaButton`. The WhatsApp number is
      `siteConfig.footer.phone` (or the `siteConfig.footer.socialLinks` entry with `platform === 'whatsapp'`).
+     `openingHours` is a STRING — render it directly, never `.map()` it. Fields NOT on SiteFooterProps
+     (e.g. map coordinates) do NOT live on siteConfig: read map lat/lng from the BUSINESS CONTEXT in the
+     user prompt and hold them as page-local `const` values.
 2. SECTION CONTAINERS: <section className="py-16 px-4"><div className="max-w-7xl mx-auto">…</div></section> — content never touches viewport edge.
 3. RESPONSIVE GRIDS: grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 — never fixed column counts on mobile.
 4. RESPONSIVE TYPOGRAPHY: hero h1 = text-4xl md:text-6xl font-bold; section headings = text-2xl md:text-3xl font-semibold.

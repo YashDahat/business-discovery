@@ -128,17 +128,10 @@ Add to EVERY project in addition to Steps 1–2, never displacing a derived file
   Backend (PLAN THESE): GlobalExceptionHandler, ErrorResponse.
   SpaController is PRE-SCAFFOLDED by the foundation — DO NOT PLAN it.
 
-  Frontend (PLAN THIS — exactly once, in the shared-frontend or core-ui feature):
-    src/config/siteConfig.ts — the site shell configuration. This file supplies the
-    SiteHeader and SiteFooter with ALL business-specific content and design tokens via props.
-    It is the ONLY place Header/Footer content is authored. Generate it as a named const
-    that exports a SiteConfig object (import type { SiteConfig } from '@/shell'):
-      header: { brandName, navLinks, ctaButton, bgClass, textClass, hoverClass, ctaClass }
-      footer: { brandName, tagline, address, phone, email, openingHours, quickLinks, socialLinks,
-                bgClass, textClass, accentClass }
-    navLinks must cover every public route in the plan. ctaButton should be the primary
-    conversion action (book table / order now / join / enquire). bgClass/textClass/accentClass
-    must use Tailwind classes that match the business's brand palette.
+  Frontend site shell — DO NOT PLAN:
+    src/config/siteConfig.ts is DERIVED by the worker (brand + nav from the route table, contact
+    details from the brief) and written to disk directly — do NOT plan or generate it. Pages import
+    { siteConfig } from '@/config/siteConfig' and READ it (nested { header, footer }).
     DO NOT generate Header.tsx, Footer.tsx, or Layout.tsx — these are pre-built in the
     foundation at @/shell and are closed for modification.
 
@@ -201,9 +194,9 @@ Add to EVERY project in addition to Steps 1–2, never displacing a derived file
       axios client and never set the Authorization header.
   (The site shell @/shell — SiteLayout/SiteHeader/SiteFooter — is likewise fenced; see Step 3.)
   You DO generate, referencing the above: ProtectedRoute.tsx (your route guard, NOT in the foundation),
-  AdminLayout.tsx, siteConfig.ts, and the Login/Signup/Admin pages. frontend/src/routes.ts,
-  frontend/src/AppRoutes.tsx, frontend/src/AppProviders.tsx and the frontend/src/App.tsx shell
-  are DERIVED from this plan — do NOT plan them. (App.tsx is a frozen shell mounting the provider
+  AdminLayout.tsx, and the Login/Signup/Admin pages. frontend/src/config/siteConfig.ts,
+  frontend/src/routes.ts, frontend/src/AppRoutes.tsx, frontend/src/AppProviders.tsx and the
+  frontend/src/App.tsx shell are DERIVED from this plan — do NOT plan them. (App.tsx is a frozen shell mounting the provider
   tree around <AppRoutes/>; the route table lives in the derived AppRoutes.tsx.)
 
   Frontend CART/COMMERCE FRAMEWORK — PRE-SCAFFOLDED (HEADLESS), DO NOT PLAN its files. A configurable,

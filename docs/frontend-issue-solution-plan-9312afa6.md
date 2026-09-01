@@ -147,13 +147,53 @@ Keep the foundation `AdminLayout` **untouched** (it already renders `<Outlet/>` 
 
 ---
 
-## 3. `siteConfig` shape mismatch (TS2339 on `openingHours` / `mapCoordinates`; missing `header`)
+## 3. `siteConfig` shape mismatch (TS2339 on `openingHours` / `mapCoordinates`; missing `header`) — ✅ IMPLEMENTED 2026-08-31 (v1, design tokens omitted)
+
+> **Status.** Legs 1–4 implemented + unit-verified; design tokens omitted for v1 (foundation defaults).
+> - **Legs 1–2 (mechanical):** new `SiteConfigGenerator.emit(manifest, brief, hasAuth)` — emits `frontend/src/config/siteConfig.ts` as the contract-shaped `{ header, footer }`, nav derived from the public `RouteManifest` entries (**Contact pinned last, Home first** — convention), brand/address/phone/openingHours from `BriefContext` (`openingHours` a string by construction), optional aesthetic fields omitted. `showAuth` ← auth flag; **`showCart` ← a `/cart` route is planned AND the business sells goods** (category/features `COMMERCE` signal, word-bounded to dodge workshop/marketing/delivery) — so a gym/salon shows no cart even with a scaffolded cart route. Wired in `FrontendGeneratorNode.synthesizeRouteRegistry` beside `emitRoutesTs`, PLAN_MARKER-fenced + added to `isFenced` + `markDerived`. Test: `SiteConfigGeneratorTest` (5) green; verified against the real abs-fitness brief (correct Pune address/phone, `showCart:false`, Contact last).
+> - **Leg 3 (prompt/plan):** flipped all four prompts (`file_generate*.txt`, `arch_outline.txt` ×2, `feature_enrichment.txt`) from "you must generate siteConfig.ts" → "it is DERIVED — do not plan/generate; import & read it".
+> - **Leg 4 (surface B, prompt):** stated `openingHours` is a string (never `.map()`), and map coordinates are page-local `const`s read from BUSINESS CONTEXT lat/lng, not siteConfig fields. `SiteConfigAccessPatcher` retained as belt-and-suspenders.
+> - **Deferred:** design-token mapping (`colorScheme` → Tailwind classes) — v2 if the default theme reads generic.
+
 
 **Issue.** `config/siteConfig.ts` is generated separately from the `SiteConfig` / `SiteFooterProps` contract in `shell/types.ts`; pages destructure footer fields that don't exist and the config omits `header`.
 
 **Already-available solution.** `SiteConfigAccessPatcher` (`FrontendValidationNode.java:100`) — deterministic, zero-LLM backstop that rewrites flat `siteConfig.<field>` → nested `siteConfig.footer.<field>` for fields living in exactly one section (`util/SiteConfigAccessPatcher.java`). Documented shape lives in `arch_outline.txt` and the foundation contract.
 
 **Gap.** The patcher fixes **flat-vs-nested access** of *existing* fields. It does **not** reconcile a `siteConfig.ts` whose *shape* diverges from the contract (missing `header`, `openingHours` typed as array vs string, non-existent `mapCoordinates`). Ambiguous/absent fields are deliberately left to the agent.
+
+**Real root cause (verified).** `siteConfig.ts` is **LLM-authored** — the foundation contract literally says *"You must generate `src/config/siteConfig.ts`"* (`webapp-foundation/frontend/FOUNDATION_CONTRACT.md:140`). The `SiteConfig` shape is fixed and foundation-fenced (`shell/types.ts`) and documented in **four** places (that contract, `FrontendContractCard`, `SiteConfigAccessPatcher`'s docstring, the prompts) — and the model still got it wrong. Same "contract ignored" pattern as #2. Two distinct surfaces:
+- **A — `siteConfig.ts` shape divergence.** The model authored a flat / header-less object and typed `openingHours` as an array; the `: SiteConfig` annotation then surfaced the mismatch (missing `header`, `openingHours` string-vs-array).
+- **B — pages reading fields that aren't on the contract.** `ContactPage` destructured `siteConfig.footer.mapCoordinates` (doesn't exist) and `.map()`-ed `openingHours` (a string) — it assumed `siteConfig` carries page-specific data. The agent's fix moved those to page-local constants (`GYM_HOURS`, `MAP_LAT`, `MAP_LNG`).
+
+**The data is derivable — so siteConfig should be mechanical, not LLM.** `SiteConfig` is config with a fixed contract, and almost every value is already in hand:
+- `header.brandName` / `footer.brandName` ← `BriefContext.businessName`
+- `header.navLinks` ← the **`RouteManifest`** public-nav entries (`gate !== 'admin' && nav`) — the *same single-source-of-truth* move as #2, which also kills nav-vs-config drift
+- `footer.address` ← `BriefContext.address`; `footer.phone` ← `BriefContext.phone`
+- `footer.openingHours` ← `BriefContext.openHours` — **already a formatted string**, so the array-type error (surface A) cannot recur by construction
+- `header.showAuth` / `showCart` ← the existing `Flags` (auth context / cart present)
+- everything else (`email`, `socialLinks`, `tagline`, design tokens `bgClass`/…) is **optional** in the contract → omit and the shell's built-in defaults apply
+- `latitude` / `longitude` are in `BriefContext` too — confirming the map data belongs to the **page**, not siteConfig (exactly the agent's manual conclusion)
+
+### Solution (planned) — Option A: scaffold `siteConfig.ts` mechanically, mirror the routes.ts move
+
+Take `siteConfig.ts` off the LLM's plate the same way `routes.ts` / `App.tsx` / `AppRoutes.tsx` already were. Legs, mechanical-first:
+
+**1. New `SiteConfigGenerator` (primary, mechanical).** Emit `frontend/src/config/siteConfig.ts` as `export const siteConfig: SiteConfig = { header, footer }` (named export + `import type { SiteConfig } from '@/shell'`, matching the foundation import style) from `BriefContext` + `RouteManifest`, wired into `FrontendGeneratorNode` right beside the existing `emitRoutesTs` call (`nodes/FrontendGeneratorNode.java:508-534` — both the manifest and `ctx.getBriefCtx()` are already in scope there). Carries a PLAN_MARKER so the ErrorFixAgent won't hand-edit it. Fields as mapped above; omit optional aesthetic fields in v1 (foundation defaults cover them). This makes the shape and `openingHours` type correct **by construction** — surface A disappears.
+
+**2. navLinks single-source-of-truth (folded into leg 1).** `header.navLinks` is derived from the `RouteManifest` (`label` ← `Entry.label`, `href` ← `Entry.path`), so the header nav, the config, and the route table can never drift — the same principle as #2, and consistent with the nav-filter hint the prompts already document.
+
+**3. Remove it from the LLM plate (prompt/plan).** Strip `config/siteConfig.ts` from the file manifest (`ProjectPlanningNode` "do not plan" list, alongside `App.tsx`/`routes.ts`) and flip the guidance in the four prompts + the foundation note from *"You must generate siteConfig.ts"* → *"siteConfig.ts is DERIVED from the plan + brand/contact data — do NOT generate it."* Exactly the move already made for `routes.ts` in `arch_outline.txt`.
+
+**4. Surface B (secondary, prompt + context).** State that page-specific data is **not** on `siteConfig`: map coordinates come from the brief's `latitude`/`longitude` injected into the page as local constants, and `openingHours` is a **string** (never `.map()` it). Optionally inject `lat`/`lng` into the `ContactPage` generation context so it uses real values instead of inventing `siteConfig.footer.mapCoordinates`. `SiteConfigAccessPatcher` stays as the belt-and-suspenders for any residual flat access.
+
+**Why mechanical, not "just fix the prompt/contract" (the tempting Option B).** The contract was already spelled out in four places and still ignored — the same failure mode as #2's admin wrapper. `siteConfig` is derivable config, not creative content; deriving it guarantees the shape and types are right every run, removes an error cluster from the LLM entirely, and makes the header nav provably consistent with the route table. The optional aesthetic bits that *are* creative (colors, tagline, social) are exactly the ones the contract marks optional, so omitting them costs nothing.
+
+### Confirmed
+
+- **`SiteConfig` is foundation-fenced and mostly-optional** (`shell/types.ts`: only `brandName` + `navLinks` required; `openingHours?: string | null`). A mechanical scaffold that fills the required + brief-derived fields and omits aesthetic optionals is fully valid and type-checks.
+- **All derivation inputs exist at the wiring point.** `BriefContext` (`service/llm/BriefContext.java`) provides `businessName`, `address`, `phone`, `openHours` (string), `latitude`, `longitude`; the `RouteManifest` provides nav. `FrontendGeneratorNode:508-534` already emits `routes.ts` there with both in scope — so `siteConfig.ts` slots in with no new plumbing.
+- **Open question (design choice):** design tokens (`bgClass`/`textClass`/`accentClass`…) — omit in v1 (foundation dark-theme defaults) or add a small `colorScheme` → Tailwind-class mapping from `BriefContext.colorScheme`/`designDirection`. Recommend omit for v1; add the mapping as a follow-up if the default theme reads as generic.
 
 ---
 
@@ -164,6 +204,47 @@ Keep the foundation `AdminLayout` **untouched** (it already renders `<Outlet/>` 
 **Already-available solution.** **None specific.** No enum/type-as-value patcher exists (grep for `nativeEnum` / `z.enum` finds only `RouteManifestGenerator`, unrelated). The TS type generator emits the union as a type only.
 
 **Gap.** Full gap. Options space (for later): emit backend enums as a runtime `as const` object + derived type so both value and type positions resolve; or a prompt rule pairing `z.enum([...])` with a plain const array.
+
+**Real root cause (verified).** `TsTypeGenerator.java:134-138` emits every backend enum as a **type-only union** (`export type InquiryType = 'FREE_TRIAL' | 'TOUR_BOOKING' | 'GENERAL_INQUIRY'`). A type has no runtime existence, so the moment a consumer needs the *values* — dropdown options, a zod schema, `Object.values` — there is nothing to read. In 9312afa6 the agent worked around it by **hand-duplicating the literals three times** in `LeadCaptureForm.tsx`: `const INQUIRY_TYPES: InquiryType[] = ['FREE_TRIAL','TOUR_BOOKING','GENERAL_INQUIRY']`, `z.enum(['FREE_TRIAL','TOUR_BOOKING','GENERAL_INQUIRY'])`, and `'GENERAL_INQUIRY' as InquiryType` — three copies, each free to drift from the backend enum.
+
+### Target format (requested)
+
+Emit each backend enum as a runtime **const object + a same-named derived type**:
+```ts
+export const InquiryType = {
+  GENERAL: 'GENERAL',
+  MEMBERSHIP: 'MEMBERSHIP',
+  TRAINING: 'TRAINING',
+  COMPLAINT: 'COMPLAINT',
+} as const;
+
+export type InquiryType = typeof InquiryType[keyof typeof InquiryType];
+```
+`InquiryType` is now BOTH a value and a type under one name (legal TS — the value and type namespaces merge). Values are the enum **constant names**, matching the union the generator already emitted and Jackson's default name serialization — so the wire contract is unchanged. Every position now resolves: `InquiryType.GENERAL` (value), `Object.values(InquiryType)` (values), `z.nativeEnum(InquiryType)` (zod), `x: InquiryType` (type).
+
+### Solution (planned) — mechanical emission + value-import correctness
+
+**1. `TsTypeGenerator` enum emission (primary, mechanical).** Replace the union at `:134-138` with the const-object + derived-type block above. Single source of truth — the literal triplication disappears.
+
+**2. Import correctness (the one real gotcha).** A const object is a VALUE, so a consumer that uses it as a value must **value-import** it (`import { InquiryType }`), not `import type` — under `isolatedModules`/`verbatimModuleSyntax` a type-only import used as a value is a hard error. Two parts:
+- The generated **type files** (cross-imports at `:128`) and the **SDK** (`TsSdkGenerator`'s `import type` at ~`:89`) reference enums only in TYPE positions → `import type` stays correct there; no change needed.
+- **LLM consumers are the risk** (the real form did `import type { InquiryType }` and then read its values). Handle both ways:
+  - **Prompt** (`file_generate_frontend.txt`, the ZOD/types rules ~`:91`): enums from `@/types` are const objects — import them as VALUES (`import { X }`), consume via `z.nativeEnum(X)` / `Object.values(X)` / `X.MEMBER`; NEVER re-list the literal strings or `import type` an enum you read values from.
+  - **Mechanical net (belt-and-suspenders): new `EnumValueImportPatcher`** in `FrontendValidationNode`'s deterministic pass. Given the set of const-object enum names (from the generated type files / `TypeScriptExportRegistry`), for any frontend file that uses an enum in a value position (`X.`, `Object.values(X)`, `z.nativeEnum(X)`, `X[`) but imported it via `import type { X }`, upgrade to `import { X }`. Same family as `TanStackImportFixer` / `SiteConfigAccessPatcher`; makes it correct even when the prompt is ignored (the recurring lesson from #2/#3).
+
+**3. Update the (currently-red) enum test.** `TsGeneratorsTest.emitsInterfacesAtPlannedPathsWithNullabilityAndEnums` (`:100`) asserts the old `export type BookingStatus = 'CONFIRMED' | 'CANCELLED_BY_USER'` — rewrite it to assert the const-object + derived type. (It is on the pre-existing-failure list; this aligns it to the new emission.)
+
+**Why mechanical, not prompt-only.** The value/type duality is a TypeScript representation problem with exactly one correct encoding — deriving it in the generator gives every consumer one runtime source of truth and ends the hand-maintained literal arrays. A prompt asking the model to "keep a const array in sync with the type" just re-introduces the drift it's meant to remove.
+
+### Confirmed
+
+- **Wire contract unchanged:** const values are the enum constant NAMES — identical to the union already emitted and to Jackson's default serialization; backend and frontend stay in agreement.
+- **Legal TS:** `export const InquiryType` + `export type InquiryType` coexist (value + type namespaces); safe under `isolatedModules`/`verbatimModuleSyntax` since the const is a real runtime export.
+- **zod (source-verified against the installed `node_modules/zod@3.25.76`):** the default `import { z } from 'zod'` resolves to **v3 classic** (`src/index.ts` → `./v3/external.js`). There, `z.enum` (`createZodEnum`) accepts **only a string tuple `[U, ...U[]]`** — a const object does NOT typecheck; `z.nativeEnum` (`EnumLike`) is the form that accepts the const object. In the bundled v4, `z.nativeEnum` still exists (`v4/classic/schemas.ts:1510`, **deprecated, not removed**) and `z.enum` gains a const-object overload. So:
+  - **Use `z.nativeEnum(InquiryType)`** — valid on the current v3 pin, and *deprecated-but-functional* if the pin ever moves to `^4` (a lint/JSDoc warning, build still passes → "merely dated", never broken).
+  - Do **NOT** steer to `z.enum(InquiryType)` now — that const-object form is **v4-only** and would fail to compile on the installed v3.
+  - *Fully version-proof option (no deprecation, both majors):* also emit a companion `export const InquiryTypeValues = ['GENERAL', ...] as const;` and use `z.enum(InquiryTypeValues)` (valid via v3's `Readonly<[U,...U[]]>` overload and v4's `readonly string[]` overload); the tuple doubles as a dropdown array. Cost: one extra generated export per enum.
+- **SDK unaffected:** `TsSdkGenerator` uses enums only in signatures, so its `import type` remains valid.
 
 ---
 
