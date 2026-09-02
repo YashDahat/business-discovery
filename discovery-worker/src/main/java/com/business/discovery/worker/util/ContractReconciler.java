@@ -112,6 +112,12 @@ public final class ContractReconciler {
                 continue;
             }
 
+            // Issue #5 backstop: the Pro call can emit an intra-component object-vs-id asymmetry on
+            // row-action callbacks (onEdit takes the object, onDelete takes the id). The parent page's
+            // handler is not a contract we can pin, so we normalize the CHILD contract to the shape the
+            // parent inevitably writes — the full row object — before it is written back to the spec.
+            RowActionContractNormalizer.normalize(contracts);
+
             for (FileContract c : contracts) {
                 FileSpec target = resolve(byPath, c.module());
                 if (target == null) continue;

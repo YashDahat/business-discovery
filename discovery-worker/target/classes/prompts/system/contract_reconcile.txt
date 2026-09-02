@@ -51,5 +51,14 @@ Rules:
    referenced type undefined — if a consumer needs a type, some producing file here must declare it.
    Data props on the frontend MUST use the exact backend DTO name.
 5. Keep interfaces minimal but complete: exactly what the feature's call/render relationships require.
+6. ROW-ACTION CALLBACKS TAKE THE FULL ROW OBJECT — never a bare id. On any list/table component (one
+   with an `items`/`rows`/`<domain>s: XDto[]` prop), EVERY per-row action callback (`onEdit`, `onDelete`,
+   `onView`, `onSelect`, `onRowClick`, `onArchive`, `onApprove`, `onReject`, `onToggle*`, …) MUST take the
+   row DTO: `on<Verb>: (item: XDto) => void`. Keep them ALL identical — do NOT mix `onEdit: (x: XDto)`
+   with `onDelete: (id: number)`. The list already holds the object; the handler reads `item.id` itself.
+   This is the ONE convention the parent page and the child table must share; asymmetry here forces the
+   page to write one handler by object and one by id and is the top cause of prop type errors. (This does
+   NOT apply to table CONTROLS — `onSort: (column: string)`, `onPageChange: (page: number)`,
+   `onSearch: (query: string)`, `onSelectAll: (checked: boolean)` — leave those exactly as they are.)
 
 Output the JSON object and nothing else.
