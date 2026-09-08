@@ -160,6 +160,23 @@ public class ProjectPlanningNode implements WorkerNode {
         var foundationSymbols =
                 com.business.discovery.worker.util.FoundationSymbolRegistry.buildFromWorkspace(workspace);
 
+        // Load the foundation feature manifest beside the fenced-symbol registry (§5, OCP onboarding).
+        // Honours a foundation-shipped foundation.manifest.json when present; otherwise the built-in
+        // default declaration is used. The seam projections (FOUNDATION_CONTROLLERS / GUARD_NAMES /
+        // fenced names / route gates) derive from this single declaration. Pruning is deferred, so the
+        // kept closure is the full feature set — this load validates a shipped manifest parses and
+        // surfaces it; it is the plumbing the deferred pruning half will thread the pruned closure into.
+        var foundationManifest =
+                com.business.discovery.worker.util.FoundationManifest.load(workspace);
+        log.info("[ProjectPlanningNode] Foundation manifest: {} feature(s), {} skip-SDK controller(s)",
+                foundationManifest.features().size(), foundationManifest.foundationControllers().size());
+
+        // Card-integrity drift check (§8): surface a stale/absent FOUNDATION_CONTRACT.md as a LOUD
+        // build-time warning here, rather than letting it reach the generator as wrong ground truth
+        // and surface far downstream as a generated-code compile failure. Warnings only — never fails.
+        com.business.discovery.worker.util.FoundationCardIntegrity.check(
+                workspace, foundationManifest, foundationSymbols);
+
         // ── Decide what to skip ───────────────────────────────────────────────
         boolean hasChanges = briefCtx.requestedChanges() != null && !briefCtx.requestedChanges().isBlank();
         // Load existing spec whenever it exists — even for requestedChanges runs.
@@ -1222,7 +1239,10 @@ public class ProjectPlanningNode implements WorkerNode {
 
             // WorkerException (CODE/INFRA) propagates immediately — no catch-and-swallow
             // (enrichFeature mutates `feature` in place; it remains referenced by spec.features)
-            enrichLlm.enrichFeature(feature, featureFiles, peerSummaries, briefCtx, workspaceReader, dependents);
+            // The planner's kept foundation set is fed as declared context so enrichment names the
+            // fenced handles verbatim and emits this feature's consumes_foundation edge (§6b Part B).
+            enrichLlm.enrichFeature(feature, featureFiles, peerSummaries, briefCtx, workspaceReader,
+                    dependents, null, spec.getFoundationFeatures());
 
             // Checkpoint after every feature — enables resume on container retry
             try {
@@ -1300,7 +1320,7 @@ public class ProjectPlanningNode implements WorkerNode {
 
             try {
                 enrichLlm.enrichFeature(owner, ownerFiles, peerSummaries, briefCtx,
-                        workspaceReader, dependents, path);
+                        workspaceReader, dependents, path, spec.getFoundationFeatures());
             } catch (WorkerException e) {
                 log.warn("[ProjectPlanningNode] Self-heal re-enrichment of '{}' failed on attempt {}: {}",
                         backEdgeOwner, heal, e.getMessage());

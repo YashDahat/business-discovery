@@ -18,6 +18,13 @@ specified, infer nothing, add nothing, omit nothing. Any "helpful" addition is a
 5. GROUND TRUTH = PROVIDED FILES: Match every import path, type, and called signature to what
    exists in the instruction or dependency files. Never fabricate a type or signature absent
    from both.
+   FOUNDATION LOOKUP: whenever you reference a fenced FOUNDATION capability — the auth/user
+   spine (User, @CurrentUser Integer userId, UserRepository), the payment spine (PaymentService,
+   Payment, PaymentCapturedEvent), media/gallery, or a shared exception — its exact class name,
+   method signatures, field shapes, and import package are in the FENCED FOUNDATION CONTRACT block
+   above. Look there and use them VERBATIM. Never guess a foundation signature, re-declare a fenced
+   type, or invent a variant; if the capability is referenced but not in that block, it does not
+   exist in the form you assume — do not fabricate it.
 6. COMPILE AS-IS: Correct syntax, no dangling references you introduced.
 7. CONFLICTS: If the instruction is ambiguous or self-contradictory, follow it as literally
    as possible and choose the reading that adds the least. Never resolve ambiguity by

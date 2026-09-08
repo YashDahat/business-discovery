@@ -59,6 +59,30 @@ class FeatureCardTest {
     }
 
     @Test
+    void consumesFoundation_rendersInPromptSection_pointingAtFencedContract() {
+        FeatureCard card = FeatureCard.builder()
+                .featureName("order-management")
+                .featureDisplayName("Order Management")
+                .featureType("BACKEND")
+                .consumesFoundation(List.of("payment", "auth"))
+                .files(List.of(FeatureCard.FileRef.builder()
+                        .path("backend/src/main/java/com/x/OrderService.java")
+                        .role("SERVICE — order logic").build()))
+                .build();
+
+        String out = card.toPromptSection("backend/src/main/java/com/x/OrderService.java");
+
+        assertThat(out).contains("Consumes foundation features: payment, auth");
+        assertThat(out).contains("FENCED FOUNDATION");
+    }
+
+    @Test
+    void consumesFoundation_absent_rendersNoFoundationLine() {
+        String out = mixedFeature().toPromptSection("backend/src/main/java/com/x/OrderService.java");
+        assertThat(out).doesNotContain("Consumes foundation features");
+    }
+
+    @Test
     void buildFeatureContext_appendsInstruction_andHandlesNullCard() {
         String withCard = FeatureCard.buildFeatureContext(mixedFeature(),
                 "backend/src/main/java/com/x/OrderService.java", "EFFECTIVE INSTRUCTION HERE");

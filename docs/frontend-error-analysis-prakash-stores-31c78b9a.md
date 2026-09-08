@@ -340,3 +340,535 @@ Solution A removes the *contradiction*; a body-level field-access guard (Solutio
 deterministic backstop for residual shown-but-ignored drift (a component reading `x.field` not on the
 conformed DTO). A is the cure, B is the guarantee — same "steer at the source + mechanical backstop"
 split used for the issue-5 row-action normalizer.
+
+---
+
+## Appendix — Generation context: backend vs frontend
+
+Both generators end at the **same** LLM call —
+`LlmGeneratorService.generateFileContent(filePath, fileRole, depFiles, existingContent, sharedContext, featureContext)`
+(`LlmGeneratorService.java:525`) — which assembles the prompt as:
+
+- **System prompt** = `system/file_generate_{backend|frontend}.txt` **+ `sharedContext`** (the cacheable, run-constant prefix)
+- **User prompt** (`user/file_content.txt`) = `filePath` + **`featureContext`** + **`fileRole`** + **`depFiles`** (`formatFilesSection`) + `existingSection`
+
+So the *shape* is identical on both sides. What differs is **what each side pours into `depFiles` and `sharedContext`** — and that difference is the whole story of why the frontend drifts more.
+
+### The two slots that differ
+
+| Prompt slot | Backend (`BackendGeneratorNode.generateWithLlm:340`) | Frontend (`FrontendGeneratorNode.runGenerateStage:631`) |
+|---|---|---|
+| **`depFiles`** (user prompt) | **Real dependency file BODIES** — `loadDependencyFiles:421` reads every `importsFrom`/`dependsOn` path off disk, **stamps the RECONCILED interface** on top (`stampReconciledInterface:468`), **plus auto-resolves class names** mentioned in the role/instruction to their on-disk source. The model sees actual code of its dependencies. | **No bodies.** Only two *catalogs*: `AVAILABLE UI IMPORTS` (shadcn/ui inventory) and `MODULES THAT ALREADY EXIST` (`exportRegistry.toImportCatalog()` — names/paths only). Registry-only referencing (`:636`); `importsFrom` was abandoned here (~27% empty). |
+| **`sharedContext`** (system prompt) | `foundationContract` + **`backendContractCard`** (the reconciled backend contract). Two byte-identical blocks (`sharedContext():362`). | `foundationContract` + **`ApiContractCard`** (backend DTO/endpoint ground truth) + **route card** + **`frontendContractCard`** (incremental hook/context/type sigs from prior layers) + **`plannedPropsCard`** (component props, for component/page files) + **`frontendPlannedContractCard`** (planned hooks/services/types). Six blocks (`:664-700`). |
+
+### What is IDENTICAL on both sides
+
+- **`fileRole`** = `FileContractCard.render(spec, fileRole)` — this file's own contract (purpose + fields + signatures + endpoints).
+- **`featureContext`** = `FeatureCard.buildFeatureContext(card, path, instruction)` — enrichment identity + sibling map + effective instruction.
+- **`existingContent`** — only populated in requested-changes mode.
+
+### Diagram
+
+```
+                     generateFileContent(path, fileRole, depFiles, existingContent, sharedContext, featureContext)
+                                                          │
+              ┌───────────────────────────────────────────┴───────────────────────────────────────────┐
+              │                                                                                         │
+        ┌─────▼──────┐  BACKEND                                                          FRONTEND  ┌─────▼──────┐
+        │ SYSTEM     │                                                                             │ SYSTEM     │
+        │ PROMPT     │  file_generate_backend.txt                                                  │ PROMPT     │  file_generate_frontend.txt
+        │            │  + sharedContext:                                                           │            │  + sharedContext (contractSection):
+        │            │      • foundationContract                                                   │            │      • foundationContract   (FIRST)
+        │            │      • backendContractCard  (reconciled BE contract)                        │            │      • ApiContractCard      (BE DTOs/endpoints = ground truth)
+        │            │                                                                             │            │      • route card
+        │            │                                                                             │            │      • frontendContractCard (incremental, prior layers)
+        │            │                                                                             │            │      • plannedPropsCard     (component props — comp/page only)
+        │            │                                                                             │            │      • frontendPlannedContractCard (planned hooks/services/types)
+        └────────────┘                                                                             └────────────┘
+        ┌────────────┐  USER PROMPT (user/file_content.txt)                                        ┌────────────┐  USER PROMPT (same template)
+        │ featureCtx │  = FeatureCard.buildFeatureContext        ── IDENTICAL MECHANISM ──         │ featureCtx │  = FeatureCard.buildFeatureContext
+        │ fileRole   │  = FileContractCard.render(spec, role)    ── IDENTICAL MECHANISM ──         │ fileRole   │  = FileContractCard.render(spec, role)
+        │            │                                                                             │            │
+        │ depFiles   │  = REAL DEPENDENCY FILE BODIES               ◄── THE KEY DIFFERENCE ──►     │ depFiles   │  = CATALOGS ONLY (no bodies):
+        │            │      • importsFrom / dependsOn bodies                                       │            │      • AVAILABLE UI IMPORTS (shadcn inventory)
+        │            │      • + RECONCILED interface stamped on top                                │            │      • MODULES THAT ALREADY EXIST
+        │            │      • + auto-resolved class-name mentions                                  │            │        (exportRegistry catalog: names/paths)
+        └────────────┘                                                                             └────────────┘
+```
+
+### Why this matters for the drift in this report
+
+The backend consumer is handed the **actual source** (or at least the stamped reconciled interface) of every type it depends on, so field-level drift is caught at authoring time. The frontend consumer is handed only **names, paths, and card-level signatures** — never the producer's body. That is precisely why Themes A–D land on the frontend: a component authored against a *catalog entry* for `ProductDto` can still invent `variants`/`additionalImages`, and a page binding to `ClassTable`'s *planned prop line* can still restyle the handler symmetrically — the real signature is never in front of it. This is the gap the `import_from`-injection follow-up targets: give the frontend the backend's treatment (inject the dependency's reconciled interface into `depFiles`), interface-only to control tokens.
+
+---
+
+## Appendix B — Frontend context after the overlap refactor
+
+### The problem being removed
+
+Today every frontend file (component, page, hook, service, type) receives the **same six cards**, several of which describe the *same entity twice* — once from the stale static plan, once from disk — and one whole layer (the API service SDK) that a component/page must never call directly (it consumes hooks). Three overlaps: **services** (triple-covered + irrelevant to components/pages), **DTOs/wire types** (full verbatim in `ApiContractCard` *and* interface-only in `FrontendPlannedContractCard`), **hooks/contexts** (planned *and* actual, possibly divergent).
+
+### Key fact that drives the cut: hooks and services are MECHANICAL, not LLM
+
+`ApiArtifactGeneratorNode.execute` (`:103-120`) derives **types** (`TsTypeGenerator`), **services** (`TsSdkGenerator` — one function per endpoint), and **hooks** (`FrontendHookGenerator` — one TanStack hook per service) and writes them to disk with **no LLM**. Consequences:
+
+- **No LLM call ever authors a hook or service** → the **API SDK / service signature has no LLM consumer** → it is dropped from generation context **entirely** (not merely gated). The only files that call the SDK are hooks, which are mechanical.
+- Derivation runs **before** component/page generation, so the **actual** hook/type signatures are already on disk → the *planned* card (`FrontendPlannedContractCard`) is redundant on the normal path (only the rare parser-gap LLM fallback needs it).
+- The **only** wire-contract context an LLM generation needs: **full DTO/model shapes** + **hook signatures**.
+
+### The refactor in one line
+
+Own each entity once, keep the deterministically-enumerable contracts **global**, and apply "**full body for DTOs/models, signature-only for hooks**":
+
+- **DTOs / wire models** → `ApiContractCard` **full verbatim**, all files (global).
+- **Hook signatures** → from **actual** derived hooks on disk, all component/page files (global). *Planned* only as parser-gap fallback.
+- **API services (SDK)** → **NOT injected to any LLM prompt** (no LLM consumer exists).
+- **Component props, local types, utils** → unchanged owners.
+- **`import_from`** → additive-only, for the *same-layer sibling-component* seam; mechanically derived from the render graph, never trusted from the planner.
+
+### Context by file role (after)
+
+Only **components and pages** are LLM-generated on the frontend (types/services/hooks are mechanical, above). So there is effectively one LLM-context profile:
+
+```
+   LLM-GENERATED FRONTEND FILES = COMPONENTS + PAGES only
+   (types/services/hooks are derived mechanically → never hit generateFileContent)
+
+                         ┌───────────── COMPONENT / PAGE prompt ─────────────┐
+                         │  SYSTEM PROMPT = file_generate_frontend.txt + sharedContext (cache order ↓)
+                         │                                                    │
+   cache-stable prefix ──┤   1. foundationContract              (static, global)
+   (leads the prompt)    │   2. WIRE TYPES — FULL verbatim DTOs (static, global) ◄── models: full body
+                         │   3. route card                      (static, global)
+                         │   4. component props (PlannedProps)  (static)      │
+                         │        ✗ NO API service / SDK context (no LLM consumer — hooks are mechanical)
+                         │        ✗ NO planned hook/type card   (actual is on disk; see tail)
+                         │                                                    │
+   cache-tail (GROWING) ─┤   N. frontendContractCard (actual, incremental) — placed LAST
+                         │        • ACTUAL hook signatures (derived hooks already on disk)
+                         │        • actual sibling-component props (prior layers)
+                         └───────────────────────┬────────────────────────────
+
+   USER PROMPT (per file):
+     • featureContext  = FeatureCard.buildFeatureContext
+     • fileRole        = FileContractCard.render(spec, role)
+     • depFiles        = ── EXISTENCE LAYER (registries — names/paths, NOT shape) ──
+                         • UiComponentInventory          → "AVAILABLE UI IMPORTS" (real shadcn/radix)
+                         • TypeScriptExportRegistry       → "MODULES THAT ALREADY EXIST" (toImportCatalog)
+                         ── SHAPE LAYER (this file's own deps) ──
+                         • [NEW] SIBLING-COMPONENT interfaces (import_from, render-graph derived, interface-only)
+
+   POST-GENERATION (deterministic, never in prompt):
+     • TypeScriptExportRegistry → TypeScriptImportFixer (fix @/ + relative paths)
+     • NodeModuleExportRegistry → LucideIconValidator / UiImportRewriter (validate node_modules exports)
+```
+
+**Cards vs registries — two different layers.** Everything in `sharedContext` above is a **Card** (semantic *shape*: fields, signatures, endpoints). The registries in `depFiles` are the **existence layer** (*namespace*: which modules/symbols exist and their exact import path). A registry gives the LLM a real *name* to import; a Card/`import_from` gives its *shape*. The export catalog is the global existence net that keeps import specifiers real even when `import_from` is incomplete — so it stays global and is untouched by the scoping.
+
+**Duplicates between the two layers (audited):**
+- **Registry ↔ registry: none.** `UiComponentInventory` and `TypeScriptExportRegistry` are cleanly partitioned — `seedExportRegistryFromDisk` explicitly excludes `/components/ui/` (`FrontendGeneratorNode.java:800`, comment *"shadcn handled by UiInventory"*), and `ui/` components are installed by shadcn, never planned as generation entries, so they never reach the export registry via the generated/skipped register paths either. UiInventory owns `components/ui/` + the shadcn/radix kit; exportRegistry owns everything else on disk.
+- **Card ↔ registry: identifier-level only, benign.** Every module a shape Card renders (`ApiContractCard` types, `FrontendContractCard` hooks/contexts/local-types) also has its name/path listed in the export catalog — so the module *identity* is stated twice (once as "it exists at path X," once as "here is X's shape"). This is complementary, not contradictory (names can't disagree), and costs only tokens. The catalog's unique value is the existence-only modules **no** Card covers — pages, `ui/`, derived types, services. Optional trim: scope the catalog to those, so it stops restating identities the Cards already carry. Much lower priority than the card↔card dedup, which removes actual *contradiction*.
+
+**What about an import NOT in `import_from`?** It still resolves, because the enumerable contracts stay global and never depend on `import_from`:
+
+| Import kind | Source | Needs `import_from`? |
+|---|---|---|
+| DTO / model | global WIRE TYPES (full) | no |
+| hook | global actual hook signatures | no |
+| service / SDK | never imported by components (arch rule) | no |
+| any existing module's path | global export catalog | no |
+| same-layer sibling component | `import_from` (render-graph-derived) → else `ErrorFixAgent` | **only case** |
+
+So `import_from` is purely additive for the same-layer sibling-component seam; its incompleteness degrades to an `ErrorFixAgent` fix, never a silent invented field.
+
+### Backend vs refactored frontend (same view as Appendix A)
+
+```
+                     generateFileContent(path, fileRole, depFiles, existingContent, sharedContext, featureContext)
+                                                          │
+              ┌───────────────────────────────────────────┴───────────────────────────────────────────┐
+              │                                                                                         │
+        ┌─────▼──────┐  BACKEND (unchanged)                                    FRONTEND (refactored)  ┌─────▼──────┐
+        │ SYSTEM     │  file_generate_backend.txt              (LLM authors ALL .java)                │ SYSTEM     │  file_generate_frontend.txt   (LLM authors COMPONENTS + PAGES only;
+        │ PROMPT     │  + sharedContext:                                                              │ PROMPT     │                                types/services/hooks are MECHANICAL)
+        │            │      • foundationContract                                                      │            │  + sharedContext (cache order):
+        │            │      • backendContractCard  (reconciled BE contract)                           │            │   ── static prefix (leads, prefix-cached) ──
+        │            │                                                                                │            │      • foundationContract
+        │            │                                                                                │            │      • WIRE TYPES — FULL verbatim DTOs  ◄── models: full body
+        │            │                                                                                │            │      • route card
+        │            │                                                                                │            │      • component props (PlannedProps)
+        │            │                                                                                │            │      ✗ NO API SDK / service context (no LLM consumer)
+        │            │                                                                                │            │   ── growing tail (last) ──
+        │            │                                                                                │            │      • frontendContractCard (actual): ACTUAL hook sigs
+        │            │                                                                                │            │        + sibling-component props from prior layers
+        └────────────┘                                                                                └────────────┘
+        ┌────────────┐  USER PROMPT (user/file_content.txt)                                           ┌────────────┐  USER PROMPT (same template)
+        │ featureCtx │  = FeatureCard.buildFeatureContext        ── IDENTICAL MECHANISM ──            │ featureCtx │  = FeatureCard.buildFeatureContext
+        │ fileRole   │  = FileContractCard.render(spec, role)    ── IDENTICAL MECHANISM ──            │ fileRole   │  = FileContractCard.render(spec, role)
+        │            │                                                                                │            │
+        │ depFiles   │  = SHAPE: REAL DEPENDENCY FILE BODIES         ──► NOW CONVERGING ◄──           │ depFiles   │  = EXISTENCE (registries, in-prompt):
+        │            │      • importsFrom / dependsOn bodies                                          │            │      • UiComponentInventory (shadcn/radix)
+        │            │      • + RECONCILED interface stamped on top                                   │            │      • TypeScriptExportRegistry catalog
+        │            │      • + auto-resolved class-name mentions                                     │            │    SHAPE: [NEW] sibling-component interfaces
+        │            │    EXISTENCE registry NOT in prompt:                                           │            │      • import_from (render-graph, interface-only)
+        │            │      • JavaClassRegistry → post-gen only                                       │            │                                            │
+        │            │        (JavaImportResolver rewrites imports)                                   │            │  EXISTENCE registry also post-gen:         │
+        │            │                                                                                │            │      • TS/Node registries → ImportFixer     │
+        └────────────┘                                                                                └────────────┘
+                        FULL BODIES  ◄─────────────── the one deliberate difference ──────────────►  INTERFACE-ONLY
+      registry: POST-GEN RESOLVER (JavaImportResolver)  ◄── existence-layer asymmetry ──►  registry: IN-PROMPT CATALOG + post-gen fixer
+```
+
+**Read against Appendix A:** the two sides used to diverge on *both* slots — backend fed real dependency bodies, frontend fed only app-wide catalogs. After the refactor they **converge in shape**: both scope `sharedContext` (backend by contract; frontend to just what a component/page consumes) and both inject *this file's own dependency interfaces* into `depFiles`. Deliberate differences that remain:
+
+1. **Body depth** — backend pastes full bodies, frontend interface-only (JSX bodies are noise a consumer never needs).
+2. **DTOs are the frontend exception** — they ride `sharedContext` as **full verbatim**, because the field list *is* the contract.
+3. **No service-layer context on the frontend** — services and hooks are generated mechanically, so no LLM ever consumes an SDK signature (unlike the backend, where the LLM writes every layer).
+4. **Existence-layer (registry) asymmetry** — the frontend hands the LLM an **in-prompt catalog** of what exists (`UiComponentInventory` + `TypeScriptExportRegistry`) so it imports real symbols, then `TypeScriptImportFixer` cleans residue. The backend puts **no registry in the prompt**: `JavaClassRegistry` is used purely **post-generation** by `JavaImportResolver` to rewrite wrong package prefixes and add missing project imports. Same goal (bind to real symbols), opposite ends — prompt-time catalog (FE) vs post-gen resolver (BE).
+
+### Before → after, at a glance
+
+| Entity | Before (all files) | After |
+|---|---|---|
+| Wire DTOs / models | full (ApiContract) **+** planned interface (FE-Planned) — duplicated, can contradict | **full only** (ApiContract), all files |
+| API services / SDK | on **every** file (ApiContract SDK + FE-Planned) | **removed from all LLM prompts** — no LLM authors hooks/services |
+| Hooks | planned **+** actual, both always on, can diverge | **actual signatures only** (derived hooks on disk); planned dropped |
+| Contexts | planned **+** actual | actual wins over planned |
+| Component props | planned (+ actual) | unchanged |
+| Cache order | growing card mid-prompt → evicts static tail | static leads, **growing card last** |
+
+### Why this is expected to reduce drift, not just tokens
+
+A component/page prompt drops from six broad, partly-contradictory cards to **exactly what it consumes**: full DTO shapes, the hook signatures it calls, its own props. Removing the service layer eliminates a block it should never act on; deduping planned-vs-actual removes the fork that lets the model pick the wrong signature (the shown-but-ignored / contradiction class behind Themes A–E). The `import_from` interface injection in `depFiles` then adds the one thing still missing — the *specific* reconciled interface of this file's own dependencies — mirroring what the backend already gets.
+
+### The three edits (implementation note)
+
+Status: **edits 1 & 2 applied + unit-verified (58/58: ApiContractCard 5, FrontendGeneratorNode 10, FrontendContractCard 32, PlannedComponentPropsCard 8, FrontendPlannedContractCard 3); edit 3 revised — see note below.** All three touch `FrontendGeneratorNode.runGenerateStage` / the cards it assembles.
+
+| # | Edit | Where | What changes | Why |
+|---|---|---|---|---|
+| **1** | **Drop the API SDK / service layer from LLM context** | `ApiContractCard.toPromptSection()` (`:124`) split into `types` vs `sdk`; `runGenerateStage` (`:664`) injects **WIRE TYPES only** for the frontend LLM path | Frontend component/page prompts no longer receive the `API SDK` section or backend routes; **full verbatim DTOs stay** | Services **and** hooks are mechanically derived by `ApiArtifactGeneratorNode` (`:103-120`) — no LLM authors them, so the SDK signature has no consumer. Only DTO *shape* is required. |
+| **2** | **Drop `FrontendPlannedContractCard`, dedupe to actual, reorder for cache** | `runGenerateStage` (`:690`) stops appending the planned card on the normal path (retain only as parser-gap fallback, `ApiArtifactGeneratorNode:95`); move the growing `frontendContractCard` to **last** in `contractSection` | Hook/type/context signatures come from **actual** on-disk derived files (`FrontendContractCard`), not the stale plan; static cards lead the prompt, growing card trails | Kills the planned-vs-actual fork (contradiction class behind Themes A–E) and stops the growing card from evicting the cache-stable static prefix. |
+| **3** | **~~Add per-file `import_from` interface injection~~ — NOT IMPLEMENTED (redundant)** | — | — | On implementation it turned out the same-layer sibling-component seam is **already closed** by `PlannedComponentPropsCard.toPromptSection()` (`:97`), which injects **every** component/page's props (= its interface) into every component/page prompt, from the static plan, cached, with no planner dependency. Injecting sibling interfaces again via `import_from` would only add a redundant, possibly-divergent second copy. See revision note. |
+
+> **Edit 3 revision.** `PlannedComponentPropsCard` already carries the sibling-component contract globally (props *are* the component interface). So edit 3 was **not** adding missing coverage — a faithful build would either (a) duplicate `plannedPropsCard` (adding a contradiction fork, the opposite of edits 1–2), or (b) *scope* those props per-file to reduce dilution, which **breaks `plannedPropsCard`'s cacheability** and needs a render graph the plan doesn't reliably expose (`import_from` was 31/81 empty). Since the seam is already closed, edit 3 is dropped; the only remaining motive (dilution reduction) is speculative and deferred until a run shows it bites. Edits 1 & 2 stand on their own — they remove real contradiction (SDK block + planned-vs-actual fork) and fix cache ordering.
+
+---
+
+## Appendix C — Frontend generation: full context provenance map
+
+Every piece of context a frontend file (component/page — the only LLM-authored frontend files) receives, traced to its **origin → mechanism → prompt slot → coverage**. The goal is a complete "what comes from where" so the one remaining hole (model/DTO internal fields) is unambiguous.
+
+### The four origins
+
+| Origin | What it produces | Trust |
+|---|---|---|
+| **`ARCHITECTURE.json`** (plan) | this file's `FileSpec` (role), reconciled contracts, feature→file map | authoritative for *intent* |
+| **Enrichment layer** (`ENRICHMENT.json`) | per-feature `FeatureCard` (identity, sibling map, instruction) | authoritative for *requirement* |
+| **Derived-from-backend disk** (`ApiArtifactGeneratorNode`) | `types/*.ts` (DTOs), services (SDK), hooks — all **mechanical** | ground truth (compiled backend) |
+| **Foundation + workspace** | `FOUNDATION_CONTRACT.md`, `AuthContext`/cart/shell, installed shadcn/radix, prior-layer files | ground truth (on disk) |
+
+### Provenance table (by your categories)
+
+| # | Context category | Origin | Mechanism (card / registry) | Prompt slot | Carries | Status |
+|---|---|---|---|---|---|---|
+| 1 | **This file's details / role** | ARCHITECTURE.json `FileSpec` | `FileContractCard.render(spec, fileRole)` | USER (`fileRole`) | purpose, fields to build, fn sigs | ✅ |
+| 2 | **Feature requirement / flow** | Enrichment `ENRICHMENT.json` | `FeatureCard.buildFeatureContext` | USER (`featureContext`) | identity + sibling map + instruction | ✅ |
+| 3a | **Backend comms — hooks** (existence) | derived hooks on disk | `TypeScriptExportRegistry.toImportCatalog` | USER (`depFiles`) | import name + path | ✅ |
+| 3b | **Backend comms — hooks** (shape) | derived hooks on disk | `FrontendContractCard` (actual, trailing) | SYSTEM | hook **return signature** | ✅ |
+| 3c | **App-context sharing** (`useAuth`, `useCart`, checkout) | foundation `context/` | `FrontendContractCard` (context sigs) + `FoundationContractCard` | SYSTEM | accessor **signatures** (prose in foundation card) | ⚠️ partial — see #6 |
+| 3d | **Generic utils / computation** (`cn`, formatters) | `lib/`, `services/local/` | `FrontendContractCard` (module) + export catalog | SYSTEM + USER | util signature + import path | ✅ |
+| 4a | **Models / DTOs — derived** (`ProductDto`, `OrderResponse`) | derived `types/*.ts` | `ApiContractCard` **WIRE TYPES (full verbatim)** | SYSTEM | **every field, verbatim** | ✅ |
+| 4b | **Models / DTOs — foundation** (`AuthUser`) | foundation `context/AuthContext.tsx` | — **none** — | — | — | ❌ **GAP (Theme F)** |
+| 4c | **Models / DTOs — nested / non-`export`** | `types/**` subdirs | `ApiContractCard` scan is **non-recursive** (`Files.list`) | SYSTEM | fields only if top-level + `// GENERATED` | ⚠️ partial |
+| 4d | **Models / DTOs — invented** (`variants`, `BrandDto`) | no producer | n/a — **Solution A** (plan-time) | — | — | ❌ owned by Solution A |
+| 4e | **Models / DTOs — degraded artifact** (`getAllProducts: void`) | derived on disk, **flattened by ErrorFix** | `ApiContractCard` passes it **verbatim — including the wrong type** | SYSTEM | a degraded signature as if it were truth | ❌ **BLIND SPOT** — map trusts derived as ground truth; **Solution A leg 2** (post-backend re-align) |
+| 5 | **shadcn / radix UI components** | installed workspace | `UiComponentInventory` (registry) | USER (`depFiles`) | real export names | ✅ |
+| 6 | **Foundation features** (auth/cart/checkout/shell) | `FOUNDATION_CONTRACT.md` | `FoundationContractCard` → `foundationContractSection` | SYSTEM (leads) | usage rules (**prose, not field lists**) | ✅ usage / ⚠️ field-level |
+| 7 | **Sibling component props** | ARCHITECTURE.json | `PlannedComponentPropsCard` | SYSTEM | each component's prop contract | ✅ |
+| 8 | **Routes** | `RouteManifest` | route card | SYSTEM | path → page table | ✅ |
+| 9 | **Module existence namespace** | prior-layer disk | `TypeScriptExportRegistry.toImportCatalog` | USER (`depFiles`) | every module's name/path | ✅ |
+| 9b | **Export STYLE — default vs named** | prior-layer disk | registry catalog carries name/path **but not export kind** | USER (`depFiles`) | — (kind omitted) | ❌ **BLIND SPOT** — `import { X }` vs `import X` guessed → Theme E siblings |
+
+### Flow diagram
+
+```
+ ORIGINS                         MECHANISM (card = SHAPE, registry = EXISTENCE)                SLOT
+ ───────                         ───────────────────────────────────────────                 ────
+
+ ARCHITECTURE.json ──► FileSpec ─────────► FileContractCard.render ──────────────────────►  USER · fileRole        [1] ✅
+                   └─► component props ──► PlannedComponentPropsCard ─────────────────────►  SYSTEM                 [7] ✅
+
+ ENRICHMENT.json  ───► FeatureCard ───────► FeatureCard.buildFeatureContext ──────────────►  USER · featureContext  [2] ✅
+
+ DERIVED (backend) ─┬─ types/*.ts (DTO) ──► ApiContractCard · WIRE TYPES (FULL verbatim) ──►  SYSTEM                 [4a] ✅ ◄── models: fields
+                    ├─ degraded sig ──────► ApiContractCard passes void VERBATIM as truth ──►  SYSTEM                [4e] ❌ blind spot (getAllProducts:void)
+                    ├─ hooks ─────────────► FrontendContractCard (actual return sigs) ─────►  SYSTEM (trailing)      [3b] ✅
+                    ├─ hooks/services ────► TypeScriptExportRegistry (names/paths) ────────►  USER · depFiles        [3a][9] ✅
+                    └─ services (SDK) ─────► ✗ DROPPED (no LLM consumer — edit 1)             —                      —
+
+ FOUNDATION ───────┬─ FOUNDATION_CONTRACT ► FoundationContractCard (usage rules, PROSE) ───►  SYSTEM (leads)         [6] ✅
+                   ├─ context/ sigs ──────► FrontendContractCard (context accessor sigs) ──►  SYSTEM                 [3c] ⚠️
+                   ├─ AuthUser fields ─────► ✗✗✗ NOTHING — non-exported interface,            —                     [4b] ❌ THE GAP
+                   │                          matched by no card, not under types/ ─────────►  (invented → Theme F)
+                   └─ shadcn/radix ───────► UiComponentInventory (real export names) ───────►  USER · depFiles        [5] ✅
+
+ WORKSPACE ────────┬─ prior-layer files ──► TypeScriptExportRegistry (existence catalog) ──►  USER · depFiles        [9] ✅
+                   └─ export KIND ────────► ✗ registry omits default-vs-named ─────────────►  (guessed)             [9b] ❌ blind spot
+```
+
+### The single blocker for "never fails again"
+
+Everything an LLM component/page consumes is delivered **except [4b] foundation-model internal fields** (`AuthUser` — Theme F, the last-run failure) and, secondarily, **[4c]** nested/non-`export` types missed by the non-recursive WIRE TYPES scan. Both are *absence* bugs, fixable deterministically:
+
+- **[4b] fix:** inject the foundation identity/model interfaces (`AuthUser`, shell/context model types) **field-for-field** into the SYSTEM prefix. **CORRECTION (see task 3, revised):** `AuthUser` is **already** documented in `FOUNDATION_CONTRACT.md` (`{ username; role }` + "no email/name"), already parsed by `FoundationSymbolRegistry`, and already injected as prose — so Theme F is **shown-but-ignored**, not pure absence, and the fix is a **structured, field-for-field injection sourced from `FoundationSymbolRegistry`** (the OCP-compliant derived channel), **not** a hardcoded worker-side read of `context/AuthContext.tsx` (that would re-create the seam task 9 removes).
+- **[4c] fix:** make `ApiContractCard.readDerived` recursive (`Files.walk` over `types/**`).
+
+`[4d]` (invented DTOs, the ~41-error bulk) is **not** an absence bug — the fields aren't missing, a competing rich contract wins. That stays owned by **Solution A** (plan-time reconciliation); injection alone can't cure it.
+
+> **Reading rule for the map:** a Card carries **shape** (fields/signatures) into the SYSTEM prompt; a registry carries **existence** (name/path) into the USER `depFiles`. A category is only fully covered when its shape *and* its existence are both present. [4b] fails because its shape is carried by nothing — the one row where a consumer has neither.
+
+### Every one of the 54 errors, mapped to a map row
+
+| Theme | Errs | Map row | Delivered? | Root class |
+|---|---|---|---|---|
+| A — invented `ProductDto` fields | 20 | [4a] | yes (full) | **redundant/contradictory context** → Solution A |
+| B — `category`/`brand` objects + invented types/getters | 12 | [4a]/[4d] | partial | invented/contradiction → Solution A |
+| C — invented order type names | 5 | [4a]/[4d] | yes | naming drift → Solution A |
+| D — `getAllProducts: void` cascade | 4 | **[4e]** | wrong artifact passed as truth | **degraded-artifact gap** → Solution A leg 2 |
+| E — export default/named | 5 | **[9b]** + worker | 3× kind guessed, 2× worker bug | **export-style gap** (3) + codegen bug (2) |
+| F — `AuthUser` fields | 4 | **[4b]** | no — absent everywhere | **delivery gap** |
+| G — missing modules (`cn`, `paymentHooks`, cart) | 4 | worker + [9] | 2× worker strip, 2× ErrorFix | codegen bug (2) + ErrorFix (2) |
+
+### Closure checklist — the path to 0 errors from context gaps or redundant context
+
+Split by whether the cause is **context** (your target) vs **not context** (worker codegen / build-precheck — listed so nothing is silently out of scope).
+
+**A. Context-attributable — close ALL of these for 0 context errors (48 of 54):**
+
+| Gap | Map row | Fix | Errors closed | Status |
+|---|---|---|---|---|
+| Foundation-model fields absent | [4b] | Inject `AuthUser` + shell/context model interfaces **field-for-field** into SYSTEM prefix (edit-3-redirected) | F = **4** | TODO — verify shapes in `webapp-foundation` first |
+| Nested / non-`export` types missed | [4c] | Make `ApiContractCard.readDerived` recursive (`Files.walk` over `types/**`) | 0 seen, latent | TODO — cheap |
+| Export kind not carried | [9b] | Registry catalog records **default vs named** per module; feed it to import rendering | E-siblings = **3** | TODO |
+| Degraded artifact passed as truth | [4e] | **Solution A leg 2** — re-align FE contracts to the *regenerated* backend after `BackendValidationNode` (so `void` never reaches the FE as truth) | D = **4** | TODO — part of Solution A |
+| Redundant/contradictory rich contract | [4d] | **Solution A** — pair BE DTO ↔ FE type by name at plan time; drop invented sibling types with no producer | A+B+C = **37** | TODO — the big lever |
+| SDK block on components (redundant) | — | **DONE** (edit 1) — no LLM consumer, removed | prevents recurrence | ✅ applied |
+| Planned-vs-actual fork (redundant) | — | **DONE** (edit 2) — planned card dropped off normal path; actual wins | prevents recurrence | ✅ applied |
+
+**B. NOT context — still block a clean run, must be fixed separately (6 of 54):**
+
+| Cause | Errors | Fix |
+|---|---|---|
+| `RouteManifestGenerator.emitAppRoutes` default-imports named exports + `allowedRoles`/`roles` | E = 2 | worker codegen fix |
+| `FoundationRefReconciler` strips `components/cart/*` without repairing `CartPage` import | G = 2 | worker codegen fix |
+| ordinary missing import (`cn`) / ungenerated `paymentHooks` | G = 2 | `ErrorFixAgent` — **but the build must survive the `NotFoundPage` precheck to reach it** |
+
+**Bottom line for "0 context errors":** close the six rows in table A. Two are already done (edits 1–2). The remaining four — **[4b] foundation fields, [4c] recursive scan, [9b] export kind, and Solution A ([4d]+[4e])** — are the complete context-gap set. Solution A is doing the heaviest lifting (41 of the 48). The 6 rows in table B are real but are **codegen / pipeline** bugs, not context — they need their own fixes and cannot be closed by anything in the provenance map.
+
+### Post-simplification: backend vs frontend (Appendix B view, after the changes)
+
+The simplification thesis — **one wire truth, derived, LLM as pure consumer** — replaces reconciliation with prevention. Shown in the same two-column form as Appendix B, so the before/after is directly comparable:
+
+```
+                     generateFileContent(path, fileRole, depFiles, existingContent, sharedContext, featureContext)
+                                                          │
+              ┌───────────────────────────────────────────┴───────────────────────────────────────────┐
+              │                                                                                         │
+        ┌─────▼──────┐  BACKEND (unchanged — LLM authors ALL .java)          FRONTEND (simplified)   ┌─────▼──────┐
+        │ SYSTEM     │  file_generate_backend.txt                                                     │ SYSTEM     │  file_generate_frontend.txt
+        │ PROMPT     │  + sharedContext:                                                              │ PROMPT     │  + sharedContext (cache order):
+        │            │      • foundationContract                                                      │            │      • foundationContract              (leads)
+        │            │      • backendContractCard (reconciled BE contract)                            │            │      • WIRE TYPES — FULL DTOs = THE ONE  ◄── [4b] now also carries
+        │            │                                                                                │            │        wire truth (+ foundation models      foundation model fields
+        │            │                                                                                │            │        AuthUser field-for-field)            (AuthUser) field-for-field
+        │            │                                                                                │            │      • route card
+        │            │                                                                                │            │      • plannedProps (same-layer siblings only)
+        │            │                                                                                │            │      • frontendContractCard (actual hook+ctx sigs, trailing)
+        │            │                                                                                │            │      ✗ FrontendPlannedContractCard — DELETED (actual over planned)
+        │            │                                                                                │            │      ✗ SDK / service block — DELETED (mechanical hooks)
+        │            │                                                                                │            │      ✗ Solution A reconcile — NOT NEEDED (no 2nd source)
+        └────────────┘                                                                                └────────────┘
+        ┌────────────┐  USER PROMPT (user/file_content.txt)                                           ┌────────────┐  USER PROMPT (same template)
+        │ featureCtx │  = FeatureCard.buildFeatureContext        ── IDENTICAL MECHANISM ──            │ featureCtx │  = FeatureCard.buildFeatureContext — UI/FLOW intent
+        │            │                                                                                │            │      ONLY (✗ no data shapes → no 2nd wire source)
+        │ fileRole   │  = FileContractCard.render(spec, role)    ── IDENTICAL MECHANISM ──            │ fileRole   │  = FileContractCard.render — PURE CONSUMER
+        │            │                                                                                │            │      (JSX + local state; no type decls, no service calls)
+        │ depFiles   │  = REAL DEPENDENCY FILE BODIES                                                 │ depFiles   │  = EXISTENCE registries:
+        │            │      • importsFrom / dependsOn bodies                                          │            │      • UiComponentInventory (shadcn/radix)
+        │            │      • + RECONCILED interface stamped                                          │            │      • TypeScriptExportRegistry  ◄── [9b] now carries
+        │            │      • + auto-resolved class mentions                                          │            │        (names/paths + export KIND)   default-vs-named
+        └────────────┘                                                                                └────────────┘
+             LLM authors EVERY layer → needs full bodies    ◄──────►    LLM authors ONLY components/pages → consumes ONE derived truth
+```
+
+**What the simplification changed vs Appendix B:**
+- **Deletions, not additions.** `FrontendPlannedContractCard`, the SDK block, and the whole Solution-A reconciliation engine are gone. The frontend `sharedContext` is now **foundation + one wire truth + routes + props + actual sigs** — five blocks, none of which can contradict another (there is no planned twin left to disagree with).
+- **One wire truth.** WIRE TYPES is now the *sole* source of DTO/model shape — the plan/enrichment no longer emits a data model, so the 41-error contradiction class cannot form. This is why "no 2nd source" appears where Solution A used to.
+- **Foundation models folded into the truth** ([4b]) and **export-kind into the registry** ([9b]) — the two absence gaps closed at the derive step, not with new cards.
+- **The backend is untouched** and the two sides are now cleanly *dual*: backend = LLM authors every layer, so it needs full dependency bodies; frontend = LLM authors only components/pages as pure consumers, so it needs exactly one derived truth + existence. Same goal (bind to real symbols), each sized to what its LLM actually writes.
+
+**Invariants preserved (do NOT move into per-file scope):** full DTO shapes, actual hook signatures, and the `TypeScriptExportRegistry` export catalog stay **global** — they are the existence/shape net that makes edit #3's scoping safe. See the "imports not in `import_from`" table above.
+
+> **Cross-reference — these three edits do NOT include Solution A, and do NOT fix Themes A–D.** Solution A (§ *Cross-layer wire-contract reconciliation*, above) is a **separate, still-required** fix that operates at **plan time** (`ProjectPlanningNode`, after `ContractReconciler`, + post-backend re-alignment), reconciling the planned frontend type to the backend DTO in `ARCHITECTURE.json` so a component is never *authored* against a shape the backend doesn't serve. The three edits here are **generation-time context** changes only. The one point of overlap is **edit #2**: dropping `FrontendPlannedContractCard` removes the conflicting rich FE type from the **prompt** — but that is only the prompt-level half of the contradiction; the plan/enrichment can still carry the rich model, which only Solution A removes at the source. Consequently the **invented-DTO-field class (Themes A–D, ≈41 of 54 errors) is owned by Solution A, not by these three edits.** They are complementary: the three edits cut contradiction/dilution and close the sibling-component seam; Solution A cures the cross-layer wire drift.
+
+---
+
+## Appendix D — Implementation task list (simplification sequence)
+
+The ordered work to reach a reliable run, derived from the simplification thesis in Appendix C (*one wire truth, derived, LLM as pure consumer*). **Status: not started** (edits 1 & 2 from Appendix B's "three edits" are already applied + unit-verified; the tasks below are the remaining sequence).
+
+Ordered by leverage (errors closed per effort). Tasks 3–6 are independent and parallelizable; 7 depends on 1 & 3; 8 is orthogonal but table-stakes.
+
+| # | Task | Closes | Errors | Type | Key files |
+|---|---|---|---|---|---|
+| **1** | **Strip data-model shapes from plan/enrichment** — plan/enrichment describes feature/flow/UI intent ONLY, never data shapes; backend-derived WIRE TYPES becomes the sole DTO source. Prevents the 2nd-source contradiction ⇒ **obviates Solution A**. | [4d] | ~41 (A/B/C) | simplification | `ENRICHMENT.json` gen + enrichment prompt; `ProjectPlanningNode` |
+| **2** | **Delete `FrontendPlannedContractCard`** — actual-over-planned; by layer order every dep is already on disk. Removes the card + planned-vs-actual fork. Keep `PlannedComponentPropsCard` (same-layer siblings). | contradiction fork | — | deletion | `FrontendGeneratorNode`, `FrontendPlannedContractCard` |
+| **3** | **Surface foundation model shapes field-for-field — via `FoundationSymbolRegistry` (OCP), NOT a hardcoded read** *(revised; blocked by 9)* — `AuthUser` is ALREADY in `FOUNDATION_CONTRACT.md` (`{ username; role }` + "no email/name"), already parsed by `FoundationSymbolRegistry`, already injected as prose → Theme F was **shown-but-ignored**, not absence. Inject the registry's model shapes **structured/field-for-field** (stronger than prose) + a prompt bind; if a model is missing, add it to the contract (extend the foundation). A hardcoded worker-side disk read would re-create the exact seam task 9 removes. | [4b] (obedience) | 4 (F) | derive-step | `FoundationSymbolRegistry` consumer; **not** a hardcoded reader |
+| **4** | **Make `ApiContractCard.readDerived` recursive ([4c])** — `Files.walk` over `types/**` (keep the `// GENERATED` marker filter). | [4c] | 0 latent | derive-step | `ApiContractCard` |
+| **5** | **Record export kind (default/named) in `TypeScriptExportRegistry` ([9b])** — capture + surface per module so imports aren't guessed. | [9b] | 3 (E) | derive-step | `TypeScriptExportRegistry` |
+| **6** | **Re-derive FE types after backend validation ([4e], Solution A leg 2)** — re-derive `types/`/services from the regenerated backend after `BackendValidationNode`+`ErrorFixAgent`, before `FrontendGeneratorNode`, so degraded artifacts (`getAllProducts: void`) never ship as truth. | [4e] | 4 (D) | derive-step | `ApiArtifactGeneratorNode`, orchestration order |
+| **7** | **Constrain components to pure consumers + retire dead patchers** — prompt/scaffold: JSX + local state only, no type decls / service calls / contract authoring. Then delete patchers whose root is now upstream (`RowActionContractNormalizer`, `EnumValueImportPatcher`, `SiteConfigAccessPatcher`, parts of `AdminLayoutWrapperPatcher`) — verify each dead first. *Depends on 1 & 3.* | prevents recurrence | — | simplification | `file_generate_frontend.txt`; the named patchers |
+| **8** | ✅ **DONE — `NotFoundPage` precheck fixed at the foundation.** `NotFoundPage.tsx` is committed (`592541a`) + pushed to `origin/main`; the worker clones it, so the route-manifest precheck now passes and the build reaches `ErrorFixAgent`. Shipping from the foundation also sidesteps the planner-mis-file root. *Verify on next run (prakash predated the commit).* | enables ~6 residual | — | pipeline | `webapp-foundation` |
+| **9** | **OCP: auto-onboard new foundation features** — any feature added to `webapp-foundation` is considered by the pipeline automatically (open for extension, closed for modification). Derive the currently-hardcoded foundation seams from the foundation itself; onboarding a new feature becomes a foundation-side change only. *Orthogonal, structural.* | OCP compliance | — | simplification | see OCP detail below |
+| **10** | **Emit shared contracts as imported artifacts (contract-as-artifact)** — deterministic replacement for `PlannedComponentPropsCard`. Emit each component's props interface ONCE as a fenced artifact both sides `import` (referencing DTOs by import), so producer + consumer bind to one definition and `tsc` enforces agreement — silent cross-file drift becomes a localized compile error. *Depends on 8 (build must run to enforce); composes with 1 & 7.* | drift → compile error | prevents cascade | simplification | new props-artifact generator; `PlannedComponentPropsCard` → generator; `FrontendGeneratorNode`. See Appendix F |
+| **11** | **Deliver hook contracts from `FrontendHookGenerator`, not regex re-scan** — the hook signature (name, params, canonical return, path) is deterministically known at emission but is recovered downstream by a lossy `FrontendContractCard` regex re-scan (query-hook params = weak point). Register/emit the exact contract at generation time so components bind to the generator's ground truth. *Matters more after task 2 (re-scan becomes sole source); composes with 10.* | hook-signature fidelity | — | simplification | `FrontendHookGenerator`, `FrontendContractCard`, `ApiArtifactGeneratorNode` |
+| **12** | ✅ **DONE — `emitAppRoutes` guards fixed (40/40 tests).** Real cause: it imported a **phantom `ProtectedRoute`** (foundation never shipped one) + default `siteConfig`. Now uses the foundation's real **`RequireAuth`/`RequireAdmin`** (default exports, `children`-based) + **named `siteConfig`**; flags key on the guards; prompt rule 3 rewritten (foundation owns the guards). | Theme E | 2 (+1) | codegen | `RouteManifestGenerator`, `FrontendGeneratorNode`, prompt |
+| **13** | ✅ **DONE — `FoundationRefReconciler` cart fence narrowed (10/10 tests).** The bare `"/cart/"` fence matched app UI at `components/cart/` and stripped `CartItemsTable`/`CartSummary`. Narrowed to **`"/src/cart/"`** (fence the foundation spine only); app cart UI survives + consumes `@/cart`. | Theme G | 2 | codegen | `FoundationRefReconciler` |
+| **14** | **Enforce shadcn-only + lucide UI rule** — generated UI uses shadcn components only (no native HTML primitives, no direct radix), lucide icons only + sparingly. Tighten `file_generate_frontend.txt` and stop offering `@radix-ui/*` in `AVAILABLE UI IMPORTS`. *Standing user rule.* | UI consistency | — | prompt+context | `file_generate_frontend.txt`, `UiComponentInventory` |
+
+### Task 9 detail — Open/Closed for foundation features
+
+**Already OCP-compliant:** `FoundationSymbolRegistry` (`util/FoundationSymbolRegistry.java:83-87`) **derives** fenced symbols by parsing `backend/` + `frontend/FOUNDATION_CONTRACT.md` from the cloned foundation — a new fenced type/interface is auto-ingested with zero pipeline edits.
+
+**Hardcoded seams that VIOLATE OCP** (a new foundation feature needs pipeline code edits today):
+
+| Seam | Location | Breaks when foundation adds… |
+|---|---|---|
+| `FOUNDATION_CONTROLLERS` (skip set) | `util/ApiInventory.java:53` | a new backend controller → not skipped → duplicate/re-plan risk |
+| `GUARD_NAMES = Set.of("ProtectedRoute","AdminLayout","siteConfig")` | `util/FoundationRefReconciler.java:81` | a new shell/guard component → not recognized |
+| `AUTH_KEYS` / `NON_NAV_KEYS` (route gates) | `util/RouteManifest.java:50,53` | a new gated foundation page → not auto-classified |
+
+**Fix (derive-don't-hardcode, one source of truth):**
+1. Make the foundation the single source — extend `FOUNDATION_CONTRACT.md` (or ship a foundation `manifest.json` the foundation regenerates with itself) declaring each feature + its controllers, guard/shell symbols, and route gates.
+2. Derive the three hardcoded sets from that manifest at run start (reuse `FoundationSymbolRegistry` as the loader); **delete the hardcoded `Set`s**.
+3. Planner ingests the foundation feature list so a new capability is **considered for the target app** (consume it, never re-implement).
+
+**Outcome:** onboarding a new foundation feature = a foundation-side change only; the pipeline adapts with zero modification — the OCP the pipeline should hold.
+
+**Codegen bugs (now tracked as tasks 12 & 13):** `RouteManifestGenerator.emitAppRoutes` default-imports named exports + `allowedRoles`/`roles` (E, 2); `FoundationRefReconciler` strips `components/cart/*` without repairing `CartPage` import (G, 2). Deterministic, recur every project — no longer just notes.
+
+**Readiness / recommended order.** Task 8 is ✅ done (foundation ships `NotFoundPage`). The **first executable batch is tasks 12 + 13** (route/cart codegen) — with 8 done, these let a run *reach* `ErrorFixAgent` and produce **real** post-fix data. The plan is otherwise built on ONE run that died early (unrepaired output), so run once after 12+13 to measure the true residual **before** the biggest/riskiest change (task 1, enrichment data-shape strip). Then tasks 3/4/5/6 (deterministic derive-step, ~11 errors), then 1/2/7/10/11 (structural), 9 + 14 orthogonal.
+
+**Coverage:** tasks 1 + 3 + 5 + 6 close the 48 context-attributable errors (with edits 1–2 already applied); tasks 2 + 4 + 7 are structural/hardening; task 8 + the two codegen fixes above clear the remaining 6.
+
+---
+
+## Appendix E — Same-layer parallel generation: how it holds together
+
+Components in one layer generate **in parallel** (`FrontendGeneratorNode`, up to `MAX_PARALLEL_PER_LAYER = 5`). If B imports A, B cannot see A's *live* output — registration is deferred until after the parallel block (`:758`). Consistency is held not by ordering but by **both sides binding to the same static plan entry**, with a post-gen path reconcile as the safety net. Invariant: components interact via **props only** (task 7).
+
+```
+ ── BEFORE THE LAYER — built once from ARCHITECTURE.json (static, cached) ─────────────
+ ┌──────────────────────────────────────────────────────────────────────────────┐
+ │  PlannedComponentPropsCard — the SINGLE shared contract (all components)       │
+ │    @/components/A : { items: Dto[]; onSelect: (i: Dto) => void }   ◄─ A's truth │
+ │    @/components/B : { ... }                                                     │
+ └──────────────────────────────────────────────────────────────────────────────┘
+                 │ injected IDENTICALLY into every prompt in the layer
+        ┌────────┴─────────┐
+        ▼                  ▼
+ ── PARALLEL (same layer, ≤5 at once) — A and B run simultaneously ────────────────────
+ ┌─────────────────────────┐        ┌─────────────────────────────────────┐
+ │ generate A              │        │ generate B  (renders A)             │
+ │  reads plannedProps[A]  │        │  reads plannedProps[A]              │
+ │  → DECLARES those props │        │  → <A items={..} onSelect={..} />   │
+ └───────────┬─────────────┘        └───────────────┬─────────────────────┘
+             │   ✗ neither sees the other's live output                     │
+             │     (registry + FrontendContractCard NOT updated mid-layer)  │
+             │   ✔ both pinned to the SAME plannedProps[A]                  │
+             │     → A (declares) and B (renders) AGREE by construction     │
+             └───────────────────────────┬─────────────────────────────────┘
+                                         ▼
+ ── AFTER THE PARALLEL BLOCK — batch reconcile ────────────────────────────────────────
+ ┌──────────────────────────────────────────────────────────────────────────────┐
+ │  register A, B  → TypeScriptExportRegistry + FrontendContractCard (now actual) │
+ │  TypeScriptImportFixer → fix B's import PATH of A against the complete registry│
+ └──────────────────────────────────────────────────────────────────────────────┘
+
+ ── INVARIANT (task 7): components are PURE CONSUMERS — interact via PROPS ONLY ───────
+    A↔B edge  ==  props edge  ==  fully carried by PlannedComponentPropsCard   ✔ safe
+    ✗ B imports a TYPE / HELPER / CONST from A  → not in plannedProps, mid-layer race
+      returns → FORBIDDEN by task 7 (such shared symbols live in a types/ or hook file,
+      i.e. a PRIOR layer, already on disk).
+```
+
+**Why it holds — three guarantees:**
+1. **Single source, both sides.** `PlannedComponentPropsCard` pins the producer (A *declares*) and the consumer (B *renders*) to the *same* static entry — so they agree with each other regardless of who finishes first. Consistency is by construction, not by generation order.
+2. **Paths self-heal after the layer.** The registry is stale mid-layer, but `TypeScriptImportFixer` runs post-block against the now-complete registry, correcting any guessed `@/` import path.
+3. **The props-only invariant makes the sibling edge fully expressible.** Task 7 guarantees the only A→B coupling is props — which `PlannedComponentPropsCard` carries in full. Any non-prop coupling (a shared type/helper) must live in an earlier layer (types/hook file), already on disk, so it never races.
+
+**Where it would break (and the guard):** if a component exported an internal symbol a sibling consumed, parallel generation would race and no card could win — which is exactly the coupling task 7 forbids. The dependency-topological alternative (serialize A before B for *actual* contracts) is only needed if that invariant can't be held; it costs parallelism and a reliable render graph, so it's the fallback, not the default.
+
+---
+
+## Appendix F — Contract as artifact vs contract as card (task 10)
+
+The reliability ceiling of Appendix E is that `PlannedComponentPropsCard` hands **each side a copy of the contract to re-author from the prompt** — two authored copies that *can* diverge. One divergence in a shared contract cascades across every file that imports it. Task 10 removes the possibility structurally: emit the contract **once** as an artifact both sides `import`, so the **compiler** binds them, not the model.
+
+```
+ ── TODAY: CONTRACT AS CARD (prompt-steered → drift possible) ─────────────────────────
+ ARCHITECTURE.json ──► PlannedComponentPropsCard (PROMPT TEXT: "A: { item: ProductDto }")
+                         │  injected into both prompts
+        ┌────────────────┴────────────────┐
+        ▼                                  ▼
+   generate A                         generate B
+   RE-AUTHORS  interface AProps        RE-AUTHORS  <A item={..} />
+     { item: ProductDto }               against its OWN idea of AProps
+        └──────────► TWO authored copies ◄──────────┘
+                     can diverge → SILENT drift → cascades across importers
+
+ ── TASK 10: CONTRACT AS ARTIFACT (compiler-bound → drift impossible to ship silently) ─
+ ARCHITECTURE.json ──► props-artifact generator ──► frontend/src/.../AProps.ts   (ONE definition, FENCED)
+                                                      │   import { ProductDto } from '@/types'
+                                                      │   export interface AProps { item: ProductDto; ... }
+        ┌─────────────────────────────────────────────┼─────────────────────────────────┐
+        ▼                                              ▼                                   │
+   generate A                                     generate B                              │
+   import { AProps }                              import A                                 │
+   const A: React.FC<AProps> = ...                <A item={..} />  ── typed vs AProps ─────┘
+   (IMPLEMENTS; never declares the contract)      (usage checked against the SAME AProps)
+        └──────────────► ONE definition, both import ◄──────────────┘
+                          tsc BINDS producer + consumer
+                          deviation = LOCALIZED compile error, never silent drift
+
+ ── WHERE THE DTO IMPLEMENTATION COMES FROM (the prop's field-level truth) ─────────────
+   AProps.ts     ── import ──►  @/types/product.ts  (ProductDto = { id; name; price; … })   ◄─ ONE DTO def
+        ▲                              ▲
+        │ compile-time: TS resolves    │ generation-time: LLM sees the fields via
+        │ ProductDto from the real     │ ApiContractCard WIRE TYPES (reads the SAME
+        │ on-disk file                 │ types/*.ts verbatim into the SYSTEM prompt)
+   NOT a registry — registries carry name/path only; the FIELDS come from the WIRE TYPES card.
+```
+
+**What this locks down:**
+- **The LLM never authors a shared contract** — only the JSX/logic *body*. Contract = artifact; implementation = LLM. The only thing that can vary is the body, and `tsc` checks the body against the imported interface.
+- **DTO implementation is resolved through imports, not restated.** `AProps` imports `ProductDto`; the component imports `AProps`; there is exactly **one** `ProductDto` definition (`@/types/product.ts`). At generation time the LLM sees `ProductDto`'s fields via **`ApiContractCard` WIRE TYPES** (which reads that same file verbatim) — *not* via any registry (registries carry existence only). Compile time and generation time therefore point at the identical source.
+- **Order-independent.** The artifact is on disk before A or B generate, so parallel siblings bind to one definition regardless of who finishes first (closes the Appendix E residual: consistency is now by *import*, not by *both obeying the same card*).
+
+**Dependencies:** the compiler is the enforcer, so the deviation-as-error is only *caught and fixed* when the build runs (task 8) — but the shared-import structure means a disagreement **cannot be expressed silently** even before `tsc` runs. Gaps in the field-level truth feeding this chain — foundation models (`AuthUser`, task 3) and nested/non-`export` types (task 4) — must be closed for the WIRE TYPES source to be complete.
+
+### Hook contracts — the same rule applied to TanStack hooks (task 11)
+
+A component calling a hook needs four things — **name, location, parameters, return type**. All four are **deterministically known by `FrontendHookGenerator`** at emission (it writes them as templates), but today they reach the component via mixed, partly-lossy paths:
+
+| Attribute | Source of truth (ground) | How the component gets it today | Reliable? |
+|---|---|---|---|
+| Name (`useCreateProduct`) | `HookNaming.hookFor()` (single source) | export catalog | ✅ |
+| Location (`@/hooks/productHooks`) | derived path `hooks/<domain>Hooks.ts` | `TypeScriptExportRegistry` catalog (existence) | ✅ |
+| Return type | canonical TanStack shape (emitted) | `FrontendContractCard` **regex re-scan** (brace-matched) | ⚠️ lossy round-trip |
+| Parameters | derived service fn params (emitted) | `FrontendContractCard` regex re-scan | ⚠️ **query-hook params = weak point** |
+
+The **canonical return shape** removes any need to re-scan it: query → `{ data: T | undefined; isLoading; isError; error }`; mutation → `{ mutate: (vars, options?) => void; mutateAsync; isPending; isError; error }` — a pure function of *(kind, dataType, varsType)*. So the reliable design (task 11) is: **`FrontendHookGenerator` delivers its own contract** (register the exact `(name, params, return, path)` at generation time, or emit a hook-contract artifact), and the component binds to *that* — never to a regex re-parse of a file the generator already authored. This matters more after **task 2** deletes `FrontendPlannedContractCard`, which makes the regex re-scan the *sole* hook-signature source.
+
+**Registries vs source-of-truth, restated:** for hooks, the registry (`TypeScriptExportRegistry`) answers **name + location** (existence); it does **not** carry params/return. Those are *shape*, and their ground truth is the **generator**, not a registry and not a re-scan — exactly the "derive, don't re-parse" rule that makes the whole chain solid.

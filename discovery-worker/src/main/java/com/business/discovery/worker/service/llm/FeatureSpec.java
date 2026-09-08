@@ -50,6 +50,16 @@ public class FeatureSpec {
     private List<String> dependsOnFeatures;
 
     /**
+     * Ids of the FOUNDATION features this feature's files consume (auth / payment / cart / gallery),
+     * declared by enrichment — the machine-readable twin of the prose it already writes for rules 4/4b/9.
+     * A subset of the project's {@code ArchitectureSpec.foundationFeatures} (§6b Part B): capturing it
+     * structurally lets the reconciler check the invariant "a file imports a fenced symbol ⟺ its
+     * feature declares the owning foundation feature" instead of re-deriving it from prose every run.
+     * Null on specs written before this field existed (treated as no foundation edges).
+     */
+    private List<String> consumesFoundation;
+
+    /**
      * True if any file in this feature needs regeneration on an update run.
      * Defaults to true so old specs without this field regenerate everything (safe).
      * FileSpec.changeRequired (nullable) narrows the decision to file grain when present.

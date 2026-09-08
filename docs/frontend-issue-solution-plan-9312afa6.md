@@ -255,7 +255,21 @@ export type InquiryType = typeof InquiryType[keyof typeof InquiryType];
 
 ---
 
-## 5. Handler signature drift — object vs id (4 admin pages)
+## 5. Handler signature drift — object vs id (4 admin pages) — ✅ IMPLEMENTED 2026-09-01 (object form v1)
+
+**Built (both legs).** `util/RowActionContractNormalizer` — a deterministic pass invoked inside
+`ContractReconciler.reconcile` on the Pro-reconciled `List<FileContract>` *before* they're written back
+to the spec (so the normalized shape flows into both `fileRole` and the structured props in one place,
+auto-synced). Anchors on the component's array-of-DTO prop (prefers `items`; else the sole `XDto[]`
+prop; ambiguous → skip), then rewrites each row-action callback to `(item: XDto) => void` behind the two
+gates (deny-list + exact-verb allowlist; id-like primitive param). Return type preserved; idempotent.
+Leg 2 = new rule 6 in `prompts/system/contract_reconcile.txt` steering the Pro call to emit uniform
+row-action signatures at the source. 11 unit tests (`RowActionContractNormalizerTest`) + 7 existing
+`ContractReconcilerTest` green. **Root cause the reconciler couldn't reach:** a parent page's handler is
+an internal implementation, not a declared interface, so the reconciler has no slot to pin it — the fix
+normalizes the *child* contract to the shape the parent inevitably writes rather than trying to pin the
+parent. e2e-unverified.
+
 
 **Issue.** Page `handleDelete*` handlers take the full object; the child table/form components' contracts expect `(id: number)`.
 

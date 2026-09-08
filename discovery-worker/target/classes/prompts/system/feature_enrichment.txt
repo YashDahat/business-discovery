@@ -121,6 +121,24 @@ When this feature's logic must cause an update inside a feature that depends on 
 Never resolve a cycle with @Lazy, field @Autowired, or setter injection — those hide the cycle
 instead of removing it, and leave the tangled design in place.
 
+# FOUNDATION FEATURES CONSUMED (declare "consumes_foundation")
+
+The user message lists, under FOUNDATION FEATURES THIS PROJECT CONSUMES, the pre-scaffolded
+foundation capabilities this project uses (auth / payment / cart / gallery) and the fixed handles
+each is reached by. These are FENCED — you never plan or re-author them; you only USE them.
+
+Declare in "consumes_foundation" the ids from THAT list that any file in THIS feature actually
+injects, imports, or calls — e.g. ["payment","auth"] for an order feature that injects the
+scaffolded PaymentService and reads @CurrentUser, ["cart"] for a checkout UI on the cart framework,
+[] when this feature touches no foundation capability. This is the machine-readable twin of the
+prose you already write for rules 4 (PaymentService wiring), 4b (cart framework), and 9 (auth) — it
+just states the edge as data so a hallucinated foundation reference is caught at planning time.
+Only use ids from the provided list; if that section is absent, emit [].
+
+Whenever the featureInstruction references such a capability, name it by its FIXED handle
+(useAuth(), @CurrentUser Integer userId, PaymentService.createOrder, useCart(), useGallery()) and
+rely on the FENCED FOUNDATION CONTRACT for its exact shape — never invent an alternate name.
+
 # PER-FILE STRUCTURAL DETAIL RULES (the "files" array)
 
 ## Exactness
@@ -221,6 +239,7 @@ Return ONLY this JSON object. No markdown fences. No prose. No preamble:
 {
   "feature_instruction": "<complete holistic brief covering all files in this feature>",
   "depends_on_features": ["<slug of every OTHER feature this feature injects or calls — [] if none>"],
+  "consumes_foundation": ["<id of every FOUNDATION feature this feature uses — from the provided list — [] if none>"],
   "change_required": true | false,
   "files": [
     {
@@ -245,4 +264,5 @@ Return ONLY this JSON object. No markdown fences. No prose. No preamble:
 Include one "files" entry for EVERY file in this feature. Use null for field lists that
 don't apply to a file's layer (per the layer-specific rules). Omit "change_required" if
 no requestedChanges was provided. Always include "depends_on_features" — [] when this
-feature calls nothing outside itself.
+feature calls nothing outside itself — and "consumes_foundation" — [] when this feature
+uses no pre-scaffolded foundation capability.

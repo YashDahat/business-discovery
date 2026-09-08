@@ -50,7 +50,10 @@ public final class RouteManifestGenerator {
 
         public static Flags fromDisk(Path frontendSrc) {
             boolean auth = Files.exists(frontendSrc.resolve("context/AuthContext.tsx"));
-            boolean prot = Files.exists(frontendSrc.resolve("components/ProtectedRoute.tsx"));
+            // Foundation ships RequireAuth + RequireAdmin (default exports); use them instead of a
+            // phantom ProtectedRoute the foundation never provided.
+            boolean prot = Files.exists(frontendSrc.resolve("components/RequireAdmin.tsx"))
+                    && Files.exists(frontendSrc.resolve("components/RequireAuth.tsx"));
             boolean query = Files.exists(frontendSrc.resolve("api/client.ts"));
             return new Flags(auth, prot, query, discoverContextProviders(frontendSrc));
         }
@@ -271,11 +274,16 @@ public final class RouteManifestGenerator {
         sb.append("// The complete route table, derived from the plan. Rendered by the App.tsx shell\n");
         sb.append("// inside the provider tree. Re-derived every attempt — never edit by hand.\n\n");
         sb.append("import { Routes, Route, Outlet } from 'react-router-dom'\n");
-        if (flags.hasProtected()) sb.append("import ProtectedRoute from './components/ProtectedRoute'\n");
+        // Foundation auth guards (default exports, children-based; cloned from webapp-foundation).
+        // Replaces the old phantom ProtectedRoute the foundation never shipped.
+        if (flags.hasProtected() && !adminRoutes.isEmpty())
+            sb.append("import RequireAdmin from '@/components/RequireAdmin'\n");
+        if (flags.hasProtected() && !authRoutes.isEmpty())
+            sb.append("import RequireAuth from '@/components/RequireAuth'\n");
         // Foundation shell — SiteLayout wraps public routes; the admin group uses its own layout.
         sb.append("import { SiteLayout } from '@/shell'\n");
         if (!adminRoutes.isEmpty()) sb.append("import AdminLayout from '@/components/AdminLayout'\n");
-        sb.append("import siteConfig from '@/config/siteConfig'\n");
+        sb.append("import { siteConfig } from '@/config/siteConfig'\n");   // named export (SiteConfigGenerator)
         sb.append('\n');
         for (RouteManifest.Entry e : manifest.entries()) {
             sb.append("import ").append(e.page()).append(" from '").append(e.importPath()).append("';\n");
@@ -289,7 +297,7 @@ public final class RouteManifestGenerator {
         // Admin group — guard + admin chrome once, at the group level. AdminLayout renders <Outlet/>.
         if (!adminRoutes.isEmpty()) {
             String adminEl = flags.hasProtected()
-                    ? "<ProtectedRoute allowedRoles={['ADMIN']}><AdminLayout /></ProtectedRoute>"
+                    ? "<RequireAdmin><AdminLayout /></RequireAdmin>"
                     : "<AdminLayout />";
             sb.append(i).append("  <Route element={").append(adminEl).append("}>\n");
             for (RouteManifest.Entry e : adminRoutes) emitLeaf(sb, i + "    ", e);
@@ -305,7 +313,7 @@ public final class RouteManifestGenerator {
             // Auth group — login required, still inside site chrome (order: SiteLayout outside, guard inside).
             if (!authRoutes.isEmpty()) {
                 if (flags.hasProtected()) {
-                    sb.append(i).append("    <Route element={<ProtectedRoute><Outlet /></ProtectedRoute>}>\n");
+                    sb.append(i).append("    <Route element={<RequireAuth><Outlet /></RequireAuth>}>\n");
                     for (RouteManifest.Entry e : authRoutes) emitLeaf(sb, i + "      ", e);
                     sb.append(i).append("    </Route>\n");
                 } else {

@@ -153,18 +153,23 @@ class RouteManifestReconcilerTest {
     }
 
     @Test
-    void protectsAdminRoutesWhenProtectedRouteExists() throws Exception {
+    void protectsAdminRoutesWhenFoundationGuardsExist() throws Exception {
         writeSpec("frontend/src/pages/HomePage.tsx", "frontend/src/pages/AdminOrdersPage.tsx");
         writePage("HomePage");
         writePage("AdminOrdersPage");
-        Path prot = workspace.resolve("frontend/src/components/ProtectedRoute.tsx");
-        Files.createDirectories(prot.getParent());
-        Files.writeString(prot, "export default function ProtectedRoute() { return null }\n");
+        // Foundation ships RequireAuth + RequireAdmin (default exports) — the guard flag keys on them,
+        // not on a phantom ProtectedRoute.
+        Path guards = workspace.resolve("frontend/src/components");
+        Files.createDirectories(guards);
+        Files.writeString(guards.resolve("RequireAdmin.tsx"),
+                "export default function RequireAdmin() { return null }\n");
+        Files.writeString(guards.resolve("RequireAuth.tsx"),
+                "export default function RequireAuth() { return null }\n");
 
         RouteManifestReconciler.reconcile(workspace);
 
         assertThat(Files.readString(workspace.resolve("frontend/src/AppRoutes.tsx")))
-                .contains("<Route element={<ProtectedRoute allowedRoles={['ADMIN']}><AdminLayout /></ProtectedRoute>}>")
+                .contains("<Route element={<RequireAdmin><AdminLayout /></RequireAdmin>}>")
                 .contains("<Route path=\"/admin/orders\" element={<AdminOrdersPage />} />");
     }
 

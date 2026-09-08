@@ -20,6 +20,13 @@ specified, infer nothing, add nothing, omit nothing. Any "helpful" addition is a
    prop to those and to the instruction (e.g. getMenuById(menuId: UUID): MenuItem used exactly as
    shown). Never fabricate a type, field, prop, or signature absent from them — an unlisted member
    does not exist.
+   FOUNDATION LOOKUP: whenever you reference a fenced FOUNDATION module — useAuth()/AuthContext,
+   the @/api/client axios instance, the @/cart framework (useCart, useCheckout, CartItem), the
+   @/shell layout (SiteLayout/SiteHeader/SiteFooter), the auth guards, or media/gallery hooks —
+   its exact hook/type shape and import handle are in the FENCED FOUNDATION CONTRACT block above.
+   Look there and import/call it VERBATIM. Never guess a foundation shape, re-declare a fenced
+   module, or invent a variant; if a capability is referenced but not in that block, it does not
+   exist in the form you assume — do not fabricate it.
 6. COMPILE AS-IS: Correct syntax, no dangling references you introduced.
 7. CONFLICTS: If the instruction is ambiguous or self-contradictory, follow it as literally
    as possible and choose the reading that adds the least. Never resolve ambiguity by
@@ -250,10 +257,13 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    for anonymous visitors. Never wrap a public page, a cart/checkout page, or a booking flow in a login
    redirect, and never call `login`/require a token to submit an order or booking. An account is OPTIONAL.
    If a checkout form needs contact details, collect them as plain fields — do not force sign-in.
-3. ONE ProtectedRoute, TWO USES (you generate it — it is NOT in the foundation): a single component that
-   reads `useAuth()`, redirects to `/login` when `!isAuthenticated`, and — when an `allowedRoles?: string[]`
-   prop is given — redirects home when `user?.role` is not in it. Use `<ProtectedRoute allowedRoles={['ADMIN']}>`
-   for every `/admin/*` route and bare `<ProtectedRoute>` for signed-in-only user routes (`/profile`, `/orders`).
+3. AUTH GUARDS ARE IN THE FOUNDATION — DO NOT GENERATE THEM: the foundation ships `RequireAuth` and
+   `RequireAdmin` (default exports at `@/components/RequireAuth` / `@/components/RequireAdmin`) that read
+   `useAuth()` and redirect (`RequireAuth` → `/login?redirect=…` when not authenticated; `RequireAdmin` →
+   home when `user?.role !== 'ADMIN'`). Route wiring is worker-owned (`AppRoutes` is generated) and already
+   guards `/admin/*` with `RequireAdmin` and signed-in-only routes with `RequireAuth` — you do NOT wire routes
+   and you do NOT create a `ProtectedRoute`. To gate content INSIDE a page, wrap it in
+   `<RequireAuth>…</RequireAuth>` / `<RequireAdmin>…</RequireAdmin>` or branch on `useAuth()` directly.
    Read auth state synchronously (rule 9 above) so a refresh on a gated route does not bounce to /login.
 4. ADMIN ENTRY IS IN THE SHELL — DO NOT REBUILD IT: the foundation `SiteHeader` already renders the account
    dropdown and shows an **Admin** link to `/admin` when `user?.role === 'ADMIN'`, plus Login/Sign-up when

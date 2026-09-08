@@ -166,7 +166,7 @@ class ProjectPlanningNodeTest {
         when(llm.generateArchitectureSpec(any(BriefContext.class), any())).thenReturn(spec);
 
         List<String> enrichOrder = new java.util.ArrayList<>();
-        org.mockito.Mockito.lenient().when(enrichLlm.enrichFeature(any(), any(), any(), any(), any(), any()))
+        org.mockito.Mockito.lenient().when(enrichLlm.enrichFeature(any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenAnswer(inv -> {
                     com.business.discovery.worker.service.llm.FeatureSpec f = inv.getArgument(0);
                     enrichOrder.add(f.getFeatureName());
@@ -196,7 +196,7 @@ class ProjectPlanningNodeTest {
         CyclicFixture fx = cyclicTwoFeatureSpec();   // featureA ⇄ featureB, back-edge owner = featureB
 
         java.util.concurrent.atomic.AtomicReference<String> capturedViolation = new AtomicReference<>();
-        when(enrichLlm.enrichFeature(any(), any(), any(), any(), any(), any(), any()))
+        when(enrichLlm.enrichFeature(any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenAnswer(inv -> {
                     com.business.discovery.worker.service.llm.FeatureSpec owner = inv.getArgument(0);
                     capturedViolation.set(inv.getArgument(6));
@@ -212,7 +212,7 @@ class ProjectPlanningNodeTest {
         // The retry prompt was handed the concrete cycle it had formed.
         assertThat(capturedViolation.get()).isEqualTo("featureA → featureB → featureA");
         // Re-enriched exactly once — one pass was enough to converge.
-        verify(enrichLlm).enrichFeature(any(), any(), any(), any(), any(), any(), any());
+        verify(enrichLlm).enrichFeature(any(), any(), any(), any(), any(), any(), any(), any());
         assertThat(com.business.discovery.worker.util.FeatureDependencyGraph.findCycle(
                 fx.spec.getFeatures())).isEmpty();
     }
@@ -228,7 +228,7 @@ class ProjectPlanningNodeTest {
 
         CyclicFixture fx = cyclicTwoFeatureSpec();
 
-        when(enrichLlm.enrichFeature(any(), any(), any(), any(), any(), any(), any()))
+        when(enrichLlm.enrichFeature(any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenAnswer(inv -> {
                     com.business.discovery.worker.service.llm.FeatureSpec owner = inv.getArgument(0);
                     owner.setFeatureInstruction("Ignores the constraint and wires back anyway.");
@@ -243,7 +243,7 @@ class ProjectPlanningNodeTest {
         assertThat(thrown.getMessage()).contains("Self-heal re-enriched it 2x");
         // Budget is exactly MAX_CYCLE_HEAL_ATTEMPTS re-enrich calls.
         verify(enrichLlm, org.mockito.Mockito.times(2))
-                .enrichFeature(any(), any(), any(), any(), any(), any(), any());
+                .enrichFeature(any(), any(), any(), any(), any(), any(), any(), any());
         // Back-edge owner (featureB) left cleared so a container retry re-enriches just it.
         com.business.discovery.worker.service.llm.FeatureSpec featureB = fx.spec.getFeatures().stream()
                 .filter(f -> "featureB".equals(f.getFeatureName())).findFirst().orElseThrow();

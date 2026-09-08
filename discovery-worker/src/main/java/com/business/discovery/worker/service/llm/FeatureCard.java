@@ -46,6 +46,13 @@ public class FeatureCard {
     /** Slugs of the OTHER features whose classes/endpoints this feature's files inject or call. */
     private List<String> dependsOnFeatures;
 
+    /**
+     * Ids of the FOUNDATION features this feature consumes (auth / payment / cart / gallery) — the
+     * kept-set edge from enrichment (§6b Part B). Surfaced in the generator prompt so the LLM knows
+     * which fenced capabilities to look up in the FENCED FOUNDATION CONTRACT block.
+     */
+    private List<String> consumesFoundation;
+
     /** The files that make up this feature, each with its structural role. */
     private List<FileRef> files;
 
@@ -111,6 +118,12 @@ public class FeatureCard {
 
         if (dependsOnFeatures != null && !dependsOnFeatures.isEmpty()) {
             sb.append("Depends on features: ").append(String.join(", ", dependsOnFeatures)).append("\n");
+        }
+
+        if (consumesFoundation != null && !consumesFoundation.isEmpty()) {
+            sb.append("Consumes foundation features: ").append(String.join(", ", consumesFoundation))
+              .append(" (import their fenced handles VERBATIM — look them up in the FENCED FOUNDATION "
+                      + "CONTRACT block; never re-declare them)\n");
         }
 
         if (files != null && !files.isEmpty()) {

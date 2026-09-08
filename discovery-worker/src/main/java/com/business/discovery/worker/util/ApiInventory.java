@@ -49,18 +49,15 @@ public final class ApiInventory {
     // functions. AuthController's login is handled by AuthContext directly; PaymentController's
     // endpoints are called by the payment checkout UI using the raw ApiContractCard (the LLM
     // sees the path + type info without needing a derived service wrapper here). Deriving
-    // authService.ts would conflict with AuthContext's self-contained login logic.
-    private static final java.util.Set<String> FOUNDATION_CONTROLLERS = java.util.Set.of(
-            "AuthController.java",
-            "PaymentController.java",
-            "SpaController.java",
-            // Gallery + media library are foundation-owned (ship types + SDK + admin UI). Skip so the
-            // worker never derives a competing gallery/media SDK. (Gallery is a public view over the
-            // media library; admin management lives in AdminMediaController.)
-            "GalleryController.java",
-            "MediaController.java",
-            "AdminMediaController.java"
-    );
+    // authService.ts would conflict with AuthContext's self-contained login logic. Gallery + media
+    // library are foundation-owned (ship types + SDK + admin UI) — skip so the worker never derives
+    // a competing gallery/media SDK.
+    //
+    // Derived from FoundationManifest (§5, OCP onboarding) — the single declaration of foundation
+    // features. A new foundation controller is onboarded by appending to the manifest, not by editing
+    // this set. Pruning deferred → the projection is the full kept closure (all features).
+    private static final java.util.Set<String> FOUNDATION_CONTROLLERS =
+            FoundationManifest.defaultManifest().foundationControllers();
 
     private final List<Endpoint> endpoints;
     private final Map<String, TypeDef> types; // by simple name

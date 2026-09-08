@@ -38,6 +38,7 @@ class EnrichmentCardUtilTest {
                 .changeRequired(true)
                 .featureInstruction("Implement order lifecycle across controller and service.")
                 .dependsOnFeatures(List.of("auth"))
+                .consumesFoundation(List.of("payment", "auth"))
                 .filePaths(List.of(controller.getFilePath(), service.getFilePath()))
                 .build();
 
@@ -58,6 +59,7 @@ class EnrichmentCardUtilTest {
         assertThat(card.isChangeRequired()).isTrue();
         assertThat(card.getFeatureInstruction()).contains("order lifecycle");
         assertThat(card.getDependsOnFeatures()).containsExactly("auth");
+        assertThat(card.getConsumesFoundation()).containsExactly("payment", "auth");
         assertThat(card.getFiles()).hasSize(2);
         assertThat(card.getFiles())
                 .extracting(FeatureCard.FileRef::getRole)

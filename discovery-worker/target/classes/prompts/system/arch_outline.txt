@@ -318,6 +318,25 @@ partial set — an incomplete feature causes generation failures downstream.
 3. DESCRIPTION: one sentence per file. For PAGE files, name the key sections derived
    from the design context (e.g. "full-bleed hero, filterable class grid, sticky CTA").
    Do NOT emit method signatures, endpoint lists, or field lists — stage two adds those.
+4. FOUNDATION FEATURES: emit a top-level "foundation_features" array declaring exactly
+   which pre-scaffolded foundation capabilities THIS project consumes — no more, no less.
+   Each entry is { "id": <feature>, "consumed_via": [<fixed handles you import>] }.
+   This is your assertion of the foundation↔domain coupling; it is NOT the file list and
+   does NOT plan or re-describe foundation internals (those are fenced and DO NOT PLAN).
+   - "auth" is ALWAYS present (every project has the auth spine + app shell + shared
+     exceptions). consumed_via e.g. ["useAuth()", "@/api/client", "@CurrentUser Integer userId"].
+   - "payment" ONLY if you plan an ordering/checkout/commerce flow that injects the payment
+     spine. consumed_via e.g. ["PaymentService.createOrder", "PaymentCapturedEvent"].
+   - "cart" ONLY if you build cart-facing UI on the headless cart framework.
+     consumed_via e.g. ["useCart()", "useCheckout()"].
+   - "gallery" ONLY if you surface the media library / public gallery. consumed_via e.g.
+     ["useGallery()", "<GallerySection/>", "GalleryController"].
+   OMIT any capability this project does not use. The handles in consumed_via are the SAME
+   fixed handles the referencing files list in imports_from — they must match verbatim.
+   FILE-LEVEL COUPLING: any file that consumes a foundation_features entry MUST (a) name the
+   capability by its fixed handle in its one-line description (e.g. "…injects the pre-scaffolded
+   PaymentService", "…reads the current user via useAuth()"), and (b) list that exact handle in
+   its imports_from. Never re-describe the foundation's internals — reference the handle only.
 
 # FEATURE GROUPING (required in every output)
 
@@ -359,7 +378,8 @@ SHARED:   shared-backend
 # OUTPUT CONTRACT
 Return ONLY the JSON object — no fences, prose, or commentary. Strict-parseable; conforms
 field-for-field to the provided schema (all required fields, no extra/invented top-level
-keys).
+keys). Top-level keys: the file/feature manifest fields plus "features" (see FEATURE
+GROUPING) and "foundation_features" (see OUTLINE RULE 4 — an array of { "id", "consumed_via" }).
 
 # SELF-CHECK (do not output)
 - Every mustHaveFeature has backend Model + Repository + Service + Controller?
@@ -378,4 +398,6 @@ keys).
   domain or services/local/*? Every API-calling file's imports_from points at a
   <domain>Service.ts?
 - routes.ts NOT planned (derived); App.tsx present but its routes NOT designed?
+- foundation_features present, "auth" always included, and every OTHER entry backed by a
+  feature actually planned (payment⇒ordering/checkout, cart⇒cart UI, gallery⇒gallery page)?
 - Strict JSON, no fences, schema-valid?

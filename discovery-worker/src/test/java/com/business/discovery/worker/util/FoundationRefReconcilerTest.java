@@ -114,6 +114,29 @@ class FoundationRefReconcilerTest {
     }
 
     @Test
+    void keepsAppCartUiComponents_stripsOnlyFoundationCartSpine() {
+        // Foundation cart SPINE (frontend/src/cart/** — context + hooks) is fenced → stripped.
+        // App cart UI (frontend/src/components/cart/**) is NOT fenced → must survive. The old bare
+        // "/cart/" fragment matched BOTH, wrongly stripping CartItemsTable/CartSummary → CartPage then
+        // imported files that never generated (TS2307, prakash Theme G). Fence is now "/src/cart/".
+        FileSpec spine = file("useCartStore.ts", "frontend/src/cart/useCartStore.ts", "FRONTEND", null, null, "cart");
+        FileSpec ui    = file("CartItemsTable.tsx", "frontend/src/components/cart/CartItemsTable.tsx", "FRONTEND", null, null, "cart");
+        ArchitectureSpec spec = ArchitectureSpec.builder()
+                .files(new ArrayList<>(List.of(spine, ui)))
+                .features(new ArrayList<>(List.of(
+                        FeatureSpec.builder().featureName("cart")
+                                .filePaths(new ArrayList<>(List.of(
+                                        "frontend/src/cart/useCartStore.ts",
+                                        "frontend/src/components/cart/CartItemsTable.tsx"))).build())))
+                .build();
+
+        FoundationRefReconciler.reconcile(spec, registry);
+
+        assertThat(names(spec)).contains("CartItemsTable.tsx");     // app cart UI survives
+        assertThat(names(spec)).doesNotContain("useCartStore.ts");  // foundation cart spine stripped
+    }
+
+    @Test
     void rewritesUserRefToIntegerUserIdLeavingPkAndDomainFields() {
         ArchitectureSpec spec = absFitnessLikeSpec();
         FoundationRefReconciler.reconcile(spec, registry);

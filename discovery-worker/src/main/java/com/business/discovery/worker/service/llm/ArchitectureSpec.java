@@ -25,4 +25,13 @@ public class ArchitectureSpec {
      * Null on old specs (deserializes safely via @JsonIgnoreProperties).
      */
     private List<FeatureSpec> features;
+
+    /**
+     * The planner's assertion of which foundation features this project actually consumes —
+     * the kept closure of the foundation manifest, declared as outline output (§6b Part A of
+     * foundation-feature-manifest-plan.md). Serializes as {@code foundation_features} (SNAKE_CASE).
+     * Makes the foundation↔domain coupling a first-class artifact fact the reconciler can check
+     * instead of inferring from import strings. Null on old specs (safe via @JsonIgnoreProperties).
+     */
+    private List<FoundationFeatureRef> foundationFeatures;
 }

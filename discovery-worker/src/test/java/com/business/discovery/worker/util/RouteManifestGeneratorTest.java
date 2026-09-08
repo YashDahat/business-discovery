@@ -61,18 +61,24 @@ class RouteManifestGeneratorTest {
                 new RouteManifestGenerator.Flags(true, true, true, List.of()));
         assertThat(routes)
                 .contains("import AdminMediaPage from './pages/admin/AdminMediaPage';")
-                .contains("<Route element={<ProtectedRoute allowedRoles={['ADMIN']}><AdminLayout /></ProtectedRoute>}>")
+                // foundation guards (default exports) + named siteConfig — no phantom ProtectedRoute, no default siteConfig
+                .contains("import RequireAdmin from '@/components/RequireAdmin'")
+                .contains("import RequireAuth from '@/components/RequireAuth'")
+                .contains("import { siteConfig } from '@/config/siteConfig'")
+                .doesNotContain("import ProtectedRoute")
+                .doesNotContain("import siteConfig from '@/config/siteConfig'")
+                .contains("<Route element={<RequireAdmin><AdminLayout /></RequireAdmin>}>")
                 .contains("<Route path=\"/admin\" element={<AdminDashboardPage />} />")
                 .contains("<Route path=\"/admin/media\" element={<AdminMediaPage />} />")
-                .contains("<Route element={<ProtectedRoute><Outlet /></ProtectedRoute>}>")
+                .contains("<Route element={<RequireAuth><Outlet /></RequireAuth>}>")
                 .contains("<Route path=\"/checkout\" element={<CheckoutPage />} />")
-                .doesNotContain("<ProtectedRoute><AdminDashboardPage /></ProtectedRoute>");  // no per-child admin guard
+                .doesNotContain("<RequireAdmin><AdminDashboardPage /></RequireAdmin>");  // no per-child admin guard
         // structural ordering: SiteLayout → auth guard → checkout → catch-all last
         int site     = routes.indexOf("<SiteLayout config={siteConfig}>");
-        int authGate = routes.indexOf("<Route element={<ProtectedRoute><Outlet /></ProtectedRoute>}>");
+        int authGate = routes.indexOf("<Route element={<RequireAuth><Outlet /></RequireAuth>}>");
         int checkout = routes.indexOf("path=\"/checkout\"");
         int catchAll = routes.indexOf("path=\"*\"");
-        int adminGrp = routes.indexOf("<AdminLayout /></ProtectedRoute>}>");
+        int adminGrp = routes.indexOf("<AdminLayout /></RequireAdmin>}>");
         assertThat(adminGrp).isLessThan(site);
         assertThat(site).isLessThan(authGate);
         assertThat(authGate).isLessThan(checkout);
@@ -220,7 +226,7 @@ class RouteManifestGeneratorTest {
                 .contains("import AdminLayout from '@/components/AdminLayout'")
                 .contains("<Route path=\"/\" element={<HomePage />} />")
                 // admin pages are now children of a single guarded AdminLayout layout-route
-                .contains("<Route element={<ProtectedRoute allowedRoles={['ADMIN']}><AdminLayout /></ProtectedRoute>}>")
+                .contains("<Route element={<RequireAdmin><AdminLayout /></RequireAdmin>}>")
                 .contains("<Route path=\"/admin/orders\" element={<AdminOrdersPage />} />")
                 .doesNotContain("<AdminLayout></AdminLayout>");
     }
@@ -230,7 +236,7 @@ class RouteManifestGeneratorTest {
         // structural: the admin layout-route must close before the SiteLayout group opens
         String routes = RouteManifestGenerator.emitAppRoutes(manifest("HomePage", "AdminOrdersPage"),
                 new RouteManifestGenerator.Flags(true, true, true, java.util.List.of()));
-        int adminGroup = routes.indexOf("<AdminLayout /></ProtectedRoute>}>");
+        int adminGroup = routes.indexOf("<AdminLayout /></RequireAdmin>}>");
         int siteGroup  = routes.indexOf("<SiteLayout config={siteConfig}>");
         assertThat(adminGroup).isGreaterThan(-1);
         assertThat(adminGroup).isLessThan(siteGroup);
@@ -243,7 +249,7 @@ class RouteManifestGeneratorTest {
                 new RouteManifestGenerator.Flags(true, true, true, java.util.List.of()));
 
         int site     = routes.indexOf("<SiteLayout config={siteConfig}>");
-        int authGate = routes.indexOf("<Route element={<ProtectedRoute><Outlet /></ProtectedRoute>}>");
+        int authGate = routes.indexOf("<Route element={<RequireAuth><Outlet /></RequireAuth>}>");
         int checkout = routes.indexOf("<Route path=\"/checkout\" element={<CheckoutPage />} />");
         int catchAll = routes.indexOf("<Route path=\"*\" element={<NotFoundPage />} />");
 

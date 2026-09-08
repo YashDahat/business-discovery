@@ -9,6 +9,7 @@ import com.business.discovery.worker.service.llm.ComplianceResult;
 import com.business.discovery.worker.service.llm.FeatureSpec;
 import com.business.discovery.worker.service.llm.FileContract;
 import com.business.discovery.worker.service.llm.FileSpec;
+import com.business.discovery.worker.service.llm.FoundationFeatureRef;
 import com.business.discovery.worker.util.ChangeTargetingUtil;
 import com.business.discovery.worker.util.LlmResponseParser;
 import com.business.discovery.worker.util.PromptLoader;
@@ -173,6 +174,25 @@ public abstract class LlmGeneratorService {
                                      WorkspaceReader workspace,
                                      Set<String> dependentFeatures,
                                      String priorCycleViolation) {
+        return enrichFeature(feature, featureFiles, peerApiSummaries, brief, workspace,
+                dependentFeatures, priorCycleViolation, null);
+    }
+
+    /**
+     * @param foundationFeatures the project's kept set of foundation features (the planner's
+     *                           {@code ArchitectureSpec.foundationFeatures}, §6b Part A) — fed to
+     *                           enrichment as DECLARED context so it can name the exact fenced handles
+     *                           this feature reaches for and emit {@code consumes_foundation}. Null/empty
+     *                           on old specs or when nothing was declared (no foundation context block).
+     */
+    public FeatureSpec enrichFeature(FeatureSpec feature,
+                                     List<FileSpec> featureFiles,
+                                     Map<String, Object> peerApiSummaries,
+                                     BriefContext brief,
+                                     WorkspaceReader workspace,
+                                     Set<String> dependentFeatures,
+                                     String priorCycleViolation,
+                                     List<FoundationFeatureRef> foundationFeatures) {
         String requestedChangesSection = (brief.requestedChanges() != null
                 && !brief.requestedChanges().isBlank())
                 ? "\n== REQUESTED CHANGES ==\n" + brief.requestedChanges() + "\n"
@@ -210,6 +230,8 @@ public abstract class LlmGeneratorService {
                 .with("requestedChangesSection", requestedChangesSection)
                 .with("dependencyDirectionSection",
                         buildDependencyDirectionSection(dependentFeatures, priorCycleViolation))
+                .with("foundationFeaturesSection",
+                        buildFoundationFeaturesSection(foundationFeatures))
                 .render();
 
         Exception lastError = null;
@@ -233,6 +255,7 @@ public abstract class LlmGeneratorService {
                     feature.setChangeRequired(result.path("change_required").asBoolean(true));
                 }
                 feature.setDependsOnFeatures(parseDependsOnFeatures(result, feature, dependentFeatures));
+                feature.setConsumesFoundation(parseConsumesFoundation(result, foundationFeatures));
                 mergeFileDetail(feature, featureFiles, result);
                 return feature;
 
@@ -337,6 +360,69 @@ public abstract class LlmGeneratorService {
                      + " — the cycle gate will reject this spec", feature.getFeatureName(), violations);
         }
         return deps;
+    }
+
+    /**
+     * The DECLARED foundation context block for the enrichment prompt: the project's kept set of
+     * foundation features (auth / payment / cart / gallery) plus the exact handles each is reached by,
+     * so the model names those fenced capabilities verbatim in the featureInstruction and returns a
+     * {@code consumes_foundation} edge for THIS feature. Empty string when no kept set was declared
+     * (old specs / planner omitted it) — enrichment then behaves exactly as before.
+     */
+    private static String buildFoundationFeaturesSection(List<FoundationFeatureRef> foundationFeatures) {
+        if (foundationFeatures == null || foundationFeatures.isEmpty()) return "";
+
+        StringBuilder rows = new StringBuilder();
+        for (FoundationFeatureRef ref : foundationFeatures) {
+            if (ref == null || ref.getId() == null || ref.getId().isBlank()) continue;
+            rows.append("- ").append(ref.getId().trim());
+            if (ref.getConsumedVia() != null && !ref.getConsumedVia().isEmpty()) {
+                rows.append(" — via ").append(String.join(", ", ref.getConsumedVia()));
+            }
+            rows.append("\n");
+        }
+        if (rows.length() == 0) return "";
+
+        return "\n== FOUNDATION FEATURES THIS PROJECT CONSUMES (fenced — never re-declare) ==\n"
+                + "The foundation ships these capabilities pre-scaffolded; this project uses them via the\n"
+                + "handles shown. Reference them VERBATIM (their exact shapes are in the FENCED FOUNDATION\n"
+                + "CONTRACT); never plan or re-author them. In the output, set \"consumes_foundation\" to the\n"
+                + "ids from THIS list that any file in THIS feature actually injects, imports, or calls — []\n"
+                + "if none.\n"
+                + rows;
+    }
+
+    /**
+     * Reads the declared {@code consumes_foundation} edge — the ids of foundation features THIS feature
+     * uses — and constrains them to the project's kept set (a hallucinated id absent from the declared
+     * foundation_features is dropped, so the edge can only ever name a real kept capability). Null-safe:
+     * a missing/blank array yields an empty list (no foundation edges).
+     */
+    private static List<String> parseConsumesFoundation(JsonNode result,
+                                                        List<FoundationFeatureRef> foundationFeatures) {
+        JsonNode declared = result.path("consumes_foundation");
+        if (!declared.isArray()) return List.of();
+
+        Set<String> keptIds = new java.util.HashSet<>();
+        if (foundationFeatures != null) {
+            for (FoundationFeatureRef ref : foundationFeatures) {
+                if (ref != null && ref.getId() != null && !ref.getId().isBlank()) {
+                    keptIds.add(ref.getId().trim());
+                }
+            }
+        }
+
+        List<String> ids = new ArrayList<>();
+        for (JsonNode entry : declared) {
+            String value = entry.asText(null);
+            if (value == null || value.isBlank()) continue;
+            String trimmed = value.trim();
+            // Only keep ids the project actually declared in foundation_features; drop hallucinations.
+            // When no kept set was passed (old spec), accept as-is rather than discard the signal.
+            if (!keptIds.isEmpty() && !keptIds.contains(trimmed)) continue;
+            if (!ids.contains(trimmed)) ids.add(trimmed);
+        }
+        return ids;
     }
 
     /**

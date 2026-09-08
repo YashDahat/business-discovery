@@ -516,8 +516,9 @@ public class FrontendGeneratorNode implements WorkerNode {
         Path frontendSrc = frontendDir.resolve("src");
         boolean hasAuth = manifestPaths.contains("frontend/src/context/AuthContext.tsx")
                 || Files.exists(frontendSrc.resolve("context/AuthContext.tsx"));
-        boolean hasProtected = manifestPaths.contains("frontend/src/components/ProtectedRoute.tsx")
-                || Files.exists(frontendSrc.resolve("components/ProtectedRoute.tsx"));
+        // Foundation auth guards (RequireAuth/RequireAdmin) replace the old phantom ProtectedRoute.
+        boolean hasProtected = Files.exists(frontendSrc.resolve("components/RequireAdmin.tsx"))
+                && Files.exists(frontendSrc.resolve("components/RequireAuth.tsx"));
         boolean hasQuery = manifestPaths.contains("frontend/src/api/client.ts")
                 || Files.exists(frontendSrc.resolve("api/client.ts"));
         var flags = new com.business.discovery.worker.util.RouteManifestGenerator.Flags(
@@ -661,43 +662,52 @@ public class FrontendGeneratorNode implements WorkerNode {
         // committed, masked every other error from the validator (yeti: 7 visible vs 94 real), and
         // burned a 30-round fix session first. The root cause is also addressed upstream by disabling
         // Flash thinking (GeminiLlmGeneratorService), so a retry here almost always succeeds.
-        String contractSection = (contractCard != null && !contractCard.isEmpty())
-                ? ApiContractCard.PROMPT_KEY + "\n" + contractCard.toPromptSection()
-                : null;
-        // Route card rides the same cacheable system-prompt slot — built once per run,
-        // byte-identical across calls, so it prefix-caches exactly like the contract card.
-        if (routeCardSection != null) {
-            contractSection = contractSection == null
-                    ? routeCardSection : contractSection + "\n\n" + routeCardSection;
+        // Context assembled cache-stable + shape-deduped. STATIC, byte-identical blocks lead so they
+        // ride the provider prefix cache; the per-layer GROWING frontendContractCard trails so its
+        // growth cannot evict the cached prefix. The order also encodes PRECEDENCE — the ACTUAL
+        // signatures in the trailing frontendContractCard override any planned card above them.
+        java.util.List<String> blocks = new java.util.ArrayList<>();
+
+        // 1. Fenced foundation spine (useAuth, useCheckout(steps), shell props) — immutable, leads
+        //    every call so it is the byte-identical prefix.
+        if (!foundationContractSection.isEmpty()) blocks.add(foundationContractSection);
+
+        // 2. Wire DTOs — FULL verbatim, all files. Types ONLY: the SDK/service layer is never
+        //    authored by an LLM (hooks + services are mechanically derived by ApiArtifactGeneratorNode),
+        //    so a component/page has no SDK call site — the SDK + routes sections were a block it must
+        //    not act on. The field list is the whole contract, so it stays verbatim.
+        if (contractCard != null && contractCard.hasWireTypes()) {
+            blocks.add(ApiContractCard.PROMPT_KEY + "\n" + contractCard.toTypesOnlyPromptSection());
         }
-        // Frontend contract card: hook return types, context signatures, local type field shapes
-        // extracted from all layers completed before this file's layer. Empty for the first layer;
-        // grows incrementally so each layer sees contracts from all prior layers.
-        if (!frontendContractCard.isEmpty()) {
-            String fcSection = "FRONTEND MODULE CONTRACTS\n" + frontendContractCard.toPromptSection();
-            contractSection = contractSection == null ? fcSection : contractSection + "\n\n" + fcSection;
-        }
-        // Planned component prop contracts — only for files that ARE / RENDER components (component, page).
-        // From the static plan, so it is available up front and byte-identical per run (prefix-caches).
-        // Solves the same-layer sibling-prop drift the incremental FrontendContractCard cannot.
+
+        // 3. Route table — built once per run, byte-identical, prefix-caches.
+        if (routeCardSection != null) blocks.add(routeCardSection);
+
+        // 4. Planned component props — only for files that ARE / RENDER components. Static plan,
+        //    available up front; solves the same-layer sibling-prop drift the incremental card cannot.
         if (plannedPropsCard != null && !plannedPropsCard.isEmpty() && isComponentOrPagePath(entry.path())) {
-            String pp = plannedPropsCard.toPromptSection();
-            contractSection = contractSection == null ? pp : contractSection + "\n\n" + pp;
+            blocks.add(plannedPropsCard.toPromptSection());
         }
-        // Planned frontend module contracts (hooks/services/types) — for ALL files, from the static
-        // plan, byte-identical per run (prefix-caches). The frontend twin of BackendContractCard: solves
-        // same-layer consumers inventing a not-yet-generated hook/service signature.
-        if (frontendPlannedContractCard != null && !frontendPlannedContractCard.isEmpty()) {
-            String fp = frontendPlannedContractCard.toPromptSection();
-            contractSection = contractSection == null ? fp : contractSection + "\n\n" + fp;
+
+        // 5. Planned hook/type module contracts — PARSER-GAP FALLBACK ONLY. On the normal path the
+        //    derivation put the ACTUAL types/services/hooks on disk, so their real signatures arrive
+        //    via the trailing frontendContractCard; the planned copy would only add a stale,
+        //    possibly-divergent fork (the shown-but-ignored contradiction class). An empty wire-type
+        //    contract means derivation did not run (parser gap) — only then is the plan the best we have.
+        if (frontendPlannedContractCard != null && !frontendPlannedContractCard.isEmpty()
+                && (contractCard == null || !contractCard.hasWireTypes())) {
+            blocks.add("── PARSER-GAP FALLBACK — planned module interfaces (derivation did not run) ──\n"
+                    + frontendPlannedContractCard.toPromptSection());
         }
-        // Fenced foundation contract goes FIRST so the immutable spine (useAuth, useCheckout(steps),
-        // shell props) is the leading, byte-identical prefix of every generation call this run.
-        if (!foundationContractSection.isEmpty()) {
-            contractSection = contractSection == null
-                    ? foundationContractSection
-                    : foundationContractSection + "\n\n" + contractSection;
+
+        // 6. Actual intra-frontend contracts (hook return types, context sigs, local type shapes)
+        //    from all prior layers. GROWING per layer → trails for cache stability and WINS over any
+        //    planned card above (real signatures beat planned ones).
+        if (!frontendContractCard.isEmpty()) {
+            blocks.add("FRONTEND MODULE CONTRACTS\n" + frontendContractCard.toPromptSection());
         }
+
+        String contractSection = blocks.isEmpty() ? null : String.join("\n\n", blocks);
 
         // Whole-feature context: identity + sibling map (from the card) + the effective instruction.
         FeatureCard card = spec != null && spec.getFeatureName() != null

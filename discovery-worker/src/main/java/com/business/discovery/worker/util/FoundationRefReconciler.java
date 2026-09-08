@@ -48,37 +48,30 @@ public final class FoundationRefReconciler {
         }
     }
 
-    // Fenced backend types + wiring a domain plan must never re-declare (incl. the renamed variants
-    // arch_outline already warns about). Shaped types also come from the registry; duplicated here so
-    // the reconciler holds the line even when a contract card is absent.
-    private static final Set<String> FENCED_BACKEND_NAMES = Set.of(
-            "User", "Role", "UserRepository", "UserService", "UserDetailsServiceImpl",
-            "JwtUtil", "JwtService", "JwtTokenProvider", "JwtAuthFilter",
-            "SecurityConfig", "SecurityConfiguration", "PasswordEncoderConfig", "PasswordEncoder",
-            "AuthController", "AdminInitializer", "SpaController",
-            "AuthRequest", "AuthResponse", "RegisterRequest",
-            "Payment", "PaymentStatus", "PaymentRepository", "PaymentService",
-            "PaymentController", "PaymentGateway", "RazorpayPaymentGateway", "DemoPaymentGateway",
-            "PaymentGatewayConfig", "RazorpayConfiguration", "GatewayWebhookEvent", "PaymentCapturedEvent",
-            "PaymentGatewayException", "ResourceNotFoundException",
-            "CreatePaymentRequest", "PaymentOrderResponse", "VerifyPaymentRequest", "PaymentVerificationResponse"
-    );
+    // Fenced backend/frontend names a domain plan must never re-declare (incl. the renamed variants
+    // arch_outline already warns about). Shaped types also come from the registry; these NAME-level
+    // fences hold the line even when a contract card is absent. Derived from FoundationManifest (§5) —
+    // the single declaration of the foundation's fenced surface; a new fenced symbol is onboarded by
+    // appending to the manifest, not by editing these sets. Pruning deferred → full kept closure.
+    private static final Set<String> FENCED_BACKEND_NAMES =
+            FoundationManifest.defaultManifest().fencedBackendNames();
 
-    private static final Set<String> FENCED_FRONTEND_NAMES = Set.of(
-            "AuthContext", "useAuth", "authService",
-            "Header", "Footer", "Layout", "SiteHeader", "SiteFooter", "SiteLayout",
-            "CartContext", "CheckoutContext", "useCheckout"
-    );
+    private static final Set<String> FENCED_FRONTEND_NAMES =
+            FoundationManifest.defaultManifest().fencedFrontendNames();
 
     // Path fragments (lower-cased) that mark a fenced frontend module regardless of file base name.
+    // NOTE: "/src/cart/" (the foundation headless cart SPINE — context + hooks), NOT a bare "/cart/",
+    // which also matched the app's cart UI at "/src/components/cart/" and wrongly stripped
+    // CartItemsTable/CartSummary from the plan → CartPage imported files that never generated (TS2307).
     private static final List<String> FENCED_FRONTEND_PATHS = List.of(
-            "/api/client.", "/types/auth.", "/shell/", "/cart/",
+            "/api/client.", "/types/auth.", "/shell/", "/src/cart/",
             "/context/authcontext", "/context/cartcontext", "/context/checkoutcontext",
             "/hooks/useauth", "/services/authservice"
     );
 
-    // Never strip — the worker legitimately generates these against the fenced foundation.
-    private static final Set<String> GUARD_NAMES = Set.of("ProtectedRoute", "AdminLayout", "siteConfig");
+    // Never strip — the worker legitimately generates these against the fenced foundation. Derived
+    // from FoundationManifest (§5): the union of every feature's frontend.guards.
+    private static final Set<String> GUARD_NAMES = FoundationManifest.defaultManifest().guardNames();
 
     // Field names (normalized) that denote a reference to the platform user; type==User handled separately.
     private static final Set<String> USER_REF_NAMES = Set.of(

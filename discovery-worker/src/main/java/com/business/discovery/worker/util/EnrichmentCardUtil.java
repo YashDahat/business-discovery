@@ -80,6 +80,7 @@ public final class EnrichmentCardUtil {
                     .changeRequired(feature.isChangeRequired())
                     .featureInstruction(feature.getFeatureInstruction())
                     .dependsOnFeatures(feature.getDependsOnFeatures())
+                    .consumesFoundation(feature.getConsumesFoundation())
                     .files(files)
                     .build());
         }
