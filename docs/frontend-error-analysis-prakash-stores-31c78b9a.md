@@ -563,7 +563,7 @@ Every piece of context a frontend file (component/page — the only LLM-authored
 
 | Origin | What it produces | Trust |
 |---|---|---|
-| **`ARCHITECTURE.json`** (plan) | this file's `FileSpec` (role), reconciled contracts, feature→file map | authoritative for *intent* |
+| **`ARCHITECTURE.json`** (plan) | this file's `FileSpec` (role), reconciled contracts, feature→file map, **`foundation_features`** (§6b, committed `4df3761`) | authoritative for *intent* |
 | **Enrichment layer** (`ENRICHMENT.json`) | per-feature `FeatureCard` (identity, sibling map, instruction) | authoritative for *requirement* |
 | **Derived-from-backend disk** (`ApiArtifactGeneratorNode`) | `types/*.ts` (DTOs), services (SDK), hooks — all **mechanical** | ground truth (compiled backend) |
 | **Foundation + workspace** | `FOUNDATION_CONTRACT.md`, `AuthContext`/cart/shell, installed shadcn/radix, prior-layer files | ground truth (on disk) |
@@ -573,7 +573,7 @@ Every piece of context a frontend file (component/page — the only LLM-authored
 | # | Context category | Origin | Mechanism (card / registry) | Prompt slot | Carries | Status |
 |---|---|---|---|---|---|---|
 | 1 | **This file's details / role** | ARCHITECTURE.json `FileSpec` | `FileContractCard.render(spec, fileRole)` | USER (`fileRole`) | purpose, fields to build, fn sigs | ✅ |
-| 2 | **Feature requirement / flow** | Enrichment `ENRICHMENT.json` | `FeatureCard.buildFeatureContext` | USER (`featureContext`) | identity + sibling map + instruction | ✅ |
+| 2 | **Feature requirement / flow** | Enrichment `ENRICHMENT.json` | `FeatureCard.buildFeatureContext` | USER (`featureContext`) | identity + sibling map + instruction + **`consumes_foundation`** (§6b, `4df3761`: fed via `{{foundationFeaturesSection}}`, sets `FeatureCard.consumesFoundation`, rendered as "look up the fenced handle VERBATIM") | ✅ |
 | 3a | **Backend comms — hooks** (existence) | derived hooks on disk | `TypeScriptExportRegistry.toImportCatalog` | USER (`depFiles`) | import name + path | ✅ |
 | 3b | **Backend comms — hooks** (shape) | derived hooks on disk | `FrontendContractCard` (actual, trailing) | SYSTEM | hook **return signature** | ✅ |
 | 3c | **App-context sharing** (`useAuth`, `useCart`, checkout) | foundation `context/` | `FrontendContractCard` (context sigs) + `FoundationContractCard` | SYSTEM | accessor **signatures** (prose in foundation card) | ⚠️ partial — see #6 |
@@ -584,7 +584,7 @@ Every piece of context a frontend file (component/page — the only LLM-authored
 | 4d | **Models / DTOs — invented** (`variants`, `BrandDto`) | no producer | n/a — **Solution A** (plan-time) | — | — | ❌ owned by Solution A |
 | 4e | **Models / DTOs — degraded artifact** (`getAllProducts: void`) | derived on disk, **flattened by ErrorFix** | `ApiContractCard` passes it **verbatim — including the wrong type** | SYSTEM | a degraded signature as if it were truth | ❌ **BLIND SPOT** — map trusts derived as ground truth; **Solution A leg 2** (post-backend re-align) |
 | 5 | **shadcn / radix UI components** | installed workspace | `UiComponentInventory` (registry) | USER (`depFiles`) | real export names | ✅ |
-| 6 | **Foundation features** (auth/cart/checkout/shell) | `FOUNDATION_CONTRACT.md` | `FoundationContractCard` → `foundationContractSection` | SYSTEM (leads) | usage rules (**prose, not field lists**) | ✅ usage / ⚠️ field-level |
+| 6 | **Foundation features** (auth/cart/checkout/shell) | `FOUNDATION_CONTRACT.md` | `FoundationContractCard` → `foundationContractSection` **+ `FOUNDATION LOOKUP` rule** in `file_generate_{frontend,backend}.txt` (§6b Part C, `4df3761`) | SYSTEM (leads) | usage rules (**prose, not field lists**) **+ a directive to read/import the fenced block VERBATIM** | ✅ usage / ⚠️ field-level — the `FOUNDATION LOOKUP` rule now supplies the *obedience* lever for Theme F (shown-but-ignored); the *field-level* injection ([4b]/task 3) is still open |
 | 7 | **Sibling component props** | ARCHITECTURE.json | `PlannedComponentPropsCard` | SYSTEM | each component's prop contract | ✅ |
 | 8 | **Routes** | `RouteManifest` | route card | SYSTEM | path → page table | ✅ |
 | 9 | **Module existence namespace** | prior-layer disk | `TypeScriptExportRegistry.toImportCatalog` | USER (`depFiles`) | every module's name/path | ✅ |
@@ -617,6 +617,23 @@ Every piece of context a frontend file (component/page — the only LLM-authored
                    └─ export KIND ────────► ✗ registry omits default-vs-named ─────────────►  (guessed)             [9b] ❌ blind spot
 ```
 
+### §6b foundation-feature context channels (committed `4df3761`, added after this map was first drawn)
+
+The original map delivered foundation context through **one** channel — `FoundationContractCard` as the
+leading SYSTEM block (row 6). The `foundation_features` work (`foundation-feature-manifest-plan.md` §6b,
+task 9) added **two more** context channels; both are now committed and folded into the rows above:
+
+| # | Channel | Origin → slot | Mechanism | What it adds |
+|---|---|---|---|---|
+| §6b-A | **`foundation_features` declaration** | `ARCHITECTURE.json` (planner) | `arch_outline.txt` OUTLINE RULE 4 + `ArchitectureSpec.foundationFeatures` | records *which* foundation features this project consumes + per-file `imports_from` coupling — the plan now states the coupling instead of it being inferred from the registry |
+| §6b-B | **`consumes_foundation` enrichment edge** (row 2) | Enrichment → USER `featureContext` | `{{foundationFeaturesSection}}` in `feature_enrichment.txt` → `FeatureCard.consumesFoundation` → rendered in `toPromptSection` | tells each feature's generation *which fenced handles it consumes* and to look them up VERBATIM in the foundation block |
+| §6b-C | **`FOUNDATION LOOKUP` rule** (row 6) | static SYSTEM prompt | rule in `file_generate_{frontend,backend}.txt` | directs the LLM to import/call the fenced foundation block VERBATIM and never invent a variant — the **obedience lever** the prose block lacked |
+
+**Relationship to Theme F.** §6b-C attacks the *obedience* half of Theme F (`AuthUser` was
+shown-but-ignored) by explicitly ordering VERBATIM use of the fenced block. It does **not** close the
+*field-level* half — the structured, field-for-field injection of foundation model shapes ([4b] / task 3)
+is still open. So Theme F is now **partially** addressed at the prompt layer; the derive-step fix remains.
+
 ### The single blocker for "never fails again"
 
 Everything an LLM component/page consumes is delivered **except [4b] foundation-model internal fields** (`AuthUser` — Theme F, the last-run failure) and, secondarily, **[4c]** nested/non-`export` types missed by the non-recursive WIRE TYPES scan. Both are *absence* bugs, fixable deterministically:
@@ -648,7 +665,7 @@ Split by whether the cause is **context** (your target) vs **not context** (work
 
 | Gap | Map row | Fix | Errors closed | Status |
 |---|---|---|---|---|
-| Foundation-model fields absent | [4b] | Inject `AuthUser` + shell/context model interfaces **field-for-field** into SYSTEM prefix (edit-3-redirected) | F = **4** | TODO — verify shapes in `webapp-foundation` first |
+| Foundation-model fields absent | [4b] | Inject `AuthUser` + shell/context model interfaces **field-for-field** into SYSTEM prefix (edit-3-redirected) | F = **4** | **PARTIAL** — obedience lever shipped (`4df3761`: `FOUNDATION LOOKUP` rule §6b-C + `consumes_foundation` §6b-B); field-level structured injection still TODO — verify shapes in `webapp-foundation` first |
 | Nested / non-`export` types missed | [4c] | Make `ApiContractCard.readDerived` recursive (`Files.walk` over `types/**`) | 0 seen, latent | TODO — cheap |
 | Export kind not carried | [9b] | Registry catalog records **default vs named** per module; feed it to import rendering | E-siblings = **3** | TODO |
 | Degraded artifact passed as truth | [4e] | **Solution A leg 2** — re-align FE contracts to the *regenerated* backend after `BackendValidationNode` (so `void` never reaches the FE as truth) | D = **4** | TODO — part of Solution A |
@@ -724,41 +741,48 @@ Ordered by leverage (errors closed per effort). Tasks 3–6 are independent and 
 |---|---|---|---|---|---|
 | **1** | **Strip data-model shapes from plan/enrichment** — plan/enrichment describes feature/flow/UI intent ONLY, never data shapes; backend-derived WIRE TYPES becomes the sole DTO source. Prevents the 2nd-source contradiction ⇒ **obviates Solution A**. | [4d] | ~41 (A/B/C) | simplification | `ENRICHMENT.json` gen + enrichment prompt; `ProjectPlanningNode` |
 | **2** | **Delete `FrontendPlannedContractCard`** — actual-over-planned; by layer order every dep is already on disk. Removes the card + planned-vs-actual fork. Keep `PlannedComponentPropsCard` (same-layer siblings). | contradiction fork | — | deletion | `FrontendGeneratorNode`, `FrontendPlannedContractCard` |
-| **3** | **Surface foundation model shapes field-for-field — via `FoundationSymbolRegistry` (OCP), NOT a hardcoded read** *(revised; blocked by 9)* — `AuthUser` is ALREADY in `FOUNDATION_CONTRACT.md` (`{ username; role }` + "no email/name"), already parsed by `FoundationSymbolRegistry`, already injected as prose → Theme F was **shown-but-ignored**, not absence. Inject the registry's model shapes **structured/field-for-field** (stronger than prose) + a prompt bind; if a model is missing, add it to the contract (extend the foundation). A hardcoded worker-side disk read would re-create the exact seam task 9 removes. | [4b] (obedience) | 4 (F) | derive-step | `FoundationSymbolRegistry` consumer; **not** a hardcoded reader |
+| **3** | **Surface foundation model shapes field-for-field — via `FoundationSymbolRegistry` (OCP), NOT a hardcoded read** *(revised; unblocked — task 9 onboarding half now done)* — `AuthUser` is ALREADY in `FOUNDATION_CONTRACT.md` (`{ username; role }` + "no email/name"), already parsed by `FoundationSymbolRegistry`, already injected as prose → Theme F was **shown-but-ignored**, not absence. Inject the registry's model shapes **structured/field-for-field** (stronger than prose) + a prompt bind; if a model is missing, add it to the contract (extend the foundation). A hardcoded worker-side disk read would re-create the exact seam task 9 removes. **PARTIAL (`4df3761`):** the *obedience* lever shipped — the `FOUNDATION LOOKUP` rule (§6b-C) + `consumes_foundation` enrichment edge (§6b-B) now order the LLM to use the fenced block VERBATIM. **Remaining:** the *field-level* structured injection of foundation model shapes from `FoundationSymbolRegistry` (stronger than the current prose). | [4b] (obedience ✅ / field-level ▶) | 4 (F) | derive-step | `FoundationSymbolRegistry` consumer; **not** a hardcoded reader |
 | **4** | **Make `ApiContractCard.readDerived` recursive ([4c])** — `Files.walk` over `types/**` (keep the `// GENERATED` marker filter). | [4c] | 0 latent | derive-step | `ApiContractCard` |
 | **5** | **Record export kind (default/named) in `TypeScriptExportRegistry` ([9b])** — capture + surface per module so imports aren't guessed. | [9b] | 3 (E) | derive-step | `TypeScriptExportRegistry` |
 | **6** | **Re-derive FE types after backend validation ([4e], Solution A leg 2)** — re-derive `types/`/services from the regenerated backend after `BackendValidationNode`+`ErrorFixAgent`, before `FrontendGeneratorNode`, so degraded artifacts (`getAllProducts: void`) never ship as truth. | [4e] | 4 (D) | derive-step | `ApiArtifactGeneratorNode`, orchestration order |
 | **7** | **Constrain components to pure consumers + retire dead patchers** — prompt/scaffold: JSX + local state only, no type decls / service calls / contract authoring. Then delete patchers whose root is now upstream (`RowActionContractNormalizer`, `EnumValueImportPatcher`, `SiteConfigAccessPatcher`, parts of `AdminLayoutWrapperPatcher`) — verify each dead first. *Depends on 1 & 3.* | prevents recurrence | — | simplification | `file_generate_frontend.txt`; the named patchers |
 | **8** | ✅ **DONE — `NotFoundPage` precheck fixed at the foundation.** `NotFoundPage.tsx` is committed (`592541a`) + pushed to `origin/main`; the worker clones it, so the route-manifest precheck now passes and the build reaches `ErrorFixAgent`. Shipping from the foundation also sidesteps the planner-mis-file root. *Verify on next run (prakash predated the commit).* | enables ~6 residual | — | pipeline | `webapp-foundation` |
-| **9** | **OCP: auto-onboard new foundation features** — any feature added to `webapp-foundation` is considered by the pipeline automatically (open for extension, closed for modification). Derive the currently-hardcoded foundation seams from the foundation itself; onboarding a new feature becomes a foundation-side change only. *Orthogonal, structural.* | OCP compliance | — | simplification | see OCP detail below |
+| **9** | ✅ **DONE — foundation seams now derive from a manifest (onboarding half).** All three hardcoded `Set`s deleted: `FOUNDATION_CONTROLLERS`, `GUARD_NAMES`+fenced-name sets, `AUTH_KEYS`/`NON_NAV_KEYS` now project from `FoundationManifest` (`DEFAULT` reproduces the old constants; `load(Path)` honours a foundation-shipped `foundation.manifest.json`). Planner ingests the feature list via `ARCHITECTURE.json.foundation_features` + enrichment `consumes_foundation` + `FOUNDATION LOOKUP` generator clause. Regression-proven each projection == old literal set (`FoundationManifestTest` 8/8). **Per-project *pruning* deferred** (out of Task 9 scope). See `foundation-feature-manifest-plan.md`. | OCP compliance | — | simplification | see OCP detail below |
 | **10** | **Emit shared contracts as imported artifacts (contract-as-artifact)** — deterministic replacement for `PlannedComponentPropsCard`. Emit each component's props interface ONCE as a fenced artifact both sides `import` (referencing DTOs by import), so producer + consumer bind to one definition and `tsc` enforces agreement — silent cross-file drift becomes a localized compile error. *Depends on 8 (build must run to enforce); composes with 1 & 7.* | drift → compile error | prevents cascade | simplification | new props-artifact generator; `PlannedComponentPropsCard` → generator; `FrontendGeneratorNode`. See Appendix F |
 | **11** | **Deliver hook contracts from `FrontendHookGenerator`, not regex re-scan** — the hook signature (name, params, canonical return, path) is deterministically known at emission but is recovered downstream by a lossy `FrontendContractCard` regex re-scan (query-hook params = weak point). Register/emit the exact contract at generation time so components bind to the generator's ground truth. *Matters more after task 2 (re-scan becomes sole source); composes with 10.* | hook-signature fidelity | — | simplification | `FrontendHookGenerator`, `FrontendContractCard`, `ApiArtifactGeneratorNode` |
 | **12** | ✅ **DONE — `emitAppRoutes` guards fixed (40/40 tests).** Real cause: it imported a **phantom `ProtectedRoute`** (foundation never shipped one) + default `siteConfig`. Now uses the foundation's real **`RequireAuth`/`RequireAdmin`** (default exports, `children`-based) + **named `siteConfig`**; flags key on the guards; prompt rule 3 rewritten (foundation owns the guards). | Theme E | 2 (+1) | codegen | `RouteManifestGenerator`, `FrontendGeneratorNode`, prompt |
 | **13** | ✅ **DONE — `FoundationRefReconciler` cart fence narrowed (10/10 tests).** The bare `"/cart/"` fence matched app UI at `components/cart/` and stripped `CartItemsTable`/`CartSummary`. Narrowed to **`"/src/cart/"`** (fence the foundation spine only); app cart UI survives + consumes `@/cart`. | Theme G | 2 | codegen | `FoundationRefReconciler` |
 | **14** | **Enforce shadcn-only + lucide UI rule** — generated UI uses shadcn components only (no native HTML primitives, no direct radix), lucide icons only + sparingly. Tighten `file_generate_frontend.txt` and stop offering `@radix-ui/*` in `AVAILABLE UI IMPORTS`. *Standing user rule.* | UI consistency | — | prompt+context | `file_generate_frontend.txt`, `UiComponentInventory` |
 
-### Task 9 detail — Open/Closed for foundation features
+### Task 9 detail — Open/Closed for foundation features  ✅ ONBOARDING HALF DONE (2026-09-07)
+
+> **Status:** the derive-don't-hardcode *onboarding* half is **built + unit-verified** on branch
+> `feature/env-typed-defaults` (uncommitted). The per-project *pruning* half is designed but
+> **deferred** (was always the plan's own extension, never part of Task 9's ask). Full design +
+> completion mapping: `docs/foundation-feature-manifest-plan.md` (§7 Gap coverage).
 
 **Already OCP-compliant:** `FoundationSymbolRegistry` (`util/FoundationSymbolRegistry.java:83-87`) **derives** fenced symbols by parsing `backend/` + `frontend/FOUNDATION_CONTRACT.md` from the cloned foundation — a new fenced type/interface is auto-ingested with zero pipeline edits.
 
-**Hardcoded seams that VIOLATE OCP** (a new foundation feature needs pipeline code edits today):
+**Hardcoded seams that VIOLATED OCP** — all three now derive from `FoundationManifest`, hardcoded `Set`s deleted:
 
-| Seam | Location | Breaks when foundation adds… |
+| Seam | Was (hardcoded) | Now (manifest projection) |
 |---|---|---|
-| `FOUNDATION_CONTROLLERS` (skip set) | `util/ApiInventory.java:53` | a new backend controller → not skipped → duplicate/re-plan risk |
-| `GUARD_NAMES = Set.of("ProtectedRoute","AdminLayout","siteConfig")` | `util/FoundationRefReconciler.java:81` | a new shell/guard component → not recognized |
-| `AUTH_KEYS` / `NON_NAV_KEYS` (route gates) | `util/RouteManifest.java:50,53` | a new gated foundation page → not auto-classified |
+| `FOUNDATION_CONTROLLERS` (skip set) | `util/ApiInventory.java:53` | ✅ `ApiInventory.java:59` → `FoundationManifest.defaultManifest().foundationControllers()` |
+| `GUARD_NAMES` (+ `FENCED_BACKEND/FRONTEND_NAMES`) | `util/FoundationRefReconciler.java:81` | ✅ `FoundationRefReconciler.java:74` → `.guardNames()` / `.fencedBackendNames()` / `.fencedFrontendNames()` |
+| `AUTH_KEYS` / `NON_NAV_KEYS` (route gates) | `util/RouteManifest.java:50,53` | ✅ `RouteManifest.java:54,57` → `.authPageKeys()` / `.nonNavPageKeys()` |
 
-**Fix (derive-don't-hardcode, one source of truth):**
-1. Make the foundation the single source — extend `FOUNDATION_CONTRACT.md` (or ship a foundation `manifest.json` the foundation regenerates with itself) declaring each feature + its controllers, guard/shell symbols, and route gates.
-2. Derive the three hardcoded sets from that manifest at run start (reuse `FoundationSymbolRegistry` as the loader); **delete the hardcoded `Set`s**.
-3. Planner ingests the foundation feature list so a new capability is **considered for the target app** (consume it, never re-implement).
+**Fix (derive-don't-hardcode, one source of truth) — all three steps shipped:**
+1. ✅ Foundation is the single source — `FoundationManifest` (`DEFAULT` reproduces today's constants; `load(Path)` honours a foundation-shipped `foundation.manifest.json` with graceful fallback). Card-sync discipline added to `webapp-foundation/CLAUDE.md` + pipeline `FoundationCardIntegrity` sanity check.
+2. ✅ The three hardcoded sets derive from the manifest at run start (loaded inline in `ProjectPlanningNode` beside `FoundationSymbolRegistry.buildFromWorkspace`); **hardcoded `Set`s deleted**. Regression-proven each projection == old literal set (`FoundationManifestTest` 8/8).
+3. ✅ Planner ingests the feature list — `ARCHITECTURE.json.foundation_features` (§6b Part A) + enrichment `consumes_foundation` edge (Part B) + `FOUNDATION LOOKUP` clause in both `file_generate_*.txt` (Part C, shipped).
 
-**Outcome:** onboarding a new foundation feature = a foundation-side change only; the pipeline adapts with zero modification — the OCP the pipeline should hold.
+**Outcome (achieved for onboarding):** adding a foundation feature = append to `foundation.manifest.json` + its `##` contract-card section — a foundation-side change only; every seam adapts with zero pipeline `Set` edit.
+
+**Still pending (hardening, not part of Task 9's ask):** the `FoundationRefReconciler` planning-time cross-check (*file imports a fenced symbol ⟺ its feature is in `foundation_features`*) is unwired; and no end-to-end run has yet confirmed `foundation_features` populates live (unit-verified only). **Deferred (this plan's extension, not Task 9):** the per-project pruning half (`FeaturePruneNode`, guardrails, config-surface strip).
 
 **Codegen bugs (now tracked as tasks 12 & 13):** `RouteManifestGenerator.emitAppRoutes` default-imports named exports + `allowedRoles`/`roles` (E, 2); `FoundationRefReconciler` strips `components/cart/*` without repairing `CartPage` import (G, 2). Deterministic, recur every project — no longer just notes.
 
-**Readiness / recommended order.** Task 8 is ✅ done (foundation ships `NotFoundPage`). The **first executable batch is tasks 12 + 13** (route/cart codegen) — with 8 done, these let a run *reach* `ErrorFixAgent` and produce **real** post-fix data. The plan is otherwise built on ONE run that died early (unrepaired output), so run once after 12+13 to measure the true residual **before** the biggest/riskiest change (task 1, enrichment data-shape strip). Then tasks 3/4/5/6 (deterministic derive-step, ~11 errors), then 1/2/7/10/11 (structural), 9 + 14 orthogonal.
+**Readiness / recommended order.** Task 8 is ✅ done (foundation ships `NotFoundPage`). The **first executable batch is tasks 12 + 13** (route/cart codegen) — with 8 done, these let a run *reach* `ErrorFixAgent` and produce **real** post-fix data. The plan is otherwise built on ONE run that died early (unrepaired output), so run once after 12+13 to measure the true residual **before** the biggest/riskiest change (task 1, enrichment data-shape strip). Then tasks 3/4/5/6 (deterministic derive-step, ~11 errors) — task 3 now unblocked (task 9's onboarding half done) — then 1/2/7/10/11 (structural); task 9 ✅ done (pruning half deferred), 14 orthogonal.
 
 **Coverage:** tasks 1 + 3 + 5 + 6 close the 48 context-attributable errors (with edits 1–2 already applied); tasks 2 + 4 + 7 are structural/hardening; task 8 + the two codegen fixes above clear the remaining 6.
 

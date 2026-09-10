@@ -518,7 +518,34 @@ selection step is added later, that step computes the kept set and the planner's
 
 ---
 
-## 7. Scope / relationship to other tasks
+## 7. Gap coverage — Task 9 (`frontend-error-analysis-prakash-stores-31c78b9a.md`) → this plan
+
+This maps the **original gap** (Task 9 detail, "derive-don't-hardcode, one source of truth") onto what
+is actually built on branch `feature/env-typed-defaults` (uncommitted, unit-verified). Verified against
+the code, not just the checkboxes below.
+
+| Task 9 fix-step (the gap) | Status | Where it landed |
+|---|---|---|
+| **1. Foundation is the single source** — ship a `manifest.json` the foundation regenerates, declaring each feature + its controllers, guard/shell symbols, route gates | ✅ **DONE** | `FoundationManifest` (§5): built-in `DEFAULT` reproduces today's constants; `load(Path)` honours a foundation-shipped `foundation.manifest.json` with graceful fallback. Card-sync discipline added to `webapp-foundation/CLAUDE.md` + pipeline `FoundationCardIntegrity` sanity check. |
+| **2a. Derive `FOUNDATION_CONTROLLERS` from the manifest; delete the hardcoded `Set`** | ✅ **DONE** | `ApiInventory.java:59` → `FoundationManifest.defaultManifest().foundationControllers()` |
+| **2b. Derive `GUARD_NAMES` from the manifest; delete the hardcoded `Set`** | ✅ **DONE** | `FoundationRefReconciler.java:74` → `.guardNames()` (+ `FENCED_BACKEND/FRONTEND_NAMES` → `.fencedBackendNames()/.fencedFrontendNames()`) |
+| **2c. Derive `AUTH_KEYS` / `NON_NAV_KEYS` from the manifest; delete the hardcoded `Set`s** | ✅ **DONE** | `RouteManifest.java:54,57` → `.authPageKeys()` / `.nonNavPageKeys()` |
+| **3. Planner ingests the foundation feature list so a new capability is *considered for the target app*** | ✅ **DONE** | §6b Part A: `foundation_features` on `ArchitectureSpec` + `arch_outline.txt` rule 4. Part B: `FeatureCard.consumesFoundation` + `feature_enrichment.txt` (`{{foundationFeaturesSection}}` context + `consumes_foundation` output) + `enrichFeature` 8-arg overload. Part C: `FOUNDATION LOOKUP` clause in both `file_generate_*.txt`. |
+| **Outcome — onboarding a new foundation feature = a foundation-side change only; pipeline adapts with zero modification** | ✅ **ACHIEVED for onboarding** | Adding a feature = append to `foundation.manifest.json` + its `##` contract-card section; every seam projects from the manifest, no pipeline `Set` edit. **Regression-proven** by `FoundationManifestTest` (8/8) — each projection equals the old literal set. |
+
+**Not part of Task 9's gap (this plan's own extension), and DEFERRED:** the *per-project pruning* half
+(§3 guardrails, §4 `FeaturePruneNode`, config-surface strip). Task 9 asked only for OCP *onboarding*
+(derive-don't-hardcode); pruning is the extension declared at the top of this plan and is not built.
+So measured strictly against the gap, **Task 9 is fully covered.**
+
+**One residual from this plan's own "Verification" list (a hardening step, not part of Task 9's ask):**
+the `FoundationRefReconciler` planning-time cross-check (*file imports a fenced symbol ⟺ its feature is
+in `foundation_features`*) is **still pending** — confirmed unwired in the code. And no end-to-end run
+has yet confirmed `ARCHITECTURE.json.foundation_features` populates live (unit-verified only).
+
+---
+
+## 8. Scope / relationship to other tasks
 
 - **Supersedes** the "Task 9 detail" sketch in `frontend-error-analysis-prakash-stores-31c78b9a.md`
   (derive-don't-hardcode). The per-project **pruning** half is designed here but **deferred** (see
@@ -531,7 +558,7 @@ selection step is added later, that step computes the kept set and the planner's
 
 ---
 
-## 8. Task list
+## 9. Task list
 
 Grouped by the [Scope decision (2026-09-06)](#️-scope-decision-2026-09-06--pruning-deferred).
 `[x]` = done, `[ ]` = pending, ⏸ = deferred (design-of-record, do not build yet).
