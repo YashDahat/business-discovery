@@ -20,6 +20,33 @@ const PROVIDER_ID = process.env.CLINE_PROVIDER_ID ?? "gemini";
 const SPRING_BASE_URL = process.env.SPRING_BASE_URL ?? "http://app:8090";
 let lastGrant: string | null = null;
 
+// Response-format guidance: the chat UI can render structured "UI blocks" (interactive shadcn
+// components + flow diagrams) embedded in your reply. Emit them ONLY when they genuinely help;
+// otherwise answer in plain markdown. Blocks go inside a fenced ```ui region as { "blocks": [ ... ] }
+// and may be interleaved with normal prose. The frontend validates them and falls back to plain text
+// if anything is malformed, so never rely on a block being rendered for correctness.
+const UI_BLOCKS_PROMPT =
+  "== RESPONSE FORMAT: INTERACTIVE UI BLOCKS ==\n" +
+  "The chat can render rich UI. When it helps the user, embed a fenced block like:\n" +
+  "```ui\n{ \"blocks\": [ { \"type\": \"text\", \"markdown\": \"...\" } ] }\n```\n" +
+  "You may write normal prose before/after the fence. Available block types:\n" +
+  "- text:    { type:'text', markdown } — rich text (prefer plain prose for simple answers).\n" +
+  "- callout: { type:'callout', variant:'info'|'warn'|'success', markdown } — highlight a note.\n" +
+  "- choices: { type:'choices', id, prompt, options:[{label,value}], multi? } — ask the user to pick.\n" +
+  "- date:    { type:'date', id, label, mode?:'single'|'range' } — ask for a date / range.\n" +
+  "- form:    { type:'form', id, title?, description?, submitLabel?, fields:[{name, kind, label, " +
+  "required?, placeholder?, options?, min?, max?}] } where kind is text|textarea|number|select|" +
+  "checkbox|radio|date (select/radio need options).\n" +
+  "- flow:    { type:'flow', id, title?, nodes:[{id,label,kind?,detail?}], edges:[{from,to,label?}] } " +
+  "— a READ-ONLY diagram; kind is start|process|decision|io|end. Emit topology only, NO coordinates " +
+  "(the UI auto-lays-it-out). Use this to visualize how a feature/flow works or what a change touches.\n" +
+  "USE CASES: use a form/choices/date to collect structured input instead of asking in prose; use flow " +
+  "to explain architecture or a feature's behaviour.\n" +
+  "WHEN THE USER RESPONDS to an interactive block, their message ends with a machine tag you should " +
+  "read: '[choice:ID] [\"value\"]', '[date:ID] \"2026-01-31\"' (or {from,to}), or " +
+  "'[form:ID] {\"field\":\"value\"}'. Parse that payload and continue accordingly.\n" +
+  "Keep ids short and stable. Do not wrap the whole answer in a block when a sentence would do.";
+
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
@@ -102,7 +129,8 @@ app.post("/chat", async (req, res) => {
     "changes before committing, and report failures. (4) Edits are local to the sandbox until " +
     "commit_and_push (working branch), then open_pull_request — never commit to the default branch " +
     "directly. (5) run_demo reflects the last generated build, not your uncommitted edits — say so if the " +
-    "user expects to see changes live.";
+    "user expects to see changes live." +
+    "\n\n" + UI_BLOCKS_PROMPT;
 
   try {
     const agent = new Agent({
