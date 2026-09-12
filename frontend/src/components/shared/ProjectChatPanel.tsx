@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Check, Copy, FilePen, FileText, FolderGit2, GitBranch, GitPullRequest, Globe, Loader2,
-  PanelRightClose, PanelRightOpen, PlayCircle, Plus, Search, Send, Sparkles, Square, X,
+  Maximize2, Minimize2, PanelRightClose, PanelRightOpen, PlayCircle, Plus, Reply, Search, Send,
+  Sparkles, Square, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useClineChat } from '@/hooks/useClineChat'
@@ -10,6 +11,12 @@ import {
   Dialog, DialogContent, DialogHeader, DialogFooter, DialogTitle, DialogDescription,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
+import { BlockRenderer } from '@/components/chat/BlockRenderer'
+import { Markdown } from '@/components/chat/blocks/Markdown'
+import {
+  describeBlocks, parseMessageContent, parseReply, serializeAction, serializeReply,
+  type BlockAction, type ReplyTarget,
+} from '@/components/chat/blocks/schema'
 
 // Axios marks aborted requests with code ERR_CANCELED — a manual Stop, not an error to surface.
 function isCanceled(err: unknown): boolean {
@@ -36,7 +43,45 @@ function CopyButton({ text }: { text: string }) {
   )
 }
 
-function ChatBubble({ message }: { message: ChatMessageView }) {
+// A block action serialised into a user turn ends with a machine tag ("\n\n[form:id] {...}"); hide it
+// from the sent bubble so history reads naturally, while the assistant still receives the full payload.
+function humanUserText(content: string): string {
+  const idx = content.search(/\n\n\[(?:form|choice|date):/)
+  return idx === -1 ? content : content.slice(0, idx).trim()
+}
+
+function ReplyButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      title="Reply to this message"
+      className="shrink-0 self-end mb-1 p-1 rounded text-[#555] hover:text-white hover:bg-[#1a1a1a] opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+    >
+      <Reply className="h-3.5 w-3.5" />
+    </button>
+  )
+}
+
+// The WhatsApp-style quote shown at the top of a bubble that is replying to an earlier message.
+function ReplyChip({ who, text }: { who: string; text: string }) {
+  return (
+    <div className="mb-1.5 flex items-start gap-1.5 rounded border-l-2 border-[#4aa8ff]/60 bg-black/20 px-2 py-1 text-[11px]">
+      <Reply className="h-3 w-3 shrink-0 mt-0.5 text-[#4aa8ff]" />
+      <span className="min-w-0">
+        <span className="font-semibold text-[#4aa8ff]">{who}</span>
+        <span className="ml-1 line-clamp-2 opacity-80">{text}</span>
+      </span>
+    </div>
+  )
+}
+
+function ChatBubble({ message, onAction, onReply, disabled, wide }: {
+  message: ChatMessageView
+  onAction: (action: BlockAction) => void
+  onReply: (target: ReplyTarget) => void
+  disabled?: boolean
+  wide?: boolean
+}) {
   if (message.role === 'system') {
     return (
       <div className="flex justify-center animate-in fade-in duration-300">
@@ -48,26 +93,53 @@ function ChatBubble({ message }: { message: ChatMessageView }) {
   }
 
   const isUser = message.role === 'user'
-  return (
-    <div
-      className={cn(
-        // New bubbles fade + slide in on mount (stable keys → existing bubbles don't re-animate).
-        'group flex items-center gap-1 animate-in fade-in duration-300 ease-out',
-        isUser ? 'justify-end slide-in-from-right-4' : 'justify-start slide-in-from-bottom-2'
-      )}
-    >
-      {isUser && <CopyButton text={message.content} />}
-      <div
-        className={cn(
-          'max-w-[82%] rounded-lg px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap shadow-sm',
-          isUser
-            ? 'bg-[#4aa8ff] text-black rounded-br-sm'
-            : 'bg-[#1a1a1a] text-[#ccc] border border-[#2a2a2a] rounded-bl-sm'
-        )}
-      >
-        {message.content}
+  if (isUser) {
+    const reply = parseReply(message.content)
+    const body = humanUserText(reply ? reply.body : message.content)
+    return (
+      <div className="group flex items-center gap-1 justify-end animate-in fade-in slide-in-from-right-4 duration-300 ease-out">
+        <ReplyButton onClick={() => onReply({ role: 'user', excerpt: body })} />
+        <CopyButton text={message.content} />
+        <div className="max-w-[82%] rounded-lg rounded-br-sm px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap shadow-sm bg-[#4aa8ff] text-black">
+          {reply && <ReplyChip who={reply.quotedWho === 'Cline' ? 'Cline' : 'You'} text={reply.quotedText} />}
+          {body}
+        </div>
       </div>
-      {!isUser && <CopyButton text={message.content} />}
+    )
+  }
+
+  // Assistant turn — may carry structured UI blocks embedded in the content.
+  const { prose, blocks } = parseMessageContent(message.content)
+  const hasBlocks = blocks.length > 0
+
+  if (!hasBlocks) {
+    return (
+      <div className="group flex items-center gap-1 justify-start animate-in fade-in slide-in-from-bottom-2 duration-300 ease-out">
+        <div className="max-w-[82%] rounded-lg rounded-bl-sm px-3 py-2 shadow-sm bg-[#1a1a1a] border border-[#2a2a2a]">
+          <Markdown>{prose || message.content}</Markdown>
+        </div>
+        <CopyButton text={message.content} />
+        <ReplyButton onClick={() => onReply({ role: 'ai', excerpt: prose || message.content })} />
+      </div>
+    )
+  }
+
+  // Referencing a component message quotes a short label (e.g. "[Form: Trial signup]"), not the whole UI.
+  const blockExcerpt = [prose, describeBlocks(blocks)].filter(Boolean).join(' — ')
+  return (
+    <div className={cn(
+      'group flex flex-col gap-2.5 justify-start animate-in fade-in slide-in-from-bottom-2 duration-300 ease-out',
+      wide ? 'w-full' : 'max-w-[92%]'
+    )}>
+      {prose && (
+        <div className="rounded-lg rounded-bl-sm px-3 py-2 shadow-sm bg-[#1a1a1a] border border-[#2a2a2a]">
+          <Markdown>{prose}</Markdown>
+        </div>
+      )}
+      <BlockRenderer blocks={blocks} onAction={onAction} disabled={disabled} wide={wide} />
+      <div className="flex">
+        <ReplyButton onClick={() => onReply({ role: 'ai', excerpt: blockExcerpt })} />
+      </div>
     </div>
   )
 }
@@ -154,6 +226,11 @@ function OperationStepper({ steps }: { steps: ClineStep[] }) {
 export const PROJECT_CHAT_PANEL_WIDTH = 560
 export const PROJECT_CHAT_PANEL_COLLAPSED_WIDTH = 44
 
+// Width modes the user can cycle through from the header. Collapsed stays the separate `isOpen` rail.
+type PanelMode = 'docked' | 'wide' | 'full'
+const PANEL_MODE_STORAGE_KEY = 'projectChatPanel.mode'
+const NEXT_MODE: Record<PanelMode, PanelMode> = { docked: 'wide', wide: 'full', full: 'docked' }
+
 export function ProjectChatPanel({ briefId, isOpen, onToggle, rightOffset = 0 }: {
   briefId: string
   isOpen: boolean
@@ -162,8 +239,32 @@ export function ProjectChatPanel({ briefId, isOpen, onToggle, rightOffset = 0 }:
 }) {
   const [draft, setDraft] = useState('')
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [replyingTo, setReplyingTo] = useState<ReplyTarget | null>(null)
+  const [panelMode, setPanelMode] = useState<PanelMode>(
+    () => (localStorage.getItem(PANEL_MODE_STORAGE_KEY) as PanelMode) || 'docked'
+  )
   const { chatQuery, sendMutation, stop, newSession, steps } = useClineChat(briefId)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  const startReply = (target: ReplyTarget) => {
+    setReplyingTo(target)
+    inputRef.current?.focus()
+  }
+
+  const cycleMode = () => setPanelMode(cur => {
+    const next = NEXT_MODE[cur]
+    localStorage.setItem(PANEL_MODE_STORAGE_KEY, next)
+    return next
+  })
+  const isFull = panelMode === 'full'
+  const wide = panelMode !== 'docked'
+
+  // Interactive blocks feed their result back as the user's next turn (reuses the normal send path).
+  const onBlockAction = (action: BlockAction) => {
+    if (sendMutation.isPending) return
+    sendMutation.mutate(serializeAction(action))
+  }
 
   const messagesCount = (chatQuery.data ?? []).length
   const startNewSession = () => {
@@ -187,7 +288,9 @@ export function ProjectChatPanel({ briefId, isOpen, onToggle, rightOffset = 0 }:
     const text = draft.trim()
     if (!text || sendMutation.isPending) return
     setDraft('')
-    sendMutation.mutate(text)
+    // When replying, prepend a quote of the referenced message so Cline sees the exact context.
+    sendMutation.mutate(replyingTo ? serializeReply(replyingTo, text) : text)
+    setReplyingTo(null)
   }
 
   if (!isOpen) {
@@ -204,10 +307,18 @@ export function ProjectChatPanel({ briefId, isOpen, onToggle, rightOffset = 0 }:
     )
   }
 
+  // Full-screen spans the viewport (ignores rightOffset / max-w clamp); docked & wide dock to the right.
+  const asideStyle = isFull
+    ? { left: 0, right: 0 }
+    : { width: panelMode === 'wide' ? 'min(900px, 60vw)' : `${PROJECT_CHAT_PANEL_WIDTH}px`, right: rightOffset }
+
   return (
     <aside
-      style={{ width: PROJECT_CHAT_PANEL_WIDTH, right: rightOffset }}
-      className="fixed top-14 bottom-0 z-30 max-w-[90vw] flex flex-col border-l border-[#1e1e1e] bg-[#0a0a0a] shadow-[-8px_0_24px_rgba(0,0,0,0.5)] animate-in slide-in-from-right-8 fade-in duration-300 ease-out"
+      style={asideStyle}
+      className={cn(
+        'fixed top-14 bottom-0 z-30 flex flex-col border-l border-[#1e1e1e] bg-[#0a0a0a] shadow-[-8px_0_24px_rgba(0,0,0,0.5)] animate-in slide-in-from-right-8 fade-in duration-300 ease-out',
+        !isFull && 'max-w-[90vw]'
+      )}
     >
       <div className="h-12 px-4 flex items-center gap-2 border-b border-[#1e1e1e] shrink-0">
         <Sparkles className={cn('h-4 w-4 text-[#4aa8ff] transition', sendMutation.isPending && 'animate-pulse')} />
@@ -219,6 +330,13 @@ export function ProjectChatPanel({ briefId, isOpen, onToggle, rightOffset = 0 }:
           className="ml-auto flex items-center gap-1 text-xs text-[#666] hover:text-white disabled:opacity-40 transition-colors"
         >
           <Plus className="h-3.5 w-3.5" /> New session
+        </button>
+        <button
+          onClick={cycleMode}
+          title={isFull ? 'Restore width' : panelMode === 'wide' ? 'Full screen' : 'Widen panel'}
+          className="text-[#555] hover:text-white transition-colors"
+        >
+          {isFull ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
         </button>
         <button
           onClick={onToggle}
@@ -234,23 +352,44 @@ export function ProjectChatPanel({ briefId, isOpen, onToggle, rightOffset = 0 }:
         💡 Starting a new feature? Begin a <button onClick={startNewSession} className="text-[#4aa8ff] hover:underline">new session</button> — your applied changes are saved to the project brief.
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 flex flex-col gap-2.5">
-        {messages.length === 0 && !sendMutation.isPending ? (
-          <p className="text-sm text-[#555] text-center py-6 animate-in fade-in duration-500">
-            Ask about this project — e.g. "what tech stack is used?" or "how does checkout work?".
-            Read-only: this won't change or regenerate the site.
-          </p>
-        ) : (
-          messages.map((m, i) => <ChatBubble key={i} message={m} />)
-        )}
-        {sendMutation.isPending && (
-          steps.length > 0 ? <OperationStepper steps={steps} /> : <TypingIndicator />
-        )}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto p-4">
+        {/* Cap the column width when widened so prose stays readable; blocks still expand within it. */}
+        <div className={cn('flex flex-col gap-2.5', wide && 'mx-auto w-full max-w-[900px]')}>
+          {messages.length === 0 && !sendMutation.isPending ? (
+            <p className="text-sm text-[#555] text-center py-6 animate-in fade-in duration-500">
+              Ask about this project — e.g. "what tech stack is used?" or "how does checkout work?".
+              Read-only: this won't change or regenerate the site.
+            </p>
+          ) : (
+            messages.map((m, i) => (
+              <ChatBubble key={i} message={m} onAction={onBlockAction} onReply={startReply} disabled={sendMutation.isPending} wide={wide} />
+            ))
+          )}
+          {sendMutation.isPending && (
+            steps.length > 0 ? <OperationStepper steps={steps} /> : <TypingIndicator />
+          )}
+        </div>
       </div>
 
       <div className="p-3 border-t border-[#1e1e1e] shrink-0">
-        <div className="flex items-end gap-2">
+        {/* WhatsApp-style reply preview — what this next turn will quote for Cline. */}
+        {replyingTo && (
+          <div className={cn('mb-2 flex items-start gap-2 rounded border-l-2 border-[#4aa8ff] bg-[#111] px-2.5 py-1.5', wide && 'mx-auto w-full max-w-[900px]')}>
+            <Reply className="h-3.5 w-3.5 shrink-0 mt-0.5 text-[#4aa8ff]" />
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] font-semibold text-[#4aa8ff]">
+                Replying to {replyingTo.role === 'user' ? 'yourself' : 'Cline'}
+              </p>
+              <p className="text-[11px] text-[#888] line-clamp-2">{replyingTo.excerpt}</p>
+            </div>
+            <button onClick={() => setReplyingTo(null)} title="Cancel reply" className="shrink-0 text-[#555] hover:text-white transition-colors">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+        <div className={cn('flex items-end gap-2', wide && 'mx-auto w-full max-w-[900px]')}>
           <textarea
+            ref={inputRef}
             value={draft}
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => {
@@ -258,8 +397,9 @@ export function ProjectChatPanel({ briefId, isOpen, onToggle, rightOffset = 0 }:
                 e.preventDefault()
                 submit()
               }
+              if (e.key === 'Escape' && replyingTo) setReplyingTo(null)
             }}
-            placeholder="Ask about this project…"
+            placeholder={replyingTo ? 'Reply…' : 'Ask about this project…'}
             rows={2}
             className="flex-1 rounded border border-[#2a2a2a] bg-[#111] p-2 text-sm text-white placeholder-[#444] resize-none focus:outline-none focus:border-[#444]"
           />

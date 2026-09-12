@@ -624,6 +624,14 @@ function extractOrderPlatforms(link: string | null): string | null {
   return platforms.length > 0 ? platforms.join(' · ') : 'available'
 }
 
+function buildMapsUrl(b: BusinessEntity): string | null {
+  if (b.mapsLink) return b.mapsLink
+  if (b.latitude != null && b.longitude != null)
+    return `https://www.google.com/maps/search/?api=1&query=${b.latitude},${b.longitude}`
+  const q = [b.title, b.address].filter(Boolean).join(' ')
+  return q ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(q)}` : null
+}
+
 function countDataPoints(b: BusinessEntity): number {
   return Object.values(b as unknown as Record<string, unknown>).filter(
     v => v != null && v !== '' && !(Array.isArray(v) && v.length === 0)
@@ -673,6 +681,7 @@ export default function BusinessDetailPage() {
 
   const { business: b, brief, latestTask, opsStatus, scopeProgress } = data
   const initials = getInitials(b.title)
+  const mapsUrl = buildMapsUrl(b)
   const plan = deriveSubscriptionPlan(b.businessTier)
   const tierCls = TIER_STYLE[b.businessTier ?? ''] ?? TIER_STYLE.EXCLUDED
   const canRespawn = !!brief && (latestTask?.status === 'FAILED' || latestTask?.status === 'COMPLETED')
@@ -709,6 +718,12 @@ export default function BusinessDetailPage() {
               <p className="text-sm text-[#777] mt-0.5">
                 {[b.category, b.address].filter(Boolean).join(' · ')}
               </p>
+              {mapsUrl && (
+                <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
+                  className="mt-1.5 inline-flex items-center gap-1.5 text-xs text-[#00ff88] hover:underline w-fit">
+                  <ExternalLink className="h-3.5 w-3.5" />View on Google Maps
+                </a>
+              )}
               <div className="flex flex-wrap items-center gap-2 mt-3">
                 {b.businessTier && (
                   <span className={cn('text-xs font-mono font-semibold px-2.5 py-1 rounded-full border', tierCls)}>
@@ -809,7 +824,13 @@ export default function BusinessDetailPage() {
               <DataField label="ADDRESS"          value={b.address} />
               <DataField label="COORDINATES"      value={
                 b.latitude != null && b.longitude != null
-                  ? `${b.latitude.toFixed(2)}, ${b.longitude.toFixed(3)}`
+                  ? (mapsUrl
+                      ? <a href={mapsUrl} target="_blank" rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-[#00ff88] hover:underline">
+                          {b.latitude.toFixed(2)}, {b.longitude.toFixed(3)}
+                          <ExternalLink className="h-3 w-3" />
+                        </a>
+                      : `${b.latitude.toFixed(2)}, ${b.longitude.toFixed(3)}`)
                   : null
               } />
 
