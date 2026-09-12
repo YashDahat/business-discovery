@@ -20,6 +20,49 @@ const PROVIDER_ID = process.env.CLINE_PROVIDER_ID ?? "gemini";
 const SPRING_BASE_URL = process.env.SPRING_BASE_URL ?? "http://app:8090";
 let lastGrant: string | null = null;
 
+// Response-format guidance: the chat UI can render structured "UI blocks" (interactive shadcn
+// components + flow diagrams) embedded in your reply. Emit them ONLY when they genuinely help;
+// otherwise answer in plain markdown. Blocks go inside a fenced ```ui region as { "blocks": [ ... ] }
+// and may be interleaved with normal prose. The frontend validates them and falls back to plain text
+// if anything is malformed, so never rely on a block being rendered for correctness.
+const UI_BLOCKS_PROMPT =
+  "== RESPONSE FORMAT: INTERACTIVE UI BLOCKS ==\n" +
+  "The chat can render rich UI. When it helps the user, embed a fenced block like:\n" +
+  "```ui\n{ \"blocks\": [ { \"type\": \"text\", \"markdown\": \"...\" } ] }\n```\n" +
+  "You may write normal prose before/after the fence. Available block types:\n" +
+  "- text:    { type:'text', markdown } — rich text (prefer plain prose for simple answers).\n" +
+  "- callout: { type:'callout', variant:'info'|'warn'|'success', markdown } — highlight a note.\n" +
+  "- choices: { type:'choices', id, prompt, options:[{label,value}], multi? } — pick via buttons " +
+  "(multi:true = a checkbox group / multi-select checkboxes).\n" +
+  "- select:  { type:'select', id, prompt, options:[{label,value}], multi?, placeholder?, submitLabel? } " +
+  "— a DROPDOWN (multi:true = a multi-select dropdown). Prefer over choices when there are many options.\n" +
+  "- date:    { type:'date', id, label, mode?:'single'|'range' } — ask for a date / range.\n" +
+  "- form:    { type:'form', id, title?, description?, submitLabel?, fields:[{name, kind, label, " +
+  "required?, placeholder?, options?, min?, max?}] } where kind is text|textarea|number|select|" +
+  "multiselect|checkbox|radio|date (select/multiselect/radio need options; multiselect is a " +
+  "multi-select dropdown).\n" +
+  "- flow:    { type:'flow', id, title?, nodes:[{id,label,kind?,detail?}], edges:[{from,to,label?}] } " +
+  "— a READ-ONLY diagram; kind is start|process|decision|io|end. Emit topology only, NO coordinates " +
+  "(the UI auto-lays-it-out). Use this to visualize how a feature/flow works or what a change touches.\n" +
+  "- palette: { type:'palette', title?, colors:[{name, hex, usage?}], preview?:{productName, " +
+  "description?, price?, ctaLabel?, imageLabel?} } — show a colour theme as swatches, and (if preview " +
+  "is set) a live product-card mockup painted in those colours so a business owner sees the theme in " +
+  "context. hex must be #rgb or #rrggbb. ALWAYS use this block to present a colour palette / theme — " +
+  "NEVER emit raw HTML or inline CSS (the chat strips HTML, so it will not render).\n" +
+  "USE CASES: use a form/choices/date to collect structured input instead of asking in prose; use flow " +
+  "to explain architecture or a feature's behaviour; use palette to present a theme/colour scheme.\n" +
+  "WHEN THE USER RESPONDS to an interactive block, their message ends with a machine tag you should " +
+  "read: '[choice:ID] [\"value\"]', '[date:ID] \"2026-01-31\"' (or {from,to}), or " +
+  "'[form:ID] {\"field\":\"value\"}'. Parse that payload and continue accordingly.\n" +
+  "Keep ids short and stable. Do not wrap the whole answer in a block when a sentence would do.\n" +
+  "\n== REPLY CONTEXT ==\n" +
+  "If a user message starts with a quote line like: > [Replying to Cline]: \"...\"  (or 'Replying to " +
+  "you'), the user is referencing that specific earlier message. Treat the quoted text as the exact " +
+  "context for their message that follows the blank line — do not guess which part they mean. Use it to " +
+  "consolidate/confirm decisions precisely. A quote may be a short component label instead of prose — " +
+  "e.g. [Form: Trial signup], [Choice: ...], [Date: ...], [Flow diagram: ...] — which references the UI " +
+  "component you rendered earlier; treat it as pointing at that component and its content.";
+
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
@@ -102,7 +145,8 @@ app.post("/chat", async (req, res) => {
     "changes before committing, and report failures. (4) Edits are local to the sandbox until " +
     "commit_and_push (working branch), then open_pull_request — never commit to the default branch " +
     "directly. (5) run_demo reflects the last generated build, not your uncommitted edits — say so if the " +
-    "user expects to see changes live.";
+    "user expects to see changes live." +
+    "\n\n" + UI_BLOCKS_PROMPT;
 
   try {
     const agent = new Agent({
