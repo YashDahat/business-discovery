@@ -44,8 +44,13 @@ const UI_BLOCKS_PROMPT =
   "- flow:    { type:'flow', id, title?, nodes:[{id,label,kind?,detail?}], edges:[{from,to,label?}] } " +
   "— a READ-ONLY diagram; kind is start|process|decision|io|end. Emit topology only, NO coordinates " +
   "(the UI auto-lays-it-out). Use this to visualize how a feature/flow works or what a change touches.\n" +
+  "- palette: { type:'palette', title?, colors:[{name, hex, usage?}], preview?:{productName, " +
+  "description?, price?, ctaLabel?, imageLabel?} } — show a colour theme as swatches, and (if preview " +
+  "is set) a live product-card mockup painted in those colours so a business owner sees the theme in " +
+  "context. hex must be #rgb or #rrggbb. ALWAYS use this block to present a colour palette / theme — " +
+  "NEVER emit raw HTML or inline CSS (the chat strips HTML, so it will not render).\n" +
   "USE CASES: use a form/choices/date to collect structured input instead of asking in prose; use flow " +
-  "to explain architecture or a feature's behaviour.\n" +
+  "to explain architecture or a feature's behaviour; use palette to present a theme/colour scheme.\n" +
   "WHEN THE USER RESPONDS to an interactive block, their message ends with a machine tag you should " +
   "read: '[choice:ID] [\"value\"]', '[date:ID] \"2026-01-31\"' (or {from,to}), or " +
   "'[form:ID] {\"field\":\"value\"}'. Parse that payload and continue accordingly.\n" +

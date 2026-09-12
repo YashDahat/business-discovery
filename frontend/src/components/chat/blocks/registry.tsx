@@ -8,6 +8,7 @@ import { ChoicesBlock } from './ChoicesBlock'
 import { SelectBlock } from './SelectBlock'
 import { DateBlock } from './DateBlock'
 import { FormBlock } from './FormBlock'
+import { PaletteBlock } from './PaletteBlock'
 
 // React Flow is heavy — load it only when a flow block actually renders.
 const FlowBlock = lazy(() => import('../flow/FlowBlock').then(m => ({ default: m.FlowBlock })))
@@ -26,4 +27,5 @@ export const BLOCK_REGISTRY: Record<UIBlock['type'], AnyBlockComponent> = {
   date: DateBlock as unknown as AnyBlockComponent,
   form: FormBlock as unknown as AnyBlockComponent,
   flow: FlowBlock as unknown as AnyBlockComponent,
+  palette: PaletteBlock as unknown as AnyBlockComponent,
 }

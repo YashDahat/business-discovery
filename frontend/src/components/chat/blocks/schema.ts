@@ -94,6 +94,28 @@ export const flowBlockSchema = z.object({
   edges: z.array(flowEdgeSchema),
 })
 
+const paletteColorSchema = z.object({
+  name: z.string(),
+  hex: z.string().regex(/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/, 'must be a #hex colour'),
+  usage: z.string().optional(),
+})
+
+const palettePreviewSchema = z.object({
+  productName: z.string(),
+  description: z.string().optional(),
+  price: z.string().optional(),
+  ctaLabel: z.string().optional(),
+  imageLabel: z.string().optional(),
+})
+
+export const paletteBlockSchema = z.object({
+  type: z.literal('palette'),
+  title: z.string().optional(),
+  colors: z.array(paletteColorSchema).min(1),
+  // Optional live product-card mockup that applies the palette, so the owner sees the theme in context.
+  preview: palettePreviewSchema.optional(),
+})
+
 export const uiBlockSchema = z.discriminatedUnion('type', [
   textBlockSchema,
   calloutBlockSchema,
@@ -102,6 +124,7 @@ export const uiBlockSchema = z.discriminatedUnion('type', [
   dateBlockSchema,
   formBlockSchema,
   flowBlockSchema,
+  paletteBlockSchema,
 ])
 
 export type UIBlock = z.infer<typeof uiBlockSchema>
@@ -115,6 +138,8 @@ export type FormField = z.infer<typeof formFieldSchema>
 export type FlowBlock = z.infer<typeof flowBlockSchema>
 export type FlowNodeSpec = z.infer<typeof flowNodeSchema>
 export type FlowEdgeSpec = z.infer<typeof flowEdgeSchema>
+export type PaletteBlock = z.infer<typeof paletteBlockSchema>
+export type PaletteColor = z.infer<typeof paletteColorSchema>
 
 /** The action a rendered interactive block emits, fed back into the chat as the user's next turn. */
 export type BlockAction =
@@ -157,6 +182,7 @@ export function describeBlocks(blocks: UIBlock[]): string {
         case 'select': return `[${b.multi ? 'Multi-select' : 'Dropdown'}: ${b.prompt}]`
         case 'date': return `[Date: ${b.label}]`
         case 'flow': return `[Flow diagram: ${b.title ?? 'diagram'}]`
+        case 'palette': return `[Colour palette: ${b.title ?? b.colors.map(c => c.name).join(', ')}]`
       }
     })
     .filter(Boolean)
