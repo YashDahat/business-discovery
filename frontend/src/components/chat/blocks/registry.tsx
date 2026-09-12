@@ -5,6 +5,7 @@ import type { UIBlock } from './schema'
 import { TextBlock } from './TextBlock'
 import { CalloutBlock } from './CalloutBlock'
 import { ChoicesBlock } from './ChoicesBlock'
+import { SelectBlock } from './SelectBlock'
 import { DateBlock } from './DateBlock'
 import { FormBlock } from './FormBlock'
 
@@ -21,6 +22,7 @@ export const BLOCK_REGISTRY: Record<UIBlock['type'], AnyBlockComponent> = {
   text: TextBlock as unknown as AnyBlockComponent,
   callout: CalloutBlock as unknown as AnyBlockComponent,
   choices: ChoicesBlock as unknown as AnyBlockComponent,
+  select: SelectBlock as unknown as AnyBlockComponent,
   date: DateBlock as unknown as AnyBlockComponent,
   form: FormBlock as unknown as AnyBlockComponent,
   flow: FlowBlock as unknown as AnyBlockComponent,

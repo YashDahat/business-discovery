@@ -12,6 +12,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Calendar } from '@/components/ui/calendar'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { MultiSelect } from '@/components/ui/multi-select'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
@@ -34,6 +35,12 @@ function buildSchema(fields: FormField[]) {
         if (typeof f.max === 'number') n = n.max(f.max, `Max ${f.max}`)
         shape[f.name] = f.required ? n : n.optional()
         defaults[f.name] = ''
+        break
+      }
+      case 'multiselect': {
+        const arr = z.array(z.string())
+        shape[f.name] = f.required ? arr.min(1, 'Select at least one') : arr
+        defaults[f.name] = []
         break
       }
       default: {
@@ -113,6 +120,16 @@ export function FormBlock({ block, onAction, disabled, wide }: BlockProps<FormBl
                             ))}
                           </SelectContent>
                         </Select>
+                      )
+                    case 'multiselect':
+                      return (
+                        <MultiSelect
+                          options={f.options ?? []}
+                          value={Array.isArray(field.value) ? field.value : []}
+                          onChange={field.onChange}
+                          placeholder={f.placeholder}
+                          disabled={locked}
+                        />
                       )
                     case 'radio':
                       return (

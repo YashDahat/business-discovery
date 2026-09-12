@@ -1,6 +1,8 @@
 import dagre from 'dagre'
-import type { Edge, Node } from '@xyflow/react'
+import { MarkerType, type Edge, type Node } from '@xyflow/react'
 import type { FlowEdgeSpec, FlowNodeSpec } from '../blocks/schema'
+
+const EDGE_COLOR = '#5a5a5a'
 
 const NODE_W = 180
 const NODE_H = 52
@@ -39,8 +41,11 @@ export function layout(nodeSpecs: FlowNodeSpec[], edgeSpecs: FlowEdgeSpec[]): { 
     source: e.from,
     target: e.to,
     label: e.label,
+    type: 'smoothstep',
     animated: false,
-    style: { stroke: '#3a3a3a' },
+    // Directed: arrowhead at the target so flow direction is always clear.
+    markerEnd: { type: MarkerType.ArrowClosed, color: EDGE_COLOR, width: 18, height: 18 },
+    style: { stroke: EDGE_COLOR, strokeWidth: 1.5 },
     labelStyle: { fill: '#999', fontSize: 11 },
     labelBgStyle: { fill: '#0a0a0a' },
   }))

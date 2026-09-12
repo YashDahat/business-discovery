@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import {
   Check, Copy, FilePen, FileText, FolderGit2, GitBranch, GitPullRequest, Globe, Loader2,
-  Maximize2, Minimize2, PanelRightClose, PanelRightOpen, PlayCircle, Plus, Search, Send,
+  Maximize2, Minimize2, PanelRightClose, PanelRightOpen, PlayCircle, Plus, Reply, Search, Send,
   Sparkles, Square, X,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -13,7 +13,10 @@ import {
 import { Button } from '@/components/ui/button'
 import { BlockRenderer } from '@/components/chat/BlockRenderer'
 import { Markdown } from '@/components/chat/blocks/Markdown'
-import { parseMessageContent, serializeAction, type BlockAction } from '@/components/chat/blocks/schema'
+import {
+  describeBlocks, parseMessageContent, parseReply, serializeAction, serializeReply,
+  type BlockAction, type ReplyTarget,
+} from '@/components/chat/blocks/schema'
 
 // Axios marks aborted requests with code ERR_CANCELED — a manual Stop, not an error to surface.
 function isCanceled(err: unknown): boolean {
@@ -47,9 +50,35 @@ function humanUserText(content: string): string {
   return idx === -1 ? content : content.slice(0, idx).trim()
 }
 
-function ChatBubble({ message, onAction, disabled, wide }: {
+function ReplyButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      title="Reply to this message"
+      className="shrink-0 self-end mb-1 p-1 rounded text-[#555] hover:text-white hover:bg-[#1a1a1a] opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+    >
+      <Reply className="h-3.5 w-3.5" />
+    </button>
+  )
+}
+
+// The WhatsApp-style quote shown at the top of a bubble that is replying to an earlier message.
+function ReplyChip({ who, text }: { who: string; text: string }) {
+  return (
+    <div className="mb-1.5 flex items-start gap-1.5 rounded border-l-2 border-[#4aa8ff]/60 bg-black/20 px-2 py-1 text-[11px]">
+      <Reply className="h-3 w-3 shrink-0 mt-0.5 text-[#4aa8ff]" />
+      <span className="min-w-0">
+        <span className="font-semibold text-[#4aa8ff]">{who}</span>
+        <span className="ml-1 line-clamp-2 opacity-80">{text}</span>
+      </span>
+    </div>
+  )
+}
+
+function ChatBubble({ message, onAction, onReply, disabled, wide }: {
   message: ChatMessageView
   onAction: (action: BlockAction) => void
+  onReply: (target: ReplyTarget) => void
   disabled?: boolean
   wide?: boolean
 }) {
@@ -65,11 +94,15 @@ function ChatBubble({ message, onAction, disabled, wide }: {
 
   const isUser = message.role === 'user'
   if (isUser) {
+    const reply = parseReply(message.content)
+    const body = humanUserText(reply ? reply.body : message.content)
     return (
       <div className="group flex items-center gap-1 justify-end animate-in fade-in slide-in-from-right-4 duration-300 ease-out">
+        <ReplyButton onClick={() => onReply({ role: 'user', excerpt: body })} />
         <CopyButton text={message.content} />
         <div className="max-w-[82%] rounded-lg rounded-br-sm px-3 py-2 text-sm leading-relaxed whitespace-pre-wrap shadow-sm bg-[#4aa8ff] text-black">
-          {humanUserText(message.content)}
+          {reply && <ReplyChip who={reply.quotedWho === 'Cline' ? 'Cline' : 'You'} text={reply.quotedText} />}
+          {body}
         </div>
       </div>
     )
@@ -86,13 +119,16 @@ function ChatBubble({ message, onAction, disabled, wide }: {
           <Markdown>{prose || message.content}</Markdown>
         </div>
         <CopyButton text={message.content} />
+        <ReplyButton onClick={() => onReply({ role: 'ai', excerpt: prose || message.content })} />
       </div>
     )
   }
 
+  // Referencing a component message quotes a short label (e.g. "[Form: Trial signup]"), not the whole UI.
+  const blockExcerpt = [prose, describeBlocks(blocks)].filter(Boolean).join(' — ')
   return (
     <div className={cn(
-      'flex flex-col gap-2.5 justify-start animate-in fade-in slide-in-from-bottom-2 duration-300 ease-out',
+      'group flex flex-col gap-2.5 justify-start animate-in fade-in slide-in-from-bottom-2 duration-300 ease-out',
       wide ? 'w-full' : 'max-w-[92%]'
     )}>
       {prose && (
@@ -101,6 +137,9 @@ function ChatBubble({ message, onAction, disabled, wide }: {
         </div>
       )}
       <BlockRenderer blocks={blocks} onAction={onAction} disabled={disabled} wide={wide} />
+      <div className="flex">
+        <ReplyButton onClick={() => onReply({ role: 'ai', excerpt: blockExcerpt })} />
+      </div>
     </div>
   )
 }
@@ -200,11 +239,18 @@ export function ProjectChatPanel({ briefId, isOpen, onToggle, rightOffset = 0 }:
 }) {
   const [draft, setDraft] = useState('')
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [replyingTo, setReplyingTo] = useState<ReplyTarget | null>(null)
   const [panelMode, setPanelMode] = useState<PanelMode>(
     () => (localStorage.getItem(PANEL_MODE_STORAGE_KEY) as PanelMode) || 'docked'
   )
   const { chatQuery, sendMutation, stop, newSession, steps } = useClineChat(briefId)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLTextAreaElement>(null)
+
+  const startReply = (target: ReplyTarget) => {
+    setReplyingTo(target)
+    inputRef.current?.focus()
+  }
 
   const cycleMode = () => setPanelMode(cur => {
     const next = NEXT_MODE[cur]
@@ -242,7 +288,9 @@ export function ProjectChatPanel({ briefId, isOpen, onToggle, rightOffset = 0 }:
     const text = draft.trim()
     if (!text || sendMutation.isPending) return
     setDraft('')
-    sendMutation.mutate(text)
+    // When replying, prepend a quote of the referenced message so Cline sees the exact context.
+    sendMutation.mutate(replyingTo ? serializeReply(replyingTo, text) : text)
+    setReplyingTo(null)
   }
 
   if (!isOpen) {
@@ -314,7 +362,7 @@ export function ProjectChatPanel({ briefId, isOpen, onToggle, rightOffset = 0 }:
             </p>
           ) : (
             messages.map((m, i) => (
-              <ChatBubble key={i} message={m} onAction={onBlockAction} disabled={sendMutation.isPending} wide={wide} />
+              <ChatBubble key={i} message={m} onAction={onBlockAction} onReply={startReply} disabled={sendMutation.isPending} wide={wide} />
             ))
           )}
           {sendMutation.isPending && (
@@ -324,8 +372,24 @@ export function ProjectChatPanel({ briefId, isOpen, onToggle, rightOffset = 0 }:
       </div>
 
       <div className="p-3 border-t border-[#1e1e1e] shrink-0">
+        {/* WhatsApp-style reply preview — what this next turn will quote for Cline. */}
+        {replyingTo && (
+          <div className={cn('mb-2 flex items-start gap-2 rounded border-l-2 border-[#4aa8ff] bg-[#111] px-2.5 py-1.5', wide && 'mx-auto w-full max-w-[900px]')}>
+            <Reply className="h-3.5 w-3.5 shrink-0 mt-0.5 text-[#4aa8ff]" />
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] font-semibold text-[#4aa8ff]">
+                Replying to {replyingTo.role === 'user' ? 'yourself' : 'Cline'}
+              </p>
+              <p className="text-[11px] text-[#888] line-clamp-2">{replyingTo.excerpt}</p>
+            </div>
+            <button onClick={() => setReplyingTo(null)} title="Cancel reply" className="shrink-0 text-[#555] hover:text-white transition-colors">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
         <div className={cn('flex items-end gap-2', wide && 'mx-auto w-full max-w-[900px]')}>
           <textarea
+            ref={inputRef}
             value={draft}
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => {
@@ -333,8 +397,9 @@ export function ProjectChatPanel({ briefId, isOpen, onToggle, rightOffset = 0 }:
                 e.preventDefault()
                 submit()
               }
+              if (e.key === 'Escape' && replyingTo) setReplyingTo(null)
             }}
-            placeholder="Ask about this project…"
+            placeholder={replyingTo ? 'Reply…' : 'Ask about this project…'}
             rows={2}
             className="flex-1 rounded border border-[#2a2a2a] bg-[#111] p-2 text-sm text-white placeholder-[#444] resize-none focus:outline-none focus:border-[#444]"
           />

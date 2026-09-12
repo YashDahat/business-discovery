@@ -36,6 +36,16 @@ export const choicesBlockSchema = z.object({
   multi: z.boolean().optional(),
 })
 
+export const selectBlockSchema = z.object({
+  type: z.literal('select'),
+  id: z.string(),
+  prompt: z.string(),
+  options: z.array(optionSchema).min(1),
+  multi: z.boolean().optional(),
+  placeholder: z.string().optional(),
+  submitLabel: z.string().optional(),
+})
+
 export const dateBlockSchema = z.object({
   type: z.literal('date'),
   id: z.string(),
@@ -45,7 +55,7 @@ export const dateBlockSchema = z.object({
 
 export const formFieldSchema = z.object({
   name: z.string(),
-  kind: z.enum(['text', 'textarea', 'number', 'select', 'checkbox', 'radio', 'date']),
+  kind: z.enum(['text', 'textarea', 'number', 'select', 'multiselect', 'checkbox', 'radio', 'date']),
   label: z.string(),
   placeholder: z.string().optional(),
   required: z.boolean().optional(),
@@ -88,6 +98,7 @@ export const uiBlockSchema = z.discriminatedUnion('type', [
   textBlockSchema,
   calloutBlockSchema,
   choicesBlockSchema,
+  selectBlockSchema,
   dateBlockSchema,
   formBlockSchema,
   flowBlockSchema,
@@ -97,6 +108,7 @@ export type UIBlock = z.infer<typeof uiBlockSchema>
 export type TextBlock = z.infer<typeof textBlockSchema>
 export type CalloutBlock = z.infer<typeof calloutBlockSchema>
 export type ChoicesBlock = z.infer<typeof choicesBlockSchema>
+export type SelectBlock = z.infer<typeof selectBlockSchema>
 export type DateBlock = z.infer<typeof dateBlockSchema>
 export type FormBlock = z.infer<typeof formBlockSchema>
 export type FormField = z.infer<typeof formFieldSchema>
@@ -106,7 +118,7 @@ export type FlowEdgeSpec = z.infer<typeof flowEdgeSchema>
 
 /** The action a rendered interactive block emits, fed back into the chat as the user's next turn. */
 export type BlockAction =
-  | { block: ChoicesBlock; kind: 'choice_select'; values: string[] }
+  | { block: ChoicesBlock | SelectBlock; kind: 'choice_select'; values: string[] }
   | { block: DateBlock; kind: 'date_select'; value: string | { from: string; to: string } }
   | { block: FormBlock; kind: 'form_submit'; values: Record<string, unknown> }
 
@@ -128,6 +140,55 @@ export function serializeAction(action: BlockAction): string {
     case 'form_submit':
       return `Submitted "${action.block.title ?? action.block.id}"\n\n[form:${action.block.id}] ${JSON.stringify(action.values)}`
   }
+}
+
+/**
+ * A short, human label for an assistant turn that rendered UI components — used when replying to it.
+ * We reference the component ("[Form: Trial signup]") rather than quoting/rendering the whole thing.
+ */
+export function describeBlocks(blocks: UIBlock[]): string {
+  return blocks
+    .map(b => {
+      switch (b.type) {
+        case 'text': return b.markdown
+        case 'callout': return b.markdown
+        case 'form': return `[Form: ${b.title ?? b.id}]`
+        case 'choices': return `[Choice: ${b.prompt}]`
+        case 'select': return `[${b.multi ? 'Multi-select' : 'Dropdown'}: ${b.prompt}]`
+        case 'date': return `[Date: ${b.label}]`
+        case 'flow': return `[Flow diagram: ${b.title ?? 'diagram'}]`
+      }
+    })
+    .filter(Boolean)
+    .join(' ')
+    .trim()
+}
+
+/** A message the user is replying to (WhatsApp-style quote). */
+export interface ReplyTarget {
+  role: 'user' | 'ai'
+  /** Display text of the referenced message (already cleaned of tags). */
+  excerpt: string
+}
+
+const REPLY_EXCERPT_MAX = 280
+const REPLY_RE = /^> \[Replying to (Cline|you)\]: "([^"]*)"\n\n([\s\S]*)$/
+
+/**
+ * Prepend a quote of the referenced message to the outgoing turn — both human-readable (renders as a
+ * reply chip) and explicit enough that Cline sees exactly what is being referenced instead of guessing.
+ */
+export function serializeReply(target: ReplyTarget, body: string): string {
+  const who = target.role === 'user' ? 'you' : 'Cline'
+  const clean = target.excerpt.replace(/\s+/g, ' ').replace(/"/g, "'").trim().slice(0, REPLY_EXCERPT_MAX)
+  return `> [Replying to ${who}]: "${clean}"\n\n${body}`
+}
+
+/** Split a user turn into its reply quote (if any) + the actual body. Never throws. */
+export function parseReply(content: string): { quotedWho: 'Cline' | 'you'; quotedText: string; body: string } | null {
+  const m = content.match(REPLY_RE)
+  if (!m) return null
+  return { quotedWho: m[1] as 'Cline' | 'you', quotedText: m[2], body: m[3] }
 }
 
 export interface ParsedMessage {
