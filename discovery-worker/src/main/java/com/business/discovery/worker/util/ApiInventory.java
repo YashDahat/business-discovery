@@ -53,11 +53,11 @@ public final class ApiInventory {
     // library are foundation-owned (ship types + SDK + admin UI) — skip so the worker never derives
     // a competing gallery/media SDK.
     //
-    // Derived from FoundationManifest (§5, OCP onboarding) — the single declaration of foundation
-    // features. A new foundation controller is onboarded by appending to the manifest, not by editing
-    // this set. Pruning deferred → the projection is the full kept closure (all features).
-    private static final java.util.Set<String> FOUNDATION_CONTROLLERS =
-            FoundationManifest.defaultManifest().foundationControllers();
+    // The foundation-spine controller skip set is derived from the RUN-ACTIVE FoundationManifest
+    // (§5, OCP onboarding) — resolved inside extract() (see FoundationManifest.active()) so a
+    // foundation-shipped foundation.manifest.json drives it, not just the built-in default. A new
+    // foundation controller is onboarded by appending to the manifest, not by editing code. Pruning
+    // deferred → the projection is the full kept closure (all features).
 
     private final List<Endpoint> endpoints;
     private final Map<String, TypeDef> types; // by simple name
@@ -97,6 +97,8 @@ public final class ApiInventory {
         if (backendSrcJava == null || !Files.exists(backendSrcJava)) {
             return new ApiInventory(endpoints, types);
         }
+        java.util.Set<String> foundationControllers =
+                FoundationManifest.active().foundationControllers();
         try (Stream<Path> s = Files.walk(backendSrcJava)) {
             for (Path f : s.filter(p -> p.toString().endsWith(".java")).toList()) {
                 String content;
@@ -111,7 +113,7 @@ public final class ApiInventory {
                     // AuthContext (login) and the payment scaffold (createOrder/verify/webhook).
                     // Deriving an authService.ts or paymentService.ts from these would conflict
                     // with the foundation's self-contained AuthContext and the payment spine.
-                    if (FOUNDATION_CONTROLLERS.contains(fileName)) continue;
+                    if (foundationControllers.contains(fileName)) continue;
                     parseController(content, endpoints);
                 }
                 // DTOs and model classes/enums both feed the type table.

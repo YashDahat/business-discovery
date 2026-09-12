@@ -3,6 +3,7 @@ package com.business.discovery.worker.util;
 import com.business.discovery.worker.service.llm.ArchitectureSpec;
 import com.business.discovery.worker.service.llm.FeatureSpec;
 import com.business.discovery.worker.service.llm.FileSpec;
+import com.business.discovery.worker.service.llm.FoundationFeatureRef;
 import com.business.discovery.worker.service.llm.PublicVariable;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -243,5 +244,133 @@ class FoundationRefReconcilerTest {
         FoundationRefReconciler.reconcile(spec, registry);
         FoundationRefReconciler.Result second = FoundationRefReconciler.reconcile(spec, registry);
         assertThat(second.changedAnything()).isFalse();
+    }
+
+    @Test
+    void stripsFoundationOwnedGalleryModule_viaManifestPathFence() {
+        // gallery.frontend.modules = ["/components/gallery/", "/hooks/usemedia"] in the manifest, but
+        // these were NOT in the hardcoded FENCED_FRONTEND_PATHS → a re-declared gallery module used to
+        // slip through unstripped. isFencedFrontendPath now unions the run-active manifest's module paths.
+        FileSpec galleryGrid = file("GalleryGrid.tsx", "frontend/src/components/gallery/GalleryGrid.tsx",
+                "FRONTEND", null, null, "gallery");            // caught only by PATH (base name not fenced)
+        FileSpec mediaHook = file("useMedia.ts", "frontend/src/hooks/useMedia.ts",
+                "FRONTEND", null, null, "gallery");            // /hooks/usemedia
+        FileSpec domainPage = file("HomePage.tsx", "frontend/src/pages/HomePage.tsx",
+                "FRONTEND", null, null, "home");               // domain — must survive
+
+        ArchitectureSpec spec = ArchitectureSpec.builder()
+                .files(new ArrayList<>(List.of(galleryGrid, mediaHook, domainPage)))
+                .features(new ArrayList<>(List.of(
+                        FeatureSpec.builder().featureName("gallery")
+                                .filePaths(new ArrayList<>(List.of(
+                                        "frontend/src/components/gallery/GalleryGrid.tsx",
+                                        "frontend/src/hooks/useMedia.ts"))).build())))
+                .build();
+
+        FoundationRefReconciler.reconcile(spec, registry);
+
+        assertThat(names(spec)).doesNotContain("GalleryGrid.tsx", "useMedia.ts"); // foundation-owned → stripped
+        assertThat(names(spec)).containsExactly("HomePage.tsx");                  // domain survives
+    }
+
+    @Test
+    void baselinePathFence_stillHolds_forApiClient() {
+        // /api/client. is in the built-in baseline but NOT in any manifest module — the union must not
+        // regress it (guards against a naive "replace baseline with manifest" change).
+        FileSpec apiClient = file("client.ts", "frontend/src/api/client.ts", "FRONTEND", null, null, "core");
+        ArchitectureSpec spec = ArchitectureSpec.builder()
+                .files(new ArrayList<>(List.of(apiClient)))
+                .build();
+
+        FoundationRefReconciler.reconcile(spec, registry);
+
+        assertThat(names(spec)).doesNotContain("client.ts");
+    }
+
+    // ── cross-check (§6b dangling-reference gate) ──
+    // Attribution uses the run-active FoundationManifest (default here): payment.backend.fenced has
+    // "PaymentService", auth.frontend.fenced has "useAuth". No activation → the built-in default.
+
+    private static ArchitectureSpec specWith(FileSpec file, String... declaredFeatureIds) {
+        List<FoundationFeatureRef> declared = new ArrayList<>();
+        for (String id : declaredFeatureIds) declared.add(FoundationFeatureRef.builder().id(id).build());
+        return ArchitectureSpec.builder()
+                .files(new ArrayList<>(List.of(file)))
+                .foundationFeatures(declared)   // non-null (possibly empty) → cross-check runs
+                .build();
+    }
+
+    @Test
+    void crossCheck_flagsNonCoreDanglingReference() {
+        // Imports PaymentService (→ payment) but only auth is declared → payment is a dangling reference.
+        FileSpec order = file("OrderService.java", ORDER, "BACKEND", null,
+                List.of("com.absfitness.service.PaymentService"), "orders");
+        FoundationRefReconciler.CrossCheckResult r =
+                FoundationRefReconciler.crossCheckFoundationRefs(specWith(order, "auth"));
+
+        assertThat(r.isClean()).isFalse();
+        assertThat(r.danglingRefs()).singleElement()
+                .satisfies(v -> {
+                    assertThat(v.featureId()).isEqualTo("payment");
+                    assertThat(v.filePath()).isEqualTo(ORDER);
+                });
+    }
+
+    @Test
+    void crossCheck_cleanWhenReferencedFeatureDeclared() {
+        FileSpec order = file("OrderService.java", ORDER, "BACKEND", null,
+                List.of("com.absfitness.service.PaymentService"), "orders");
+        FoundationRefReconciler.CrossCheckResult r =
+                FoundationRefReconciler.crossCheckFoundationRefs(specWith(order, "auth", "payment"));
+
+        assertThat(r.isClean()).isTrue();
+    }
+
+    @Test
+    void crossCheck_coreReferenceNeverFlagged() {
+        // useAuth → auth (core). Even with nothing declared, a core reference is not a dangling defect.
+        FileSpec page = file("ProfilePage.tsx", "frontend/src/pages/ProfilePage.tsx", "FRONTEND", null,
+                List.of("@/hooks/useAuth"), "profile");
+        FoundationRefReconciler.CrossCheckResult r =
+                FoundationRefReconciler.crossCheckFoundationRefs(specWith(page /* nothing declared */));
+
+        assertThat(r.isClean()).isTrue();
+    }
+
+    @Test
+    void crossCheck_ignoresNonFoundationImports() {
+        FileSpec order = file("OrderService.java", ORDER, "BACKEND", null,
+                List.of("com.absfitness.service.MembershipService"), "orders");
+        FoundationRefReconciler.CrossCheckResult r =
+                FoundationRefReconciler.crossCheckFoundationRefs(specWith(order, "auth"));
+
+        assertThat(r.isClean()).isTrue();
+    }
+
+    @Test
+    void crossCheck_nullFoundationFeatures_skipsGracefully() {
+        FileSpec order = file("OrderService.java", ORDER, "BACKEND", null,
+                List.of("com.absfitness.service.PaymentService"), "orders");
+        ArchitectureSpec spec = ArchitectureSpec.builder()
+                .files(new ArrayList<>(List.of(order)))
+                .build();   // foundationFeatures == null (pre-§6b spec)
+
+        FoundationRefReconciler.CrossCheckResult r =
+                FoundationRefReconciler.crossCheckFoundationRefs(spec);
+
+        assertThat(r.isClean()).isTrue();
+        assertThat(r.declaredUnreferenced()).isEmpty();
+    }
+
+    @Test
+    void crossCheck_reportsNonCoreDeclaredButUnreferenced() {
+        // gallery declared, referenced by nothing → advisory over-declaration (auth core is excluded).
+        FileSpec order = file("OrderService.java", ORDER, "BACKEND", null,
+                List.of("com.absfitness.service.PaymentService"), "orders");
+        FoundationRefReconciler.CrossCheckResult r =
+                FoundationRefReconciler.crossCheckFoundationRefs(specWith(order, "auth", "payment", "gallery"));
+
+        assertThat(r.isClean()).isTrue();                        // payment is declared → no dangling
+        assertThat(r.declaredUnreferenced()).containsExactly("gallery");
     }
 }

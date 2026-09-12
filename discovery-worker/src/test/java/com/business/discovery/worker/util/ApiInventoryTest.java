@@ -74,6 +74,33 @@ class ApiInventoryTest {
         Files.writeString(p, content);
     }
 
+    /**
+     * The wiring payoff: the seam projects from the RUN-ACTIVE manifest, not the built-in default. A
+     * foundation-shipped {@code foundation.manifest.json} that declares {@code TrainerController} as a
+     * spine controller must make {@code extract()} skip its endpoints — proving the loaded manifest
+     * actually reaches the seam (Gap 1 in the plan). Resets the process-global active manifest in a
+     * {@code finally} so no other test is affected.
+     */
+    @Test
+    void extract_projectsFromActiveManifest_notJustDefault(@TempDir Path workspace) throws Exception {
+        try {
+            // Baseline: TrainerController is not a default foundation controller → its endpoint is extracted.
+            assertThat(ApiInventory.extract(src).endpoints())
+                    .anyMatch(e -> "getAllTrainers".equals(e.handlerName()));
+
+            // Ship + activate a manifest that declares TrainerController as a foundation-spine controller.
+            Files.writeString(workspace.resolve(FoundationManifest.MANIFEST_REL),
+                    "{\"features\":[{\"id\":\"x\",\"backend\":{\"controllers\":[\"TrainerController.java\"]}}]}");
+            FoundationManifest.activate(FoundationManifest.load(workspace));
+
+            // Seam now sees the active manifest → TrainerController is skipped.
+            assertThat(ApiInventory.extract(src).endpoints())
+                    .noneMatch(e -> "getAllTrainers".equals(e.handlerName()));
+        } finally {
+            FoundationManifest.activate(null); // restore the built-in default for other tests
+        }
+    }
+
     @Test
     void extractsEndpointsWithBasePathAndTypes() {
         ApiInventory inv = ApiInventory.extract(src);

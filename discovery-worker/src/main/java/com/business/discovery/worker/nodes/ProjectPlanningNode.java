@@ -162,12 +162,18 @@ public class ProjectPlanningNode implements WorkerNode {
 
         // Load the foundation feature manifest beside the fenced-symbol registry (§5, OCP onboarding).
         // Honours a foundation-shipped foundation.manifest.json when present; otherwise the built-in
-        // default declaration is used. The seam projections (FOUNDATION_CONTROLLERS / GUARD_NAMES /
-        // fenced names / route gates) derive from this single declaration. Pruning is deferred, so the
-        // kept closure is the full feature set — this load validates a shipped manifest parses and
-        // surfaces it; it is the plumbing the deferred pruning half will thread the pruned closure into.
+        // default declaration is used. The seam projections (skip-SDK controllers / guard + fenced names /
+        // route gates) derive from this single declaration and are wired to it via activate() below, so a
+        // shipped manifest actually drives the seams. Pruning is deferred, so the kept closure is the full
+        // feature set; this same load is the plumbing the deferred pruning half will thread the pruned
+        // closure into.
         var foundationManifest =
                 com.business.discovery.worker.util.FoundationManifest.load(workspace);
+        // Install it as the run-active declaration so the downstream seams (ApiInventory skip-SDK set,
+        // FoundationRefReconciler fence/guard sets, RouteManifest gate sets) project from a
+        // foundation-shipped foundation.manifest.json — not just the built-in default. One project per
+        // worker process, so a process-scoped active manifest is correct here.
+        com.business.discovery.worker.util.FoundationManifest.activate(foundationManifest);
         log.info("[ProjectPlanningNode] Foundation manifest: {} feature(s), {} skip-SDK controller(s)",
                 foundationManifest.features().size(), foundationManifest.foundationControllers().size());
 
@@ -302,6 +308,12 @@ public class ProjectPlanningNode implements WorkerNode {
         // ── Strip scaffold-owned files (auth spine, ...) so the generator never shadows the
         //    pre-written scaffold. Runs on every attempt; idempotent. ──
         stripScaffoldOwnedFiles(spec);
+
+        // ── Planning-time dangling-reference gate (§6b): cross-check the planner's foundation_features
+        //    declaration against what files actually import. Advisory (warns, never fails). Must run
+        //    BEFORE reconcile — reconcile's import-repair strips fenced imports, after which nothing
+        //    remains to check. ──
+        com.business.discovery.worker.util.FoundationRefReconciler.crossCheckFoundationRefs(spec);
 
         // ── Phase 2: deterministic foundation reconciler — strip fenced re-declarations, rewrite
         //    domain user/payment references to the foundation handle, drop dangling foundation imports.

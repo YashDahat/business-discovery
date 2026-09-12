@@ -65,6 +65,17 @@ class FoundationManifestTest {
     }
 
     @Test
+    void fencedFrontendModulePaths_unionOfAllFeatureModules() {
+        // The path fence the reconciler unions with its built-in baseline. Includes gallery's paths,
+        // which were absent from the old hardcoded FENCED_FRONTEND_PATHS (the closed OCP hole).
+        assertThat(manifest.fencedFrontendModulePaths()).containsExactlyInAnyOrder(
+                "/context/authcontext", "/hooks/useauth", "/services/authservice", "/types/auth.",
+                "/shell/",
+                "/src/cart/", "/context/cartcontext", "/context/checkoutcontext",
+                "/components/gallery/", "/hooks/usemedia");
+    }
+
+    @Test
     void load_absentManifest_fallsBackToDefault() {
         FoundationManifest loaded = FoundationManifest.load(Path.of("/tmp/does-not-exist-" + System.nanoTime()));
         assertThat(loaded.features()).isEqualTo(manifest.features());

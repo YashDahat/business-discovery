@@ -46,15 +46,17 @@ public final class RouteManifest {
      */
     public enum RouteGate { PUBLIC, AUTH, ADMIN }
 
-    // Route gates for foundation-related page keys are declared in FoundationManifest (§5, OCP
-    // onboarding) — the single place a new gated/hidden foundation page is onboarded. Pruning deferred
-    // → the projection is the full kept closure. AUTH_KEYS = pages with gate AUTH; NON_NAV_KEYS =
-    // pages with nav false (reached via dedicated UI — header cart button, etc.).
+    // Route gates for foundation-related page keys are declared in the RUN-ACTIVE FoundationManifest
+    // (§5, OCP onboarding) — read via FoundationManifest.active() so a foundation-shipped
+    // foundation.manifest.json drives the gates, not just the built-in default. The single place a new
+    // gated/hidden foundation page is onboarded. Pruning deferred → the projection is the full kept
+    // closure. authPageKeys() = pages with gate AUTH; nonNavPageKeys() = pages with nav false (reached
+    // via dedicated UI — header cart button, etc.).
     /** Page keys that require login but are not admin (rendered inside SiteLayout under an auth guard). */
-    private static final Set<String> AUTH_KEYS = FoundationManifest.defaultManifest().authPageKeys();
+    private static Set<String> authPageKeys() { return FoundationManifest.active().authPageKeys(); }
 
     /** Page keys reachable via dedicated UI (header cart button, etc.) — kept out of the primary nav. */
-    private static final Set<String> NON_NAV_KEYS = FoundationManifest.defaultManifest().nonNavPageKeys();
+    private static Set<String> nonNavPageKeys() { return FoundationManifest.active().nonNavPageKeys(); }
 
     public record Entry(String key, String path, String page, String importPath,
                         String label, RouteGate gate, boolean nav) {
@@ -194,9 +196,9 @@ public final class RouteManifest {
         if (detail) path = path + "/:id";
 
         RouteGate gate = admin ? RouteGate.ADMIN
-                : AUTH_KEYS.contains(key) ? RouteGate.AUTH
+                : authPageKeys().contains(key) ? RouteGate.AUTH
                 : RouteGate.PUBLIC;
-        if (NON_NAV_KEYS.contains(key)) nav = false;   // checkout/cart reached via dedicated UI, not primary nav
+        if (nonNavPageKeys().contains(key)) nav = false;   // checkout/cart reached via dedicated UI, not primary nav
 
         return new Entry(key, path, component, importPath, label, gate, nav);
     }

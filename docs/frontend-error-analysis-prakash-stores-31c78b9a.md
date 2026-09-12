@@ -765,20 +765,22 @@ Ordered by leverage (errors closed per effort). Tasks 3–6 are independent and 
 
 **Hardcoded seams that VIOLATED OCP** — all three now derive from `FoundationManifest`, hardcoded `Set`s deleted:
 
-| Seam | Was (hardcoded) | Now (manifest projection) |
+| Seam | Was (hardcoded) | Now (RUN-ACTIVE manifest projection) |
 |---|---|---|
-| `FOUNDATION_CONTROLLERS` (skip set) | `util/ApiInventory.java:53` | ✅ `ApiInventory.java:59` → `FoundationManifest.defaultManifest().foundationControllers()` |
-| `GUARD_NAMES` (+ `FENCED_BACKEND/FRONTEND_NAMES`) | `util/FoundationRefReconciler.java:81` | ✅ `FoundationRefReconciler.java:74` → `.guardNames()` / `.fencedBackendNames()` / `.fencedFrontendNames()` |
-| `AUTH_KEYS` / `NON_NAV_KEYS` (route gates) | `util/RouteManifest.java:50,53` | ✅ `RouteManifest.java:54,57` → `.authPageKeys()` / `.nonNavPageKeys()` |
+| `FOUNDATION_CONTROLLERS` (skip set) | `util/ApiInventory.java:53` | ✅ resolved in `extract()` → `FoundationManifest.active().foundationControllers()` |
+| `GUARD_NAMES` (+ `FENCED_BACKEND/FRONTEND_NAMES`) | `util/FoundationRefReconciler.java:81` | ✅ accessors `guardNames()` / `fencedBackendNames()` / `fencedFrontendNames()` → `FoundationManifest.active()` |
+| `AUTH_KEYS` / `NON_NAV_KEYS` (route gates) | `util/RouteManifest.java:50,53` | ✅ accessors `authPageKeys()` / `nonNavPageKeys()` → `FoundationManifest.active()` |
+
+> **Disk-manifest → seam wiring closed (Gap 1).** The seams originally read `FoundationManifest.defaultManifest()` in `static final` fields resolved at class-load — so a foundation-shipped `foundation.manifest.json` was *loaded and logged but ignored* by the seams. Now `ProjectPlanningNode` calls `FoundationManifest.activate(load(workspace))` right after the clone, and every seam reads the **run-active** manifest via `active()`. A foundation that ships a manifest declaring a new controller/guard/gated page actually drives the seams — no Java edit. One project per worker process makes the process-scoped active manifest correct. Proven by `ApiInventoryTest.extract_projectsFromActiveManifest_notJustDefault` (activate a custom manifest → the seam skips the newly-declared controller).
 
 **Fix (derive-don't-hardcode, one source of truth) — all three steps shipped:**
 1. ✅ Foundation is the single source — `FoundationManifest` (`DEFAULT` reproduces today's constants; `load(Path)` honours a foundation-shipped `foundation.manifest.json` with graceful fallback). Card-sync discipline added to `webapp-foundation/CLAUDE.md` + pipeline `FoundationCardIntegrity` sanity check.
-2. ✅ The three hardcoded sets derive from the manifest at run start (loaded inline in `ProjectPlanningNode` beside `FoundationSymbolRegistry.buildFromWorkspace`); **hardcoded `Set`s deleted**. Regression-proven each projection == old literal set (`FoundationManifestTest` 8/8).
+2. ✅ The three hardcoded sets derive from the manifest at run start (loaded inline in `ProjectPlanningNode` beside `FoundationSymbolRegistry.buildFromWorkspace`, then `activate()`d as the run-active declaration the seams read); **hardcoded `Set`s deleted**. Regression-proven each projection == old literal set (`FoundationManifestTest` 8/8) + the disk-manifest→seam wiring proven by `ApiInventoryTest.extract_projectsFromActiveManifest_notJustDefault`.
 3. ✅ Planner ingests the feature list — `ARCHITECTURE.json.foundation_features` (§6b Part A) + enrichment `consumes_foundation` edge (Part B) + `FOUNDATION LOOKUP` clause in both `file_generate_*.txt` (Part C, shipped).
 
 **Outcome (achieved for onboarding):** adding a foundation feature = append to `foundation.manifest.json` + its `##` contract-card section — a foundation-side change only; every seam adapts with zero pipeline `Set` edit.
 
-**Still pending (hardening, not part of Task 9's ask):** the `FoundationRefReconciler` planning-time cross-check (*file imports a fenced symbol ⟺ its feature is in `foundation_features`*) is unwired; and no end-to-end run has yet confirmed `foundation_features` populates live (unit-verified only). **Deferred (this plan's extension, not Task 9):** the per-project pruning half (`FeaturePruneNode`, guardrails, config-surface strip).
+**Hardening (not part of Task 9's ask) — now DONE:** the `FoundationRefReconciler` planning-time cross-check (*file imports a fenced symbol ⟺ its feature is in `foundation_features`*) is wired — `crossCheckFoundationRefs(spec)` runs before `reconcile` in `ProjectPlanningNode`, WARNs on any non-core dangling foundation reference (attribution via `FoundationManifest.owningFeatureId`), advisory-only, 6 tests green. **Still pending:** no end-to-end run has yet confirmed `foundation_features` populates live (unit-verified only). **Deferred (this plan's extension, not Task 9):** the per-project pruning half (`FeaturePruneNode`, guardrails, config-surface strip).
 
 **Codegen bugs (now tracked as tasks 12 & 13):** `RouteManifestGenerator.emitAppRoutes` default-imports named exports + `allowedRoles`/`roles` (E, 2); `FoundationRefReconciler` strips `components/cart/*` without repairing `CartPage` import (G, 2). Deterministic, recur every project — no longer just notes.
 
