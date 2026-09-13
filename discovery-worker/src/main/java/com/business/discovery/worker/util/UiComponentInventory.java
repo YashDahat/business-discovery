@@ -147,18 +147,22 @@ public final class UiComponentInventory {
 
     // ── Consumers ─────────────────────────────────────────────────────────
 
-    /** Compact prompt section — the only permitted UI imports, from reality. */
+    /**
+     * Compact prompt section — the ONLY permitted UI imports, from reality. shadcn-only: raw
+     * {@code @radix-ui/*} is deliberately NOT offered here (task 14 — "shadcn components only, no
+     * direct radix"). The radix exports are still parsed (kept for UI_INVENTORY.json + the post-gen
+     * import rewriter) but never presented to the model, so it composes from shadcn wrappers instead
+     * of reaching for a raw primitive. Icons come from lucide-react (see the LUCIDE rule), never here.
+     */
     public String toPromptSection() {
         StringBuilder sb = new StringBuilder();
-        sb.append("These are the ONLY importable UI names, enumerated from the installed packages.\n")
-          .append("Any UI import not listed here DOES NOT EXIST and will fail to compile.\n\n");
-        sb.append("PREFERRED — shadcn wrappers (import these; paths are lowercase):\n");
+        sb.append("These are the ONLY importable UI component names, enumerated from the installed shadcn files.\n")
+          .append("Any UI import not listed here DOES NOT EXIST and will fail to compile. Use shadcn ONLY —\n")
+          .append("never import from @radix-ui/* directly; if no wrapper below fits, compose from these.\n\n");
+        sb.append("shadcn components (import from these lowercase paths):\n");
         shadcnUiExports.forEach((stem, exports) ->
                 sb.append("@/components/ui/").append(stem).append(": ")
                   .append(String.join(", ", exports)).append("\n"));
-        sb.append("\nFALLBACK — raw @radix-ui/* (use ONLY when no shadcn wrapper above covers the need):\n");
-        radixExports.forEach((pkg, exports) ->
-                sb.append(pkg).append(": ").append(String.join(", ", exports)).append("\n"));
         return sb.toString();
     }
 

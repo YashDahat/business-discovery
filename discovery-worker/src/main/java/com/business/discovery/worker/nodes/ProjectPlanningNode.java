@@ -988,6 +988,26 @@ public class ProjectPlanningNode implements WorkerNode {
 
     // ── Docker artifacts (Dockerfile, docker-compose, .env.example) ──────
 
+    /**
+     * Canonical object-storage sidecar, emitted into docker-compose.yml when a foundation feature
+     * declares {@code config.compose: ["minio"]} (gallery). Root creds use compose substitution so
+     * they stay in sync with the app's S3_ACCESS_KEY/S3_SECRET_KEY; defaults match minioadmin. The app
+     * creates the bucket lazily (see foundation MinioStorageService), so no init container is needed.
+     */
+    private static final String MINIO_SERVICE =
+              "  minio:\n"
+            + "    image: minio/minio:latest\n"
+            + "    command: server /data --console-address \":9001\"\n"
+            + "    environment:\n"
+            + "      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}\n"
+            + "      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}\n"
+            + "    ports:\n"
+            + "      - \"9000:9000\"\n"
+            + "      - \"9001:9001\"\n"
+            + "    volumes:\n"
+            + "      - miniodata:/data\n"
+            + "    restart: unless-stopped\n";
+
     private void writeDockerArtifacts(Path workspace, String slug) throws IOException {
         Files.writeString(workspace.resolve("Dockerfile"), """
                 FROM node:20-alpine AS frontend-build
@@ -1013,36 +1033,65 @@ public class ProjectPlanningNode implements WorkerNode {
                 ENTRYPOINT ["java", "-jar", "app.jar"]
                 """);
 
-        Files.writeString(workspace.resolve("docker-compose.yml"), """
-                version: "3.9"
-                services:
-                  app:
-                    build: .
-                    ports:
-                      - "8080:8080"
-                    env_file: .env
-                    restart: unless-stopped
-                    depends_on:
-                      db:
-                        condition: service_healthy
-                    healthcheck:
-                      # temurin-jammy has no wget/curl — probe the port with bash's /dev/tcp instead
-                      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080'"]
-                      interval: 30s
-                      retries: 3
-                  db:
-                    image: postgres:16-alpine
-                    env_file: .env
-                    volumes:
-                      - pgdata:/var/lib/postgresql/data
-                    healthcheck:
-                      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
-                      interval: 10s
-                      retries: 5
-                    restart: unless-stopped
-                volumes:
-                  pgdata:
-                """);
+        // Compose services a foundation feature declares it needs (manifest config.compose). The
+        // foundation (incl. foundation.manifest.json) is already cloned above, so read the real
+        // workspace manifest — not active(), which is activated later in execute(). Gallery declares
+        // "minio"; without the service the app's S3 client hits UnknownHostException('minio') at bean
+        // init and the context dies (the smoke boot-death on worker-1f470904).
+        java.util.Set<String> composeServices =
+                com.business.discovery.worker.util.FoundationManifest.load(workspace).composeServices();
+        boolean needsMinio = composeServices.contains("minio");
+
+        String minioDependsOn = needsMinio
+                ? "      minio:\n        condition: service_started\n"
+                : "";
+        String minioService = needsMinio ? MINIO_SERVICE : "";
+        String minioVolume = needsMinio ? "  miniodata:\n" : "";
+
+        Files.writeString(workspace.resolve("docker-compose.yml"),
+                  "version: \"3.9\"\n"
+                + "services:\n"
+                + "  app:\n"
+                + "    build: .\n"
+                + "    ports:\n"
+                + "      - \"8080:8080\"\n"
+                + "    env_file: .env\n"
+                + "    restart: unless-stopped\n"
+                + "    depends_on:\n"
+                + "      db:\n"
+                + "        condition: service_healthy\n"
+                + minioDependsOn
+                + "    healthcheck:\n"
+                // temurin-jammy has no wget/curl — probe the port with bash's /dev/tcp instead
+                + "      test: [\"CMD-SHELL\", \"bash -c 'exec 3<>/dev/tcp/127.0.0.1/8080'\"]\n"
+                + "      interval: 30s\n"
+                + "      retries: 3\n"
+                + "  db:\n"
+                + "    image: postgres:16-alpine\n"
+                + "    env_file: .env\n"
+                + "    volumes:\n"
+                + "      - pgdata:/var/lib/postgresql/data\n"
+                + "    healthcheck:\n"
+                + "      test: [\"CMD-SHELL\", \"pg_isready -U $${POSTGRES_USER}\"]\n"
+                + "      interval: 10s\n"
+                + "      retries: 5\n"
+                + "    restart: unless-stopped\n"
+                + minioService
+                + "volumes:\n"
+                + "  pgdata:\n"
+                + minioVolume);
+
+        // S3/MinIO vars only when the object-storage sidecar is in the stack. Defaults match the
+        // minio service + the foundation's application.properties (${S3_*:default}) so the app connects
+        // out of the box; explicit here so the compose-level ${S3_*:-…} substitution resolves too.
+        String s3Env = needsMinio ? """
+                S3_ENDPOINT=http://minio:9000
+                S3_REGION=us-east-1
+                S3_BUCKET=media
+                S3_ACCESS_KEY=minioadmin
+                S3_SECRET_KEY=minioadmin
+                S3_PATH_STYLE=true
+                """ : "";
 
         Files.writeString(workspace.resolve(".env.example"), """
                 DB_URL=jdbc:postgresql://db:5432/%s
@@ -1060,7 +1109,7 @@ public class ProjectPlanningNode implements WorkerNode {
                 SMTP_PORT=587
                 SMTP_USERNAME=
                 SMTP_PASSWORD=
-                """.formatted(slug, slug));
+                """.formatted(slug, slug) + s3Env);
 
         Files.writeString(workspace.resolve(".gitignore"), """
                 .env

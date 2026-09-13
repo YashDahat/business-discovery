@@ -54,16 +54,31 @@ class UiComponentInventoryTest {
     }
 
     @Test
-    void promptSectionListsBothSources() throws Exception {
+    void promptSectionIsShadcnOnlyAndNeverOffersRawRadix() throws Exception {
         Path uiDir = frontend.resolve("src/components/ui");
         Files.createDirectories(uiDir);
         Files.writeString(uiDir.resolve("button.tsx"), "export const Button = () => <button/>\n");
-        Files.writeString(frontend.resolve("package.json"), "{\"dependencies\":{}}");
+        // A radix dependency IS installed — it must still be absent from the prompt (task 14:
+        // shadcn-only; radix stays parsed for JSON + the import rewriter but is never offered).
+        Path pkgDir = frontend.resolve("node_modules/@radix-ui/react-dialog");
+        Files.createDirectories(pkgDir);
+        Files.writeString(pkgDir.resolve("index.js"), "exports.Root = {};\nexports.Trigger = {};\n");
+        Files.writeString(pkgDir.resolve("package.json"),
+                "{\"name\":\"@radix-ui/react-dialog\",\"main\":\"index.js\"}");
+        Files.writeString(frontend.resolve("package.json"),
+                "{\"dependencies\":{\"@radix-ui/react-dialog\":\"^1.0.0\"}}");
 
         UiComponentInventory inv = UiComponentInventory.build(frontend);
+        String section = inv.toPromptSection();
 
-        assertThat(inv.toPromptSection())
+        assertThat(section)
                 .contains("@/components/ui/button: Button")
-                .contains("DOES NOT EXIST");
+                .contains("DOES NOT EXIST")
+                .contains("never import from @radix-ui/* directly");
+        // the installed radix PACKAGE is never listed as an importable source
+        assertThat(section).doesNotContain("@radix-ui/react-dialog");
+        assertThat(section).doesNotContain("FALLBACK");
+        // but it is still parsed for the non-prompt consumers (JSON / import rewriter)
+        assertThat(inv.radixExports()).containsKey("@radix-ui/react-dialog");
     }
 }

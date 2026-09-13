@@ -108,6 +108,30 @@ class ApiContractCardTest {
     }
 
     @Test
+    void surfacesNestedDerivedTypesRecursively() throws Exception {
+        // [4c]/task 4: a nested wire type must appear — the old Files.list top-level scan dropped it,
+        // leaving a consumer to invent its shape.
+        write("frontend/src/types/admin/orderSummary.ts", DERIVED_HEADER + """
+                export interface OrderSummaryDto {
+                  orderId: string | null;
+                  itemCount: number | null;
+                }
+                """);
+        // a nested file WITHOUT the derived marker stays excluded — not laundered into ground truth.
+        write("frontend/src/types/local/draft.ts", """
+                export interface DraftState { note: string; }
+                """);
+
+        String section = ApiContractCard.build(workspace).toPromptSection();
+
+        assertThat(section).contains("export interface OrderSummaryDto");
+        assertThat(section).contains("itemCount: number | null;");
+        // labelled by its types/-relative path so it can't collide with a same-named top-level file
+        assertThat(section).contains("// admin/orderSummary.ts");
+        assertThat(section).doesNotContain("DraftState");
+    }
+
+    @Test
     void emptyWorkspaceIsEmptyRatherThanFabricated() {
         ApiContractCard card = ApiContractCard.build(workspace.resolve("nonexistent"));
 

@@ -76,6 +76,13 @@ class FoundationManifestTest {
     }
 
     @Test
+    void composeServices_unionsFeatureConfigCompose() {
+        // gallery declares config.compose: ["minio"] — the compose generator emits a service per entry
+        // so the app's S3 client has a host to reach (the MinIO boot-death fix).
+        assertThat(manifest.composeServices()).containsExactly("minio");
+    }
+
+    @Test
     void load_absentManifest_fallsBackToDefault() {
         FoundationManifest loaded = FoundationManifest.load(Path.of("/tmp/does-not-exist-" + System.nanoTime()));
         assertThat(loaded.features()).isEqualTo(manifest.features());

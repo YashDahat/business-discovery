@@ -324,6 +324,17 @@ public final class FoundationManifest {
         return union(features, f -> f.backend() == null ? List.of() : f.backend().controllersOrEmpty());
     }
 
+    /**
+     * Infra services each feature's config declares for docker-compose (⋃ every feature's
+     * {@code config.compose}, e.g. gallery → {@code minio}). The compose generator emits a service per
+     * entry so a foundation feature that needs a sidecar (object storage, a broker) boots with it —
+     * without this, the app's eager connection to that host dies at startup (the MinIO boot-death).
+     */
+    public Set<String> composeServices() {
+        return union(features, f -> f.config() == null || f.config().compose() == null
+                ? List.of() : f.config().compose());
+    }
+
     /** Worker-generated-against-the-foundation names the reconciler must NEVER strip. */
     public Set<String> guardNames() {
         return union(features, f -> f.frontend() == null ? List.of() : f.frontend().guardsOrEmpty());

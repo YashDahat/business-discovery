@@ -287,4 +287,44 @@ public final class FoundationSymbolRegistry {
             sb.append('\n');
         }
     }
+
+    // ── Render (frontend generation: field-for-field TS shapes of the foundation MODELS) ──────────
+
+    /**
+     * TS-shaped, field-for-field declarations of the FRONTEND-layer fenced foundation models (e.g.
+     * {@code AuthUser}, {@code RegisterRequest}) for injection into the frontend GENERATION prompt.
+     *
+     * <p>Stronger than the prose {@link FoundationContractCard}: the LLM sees the EXACT field list as a
+     * declaration it binds to, closing the shown-but-ignored half of Theme F ([4b] — a component read
+     * {@code user.email}/{@code firstName} off an {@code AuthUser} that only carries
+     * {@code username}/{@code role}). Backend DTOs are deliberately excluded — they reach the frontend
+     * as derived WIRE TYPES ({@code ApiContractCard}), so including them here would duplicate/contradict.
+     * Deterministic (parsed from the static contract card) so it rides the system-prompt prefix cache.
+     *
+     * @return the block, or {@code ""} when no frontend-layer symbols are fenced
+     */
+    public String renderFrontendModelShapes() {
+        List<Symbol> models = symbols.values().stream().filter(s -> s.layer() == Layer.FRONTEND).toList();
+        if (models.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder();
+        sb.append("── FOUNDATION MODEL SHAPES (ground truth — use these EXACT fields; NEVER add, rename, ")
+          .append("or assume a field that is not listed below (a model carries ONLY the fields shown); ")
+          .append("import the type from its foundation module, never re-declare it) ──\n");
+        for (Symbol s : models) sb.append(renderTsDecl(s)).append('\n');
+        return sb.toString().stripTrailing();
+    }
+
+    private static String renderTsDecl(Symbol s) {
+        if (s.isEnum()) {
+            List<String> lits = new ArrayList<>();
+            for (String c : s.enumConstants()) lits.add("'" + c + "'");
+            return "type " + s.name() + " = " + String.join(" | ", lits) + ";";
+        }
+        List<String> members = new ArrayList<>();
+        for (Field f : s.fields()) members.add(f.name() + (f.optional() ? "?" : "") + ": " + f.type());
+        String body = "{ " + String.join("; ", members) + " }";
+        return s.kind() == Kind.INTERFACE
+                ? "interface " + s.name() + " " + body
+                : "type " + s.name() + " = " + body + ";";
+    }
 }

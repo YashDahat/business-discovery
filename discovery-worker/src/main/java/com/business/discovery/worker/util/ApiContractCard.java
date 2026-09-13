@@ -97,24 +97,31 @@ public final class ApiContractCard {
         return new ApiContractCard(types, sdk, routes);
     }
 
+    /**
+     * Reads every derived-marker {@code .ts} under {@code dir}, RECURSIVELY ([4c]). A nested wire type
+     * (e.g. {@code types/admin/orderSummary.ts}) was silently dropped by the old {@code Files.list}
+     * top-level scan, leaving a consumer to invent its shape. Keyed by the {@code dir}-relative path so
+     * a nested file never collides with a same-named top-level one and the label stays informative.
+     */
     private static Map<String, String> readDerived(Path dir) {
         Map<String, String> out = new LinkedHashMap<>();
         if (!Files.isDirectory(dir)) return out;
-        try (Stream<Path> files = Files.list(dir)) {
-            files.filter(p -> p.toString().endsWith(".ts"))
+        try (Stream<Path> files = Files.walk(dir)) {
+            files.filter(Files::isRegularFile)
+                 .filter(p -> p.toString().endsWith(".ts"))
                  .sorted()
                  .forEach(p -> {
                      try {
                          String content = Files.readString(p);
                          if (content.startsWith("// GENERATED from the backend API contract")) {
-                             out.put(p.getFileName().toString(), content);
+                             out.put(dir.relativize(p).toString().replace('\\', '/'), content);
                          }
                      } catch (IOException ignored) {
                          // unreadable file — omit rather than fail generation
                      }
                  });
         } catch (IOException e) {
-            log.warn("[ApiContractCard] Could not list {}: {}", dir, e.getMessage());
+            log.warn("[ApiContractCard] Could not walk {}: {}", dir, e.getMessage());
         }
         return out;
     }

@@ -316,6 +316,19 @@ public class FrontendGeneratorNode implements WorkerNode {
                         foundationContractSection.length());
             }
 
+            // Field-for-field TS shapes of the FRONTEND-layer foundation models (AuthUser, etc.) —
+            // structured ground truth that closes the shown-but-ignored half of Theme F ([4b]); the
+            // prose contract above says "use AuthUser", this says exactly which fields it has so a
+            // component can't read user.email off a { username; role }. Derived from the same cloned
+            // contract card (OCP), deterministic → rides the prefix cache.
+            this.foundationModelShapesSection =
+                    com.business.discovery.worker.util.FoundationSymbolRegistry
+                            .buildFromWorkspace(workspace).renderFrontendModelShapes();
+            if (!foundationModelShapesSection.isEmpty()) {
+                log.info("[FrontendGeneratorNode] Loaded foundation model shapes ({} chars)",
+                        foundationModelShapesSection.length());
+            }
+
             // Per-feature context cards (docs/ENRICHMENT.json) — each file's generation prompt gets its
             // whole feature's identity + sibling files/roles, keyed by FileSpec.featureName. Empty when
             // ENRICHMENT.json is absent; the effective instruction still flows via buildFeatureContext.
@@ -493,6 +506,7 @@ public class FrontendGeneratorNode implements WorkerNode {
 
     /** Fenced foundation contract (auth/cart/checkout/shell), loaded once per run; "" when absent. */
     private volatile String foundationContractSection = "";
+    private volatile String foundationModelShapesSection = "";
 
     /** docs/ENRICHMENT.json feature cards, keyed by featureName; loaded once per run, empty when absent. */
     private volatile Map<String, FeatureCard> enrichmentCards = Map.of();
@@ -672,6 +686,7 @@ public class FrontendGeneratorNode implements WorkerNode {
         // 1. Fenced foundation spine (useAuth, useCheckout(steps), shell props) — immutable, leads
         //    every call so it is the byte-identical prefix.
         if (!foundationContractSection.isEmpty()) blocks.add(foundationContractSection);
+        if (!foundationModelShapesSection.isEmpty()) blocks.add(foundationModelShapesSection);
 
         // 2. Wire DTOs — FULL verbatim, all files. Types ONLY: the SDK/service layer is never
         //    authored by an LLM (hooks + services are mechanically derived by ApiArtifactGeneratorNode),

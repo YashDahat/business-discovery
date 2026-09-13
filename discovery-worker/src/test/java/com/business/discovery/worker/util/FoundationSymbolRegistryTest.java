@@ -193,9 +193,29 @@ class FoundationSymbolRegistryTest {
     }
 
     @Test
+    void renderFrontendModelShapesIsFieldForFieldAndFrontendOnly() throws Exception {
+        FoundationSymbolRegistry reg = build();
+        String block = reg.renderFrontendModelShapes();
+
+        // interface kind → interface decl; type kind → type-alias decl; fields verbatim
+        assertThat(block).contains("interface CartItem {");
+        assertThat(block).contains("type AuthUser = { username: string; role: string };");
+        // optionality preserved
+        assertThat(block).contains("email?: string");
+        // the bind directive is present
+        assertThat(block).contains("FOUNDATION MODEL SHAPES");
+        assertThat(block).contains("NEVER add, rename");
+        // backend symbols are NOT included (firstName exists ONLY on the backend User entity) —
+        // they reach the frontend as derived WIRE TYPES, not here
+        assertThat(block).doesNotContain("firstName");
+        assertThat(block).doesNotContain("PaymentStatus");
+    }
+
+    @Test
     void emptyWorkspaceDegradesGracefully() {
         FoundationSymbolRegistry reg = FoundationSymbolRegistry.buildFromWorkspace(workspace);
         assertThat(reg.isEmpty()).isTrue();
         assertThat(reg.renderForPlanner()).isEmpty();
+        assertThat(reg.renderFrontendModelShapes()).isEmpty();
     }
 }

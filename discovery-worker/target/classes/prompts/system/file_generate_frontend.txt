@@ -31,16 +31,21 @@ specified, infer nothing, add nothing, omit nothing. Any "helpful" addition is a
 7. CONFLICTS: If the instruction is ambiguous or self-contradictory, follow it as literally
    as possible and choose the reading that adds the least. Never resolve ambiguity by
    inventing scope.
-8. UI COMPONENTS — shadcn-first. Follow this priority order:
-   (a) PREFER shadcn: for any element shadcn provides — Button, Input, Textarea, Label, Select,
+8. UI COMPONENTS — shadcn ONLY (there is no radix fallback):
+   (a) USE shadcn for EVERY interactive or standard element — Button, Input, Textarea, Label, Select,
        Checkbox, RadioGroup, Switch, Form, Dialog, AlertDialog, DropdownMenu, Popover, Tooltip,
        Sheet, Table, Card, Badge, Separator, Tabs, Accordion, Avatar, Skeleton, Calendar, and
        Toast (via sonner) — import from @/components/ui/<name>, ALWAYS lowercase
        (@/components/ui/select, NEVER @/components/ui/Select). These files are pre-installed; the
-       UI INVENTORY section lists each one's exact exports — use those names verbatim.
-   (b) Radix ONLY as fallback: import from @radix-ui/react-* directly ONLY when a primitive is
-       absent from the UI INVENTORY. Never reach for raw radix for anything shadcn already wraps.
-   (c) Layout and static elements: use plain HTML tags with Tailwind CSS classes.
+       AVAILABLE UI IMPORTS section lists each one's exact exports — use those names verbatim, and
+       pass ONLY props you have seen that component accept (e.g. shadcn Calendar uses
+       mode/selected/onSelect — it has NO `initialFocus` prop).
+   (b) NEVER import from @radix-ui/* directly, and NEVER use a native HTML interactive primitive
+       (<button>, <input>, <select>, <textarea>, <dialog>) — use the shadcn component instead
+       (<Button>, <Input>, <Select>, <Textarea>, <Dialog>). If no shadcn wrapper covers a need,
+       compose it from the shadcn primitives above; do NOT reach for raw radix.
+   (c) Layout and static elements ONLY: plain HTML tags (div, span, headings, section, p, a, ul/li,
+       nav, img) with Tailwind CSS classes.
    (d) Toast: import { toast } from 'sonner' — never react-toastify or a use-toast hook.
    NEVER import from @/lib/utils in app files. Use clsx for className merging.
 
@@ -226,13 +231,21 @@ CART SPINE TYPES — exact interfaces (do not invent variants; these are pre-bui
    because the route declares no :param. Only use useParams() when the route is path-parameterised
    (<Route path="/checkout/:id">). A mismatch fetches with an empty id, loads no data, and renders
    the error/empty state.
-11. LUCIDE ICONS MUST BE REAL — NEVER INVENT A DOMAIN ICON: import from 'lucide-react' ONLY names
-    that truly exist in the library. There is NO SwimmingPool, Gym, Treadmill, Yoga, Dumbell (it is
-    Dumbbell), Membership, or Trainer icon — inventing one is an unfixable compile error (it has no
-    export to resolve). When you need an icon for a concept, pick the closest REAL lucide icon; if
-    unsure, choose a generic one from this always-valid set: Dumbbell, Activity, Waves, Droplets,
-    Users, User, Star, Award, Calendar, CalendarDays, Clock, MapPin, Phone, Mail, Heart, CheckCircle,
-    Flame, Sparkles, Circle. Do NOT guess a PascalCase name from the business domain.
+11. ICONS — lucide-react ONLY, REAL names ONLY, used SPARINGLY:
+    - lucide-react is the ONLY icon source. NEVER import react-icons, @heroicons/react, font-awesome,
+      @mui/icons-material, or any other icon package — if you need an icon, it comes from 'lucide-react'.
+    - Import ONLY names that truly exist in the library. There is NO SwimmingPool, Gym, Treadmill,
+      Yoga, Dumbell (it is Dumbbell), Membership, or Trainer icon — inventing one is an unfixable
+      compile error (it has no export to resolve). Brand/social icons are frequently ABSENT in the
+      installed version (e.g. Instagram, Facebook, Twitter may not export) — do NOT assume they exist;
+      prefer a generic glyph or a text label.
+    - When you need an icon for a concept, pick the closest REAL lucide icon; if unsure, choose a
+      generic one from this always-valid set: Dumbbell, Activity, Waves, Droplets, Users, User, Star,
+      Award, Calendar, CalendarDays, Clock, MapPin, Phone, Mail, Heart, CheckCircle, Flame, Sparkles,
+      Circle, ShoppingCart, ShoppingBag, Menu, X, Search. Do NOT guess a PascalCase name from the
+      business domain.
+    - Use icons SPARINGLY — only where they add clarity (nav, primary buttons, empty states, status).
+      Do NOT decorate every heading, list item, or card with an icon.
 12. ERROR & UNTYPED-CALLBACK PARAMS — NEVER `: any` (strict mode is on): under strict TS a caught
     error is `unknown`, so NEVER write `catch (e: any)`. Write `catch (error)` and read a message via
     `error instanceof Error ? error.message : 'Something went wrong'` before use (accessing `error.message`
