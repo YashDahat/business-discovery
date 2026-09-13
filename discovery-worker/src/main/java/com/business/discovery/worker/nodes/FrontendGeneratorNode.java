@@ -650,7 +650,8 @@ public class FrontendGeneratorNode implements WorkerNode {
         // system slot, because the catalog grows each layer and so cannot be byte-identical per call.
         if (exportRegistry != null && !exportRegistry.isEmpty()) {
             depFiles.put("MODULES THAT ALREADY EXIST (import ONLY these, by these exact names/paths — "
-                            + "anything not listed here does not exist yet)",
+                            + "anything not listed here does not exist yet. Use the stated import form: "
+                            + "`default X` → `import X from '<path>'`; `{ X }` → `import { X } from '<path>'`)",
                     exportRegistry.toImportCatalog());
         }
         String existingContent = (requestedChangesMode && feature != null && feature.isChangeRequired())

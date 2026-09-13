@@ -5,7 +5,9 @@ import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.TreeMap;
@@ -115,6 +117,11 @@ public class TypeScriptExportRegistry {
      * model must import by. Lets Flash import existing components/hooks/types/services by their real
      * names and paths instead of inventing modules the post-hoc fixer then has to repair.
      *
+     * <p>Each symbol also carries its <b>export kind</b> so the model does not guess default-vs-named:
+     * {@code default X} → {@code import X from '<path>'}; {@code { X }} → {@code import { X } from '<path>'}.
+     * Without this the model guessed the import form, producing the TS2613/TS2614 sibling errors
+     * ([9b] in the frontend-error analysis) that only the post-gen TypeScriptImportFixer caught.
+     *
      * <p>Output is deterministic (modules and symbols sorted). Meant to be read during the
      * read-only generation phase — register() must not run concurrently, matching how
      * resolveSpecifier/knows are already used.
@@ -124,14 +131,33 @@ public class TypeScriptExportRegistry {
     public String toImportCatalog() {
         if (symbolToPath.isEmpty()) return "";
 
-        Map<String, TreeSet<String>> byModule = new TreeMap<>();
+        // Partition each module's symbols by export kind so the rendered line states the exact
+        // import form. A module may expose both (a default component + named helpers).
+        Map<String, TreeSet<String>> defaultByModule = new TreeMap<>();
+        Map<String, TreeSet<String>> namedByModule = new TreeMap<>();
         for (Map.Entry<String, String> e : symbolToPath.entrySet()) {
-            byModule.computeIfAbsent(toAlias(e.getValue()), k -> new TreeSet<>()).add(e.getKey());
+            String alias = toAlias(e.getValue());
+            Binding binding = symbolToBinding.getOrDefault(e.getKey(), Binding.NAMED);
+            Map<String, TreeSet<String>> target = binding == Binding.DEFAULT ? defaultByModule : namedByModule;
+            target.computeIfAbsent(alias, k -> new TreeSet<>()).add(e.getKey());
         }
 
+        TreeSet<String> modules = new TreeSet<>();
+        modules.addAll(defaultByModule.keySet());
+        modules.addAll(namedByModule.keySet());
+
         StringBuilder sb = new StringBuilder();
-        for (Map.Entry<String, TreeSet<String>> e : byModule.entrySet()) {
-            sb.append(e.getKey()).append(" -> ").append(String.join(", ", e.getValue())).append('\n');
+        for (String module : modules) {
+            List<String> forms = new ArrayList<>();
+            TreeSet<String> defaults = defaultByModule.get(module);
+            if (defaults != null) {
+                for (String sym : defaults) forms.add("default " + sym);
+            }
+            TreeSet<String> named = namedByModule.get(module);
+            if (named != null && !named.isEmpty()) {
+                forms.add("{ " + String.join(", ", named) + " }");
+            }
+            sb.append(module).append(" -> ").append(String.join(", ", forms)).append('\n');
         }
         return sb.toString().stripTrailing();
     }

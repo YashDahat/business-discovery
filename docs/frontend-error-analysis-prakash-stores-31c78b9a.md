@@ -667,7 +667,7 @@ Split by whether the cause is **context** (your target) vs **not context** (work
 |---|---|---|---|---|
 | Foundation-model fields absent | [4b] | Inject `AuthUser` + shell/context model interfaces **field-for-field** into SYSTEM prefix (edit-3-redirected) | F = **4** | **PARTIAL** — obedience lever shipped (`4df3761`: `FOUNDATION LOOKUP` rule §6b-C + `consumes_foundation` §6b-B); field-level structured injection still TODO — verify shapes in `webapp-foundation` first |
 | Nested / non-`export` types missed | [4c] | Make `ApiContractCard.readDerived` recursive (`Files.walk` over `types/**`) | 0 seen, latent | TODO — cheap |
-| Export kind not carried | [9b] | Registry catalog records **default vs named** per module; feed it to import rendering | E-siblings = **3** | TODO |
+| Export kind not carried | [9b] | Registry catalog records **default vs named** per module; feed it to import rendering | E-siblings = **3** | ✅ **DONE (2026-09-13, task 5)** — `toImportCatalog()` renders `default X` / `{ X }`; needs worker image rebuild to ship |
 | Degraded artifact passed as truth | [4e] | **Solution A leg 2** — re-align FE contracts to the *regenerated* backend after `BackendValidationNode` (so `void` never reaches the FE as truth) | D = **4** | TODO — part of Solution A |
 | Redundant/contradictory rich contract | [4d] | **Solution A** — pair BE DTO ↔ FE type by name at plan time; drop invented sibling types with no producer | A+B+C = **37** | TODO — the big lever |
 | SDK block on components (redundant) | — | **DONE** (edit 1) — no LLM consumer, removed | prevents recurrence | ✅ applied |
@@ -743,13 +743,13 @@ Ordered by leverage (errors closed per effort). Tasks 3–6 are independent and 
 | **2** | **Delete `FrontendPlannedContractCard`** — actual-over-planned; by layer order every dep is already on disk. Removes the card + planned-vs-actual fork. Keep `PlannedComponentPropsCard` (same-layer siblings). | contradiction fork | — | deletion | `FrontendGeneratorNode`, `FrontendPlannedContractCard` |
 | **3** | **Surface foundation model shapes field-for-field — via `FoundationSymbolRegistry` (OCP), NOT a hardcoded read** *(revised; unblocked — task 9 onboarding half now done)* — `AuthUser` is ALREADY in `FOUNDATION_CONTRACT.md` (`{ username; role }` + "no email/name"), already parsed by `FoundationSymbolRegistry`, already injected as prose → Theme F was **shown-but-ignored**, not absence. Inject the registry's model shapes **structured/field-for-field** (stronger than prose) + a prompt bind; if a model is missing, add it to the contract (extend the foundation). A hardcoded worker-side disk read would re-create the exact seam task 9 removes. **PARTIAL (`4df3761`):** the *obedience* lever shipped — the `FOUNDATION LOOKUP` rule (§6b-C) + `consumes_foundation` enrichment edge (§6b-B) now order the LLM to use the fenced block VERBATIM. **Remaining:** the *field-level* structured injection of foundation model shapes from `FoundationSymbolRegistry` (stronger than the current prose). | [4b] (obedience ✅ / field-level ▶) | 4 (F) | derive-step | `FoundationSymbolRegistry` consumer; **not** a hardcoded reader |
 | **4** | **Make `ApiContractCard.readDerived` recursive ([4c])** — `Files.walk` over `types/**` (keep the `// GENERATED` marker filter). | [4c] | 0 latent | derive-step | `ApiContractCard` |
-| **5** | **Record export kind (default/named) in `TypeScriptExportRegistry` ([9b])** — capture + surface per module so imports aren't guessed. | [9b] | 3 (E) | derive-step | `TypeScriptExportRegistry` |
+| **5** | ✅ **DONE (2026-09-13) — export kind surfaced in the import catalog ([9b]).** The registry already *captured* `Binding` (DEFAULT/NAMED); the gap was the prompt catalog omitting it, so the model guessed the import form. `toImportCatalog()` now renders `default X` / `{ X }` per module (defaults before named); `FrontendGeneratorNode`'s catalog header explains the notation. The post-gen `TypeScriptImportFixer` already consumes `resolveBinding`, so prevention + repair now reinforce. 10/10 registry (+ mixed-binding case) + 4/4 fixer + 10/10 generator green. **Uncommitted on `feature/env-typed-defaults`; needs a `discovery-worker:latest` image rebuild to reach the pipeline.** | [9b] | 3 (E) | derive-step | `TypeScriptExportRegistry`, `FrontendGeneratorNode` |
 | **6** | **Re-derive FE types after backend validation ([4e], Solution A leg 2)** — re-derive `types/`/services from the regenerated backend after `BackendValidationNode`+`ErrorFixAgent`, before `FrontendGeneratorNode`, so degraded artifacts (`getAllProducts: void`) never ship as truth. | [4e] | 4 (D) | derive-step | `ApiArtifactGeneratorNode`, orchestration order |
 | **7** | **Constrain components to pure consumers + retire dead patchers** — prompt/scaffold: JSX + local state only, no type decls / service calls / contract authoring. Then delete patchers whose root is now upstream (`RowActionContractNormalizer`, `EnumValueImportPatcher`, `SiteConfigAccessPatcher`, parts of `AdminLayoutWrapperPatcher`) — verify each dead first. *Depends on 1 & 3.* | prevents recurrence | — | simplification | `file_generate_frontend.txt`; the named patchers |
 | **8** | ✅ **DONE — `NotFoundPage` precheck fixed at the foundation.** `NotFoundPage.tsx` is committed (`592541a`) + pushed to `origin/main`; the worker clones it, so the route-manifest precheck now passes and the build reaches `ErrorFixAgent`. Shipping from the foundation also sidesteps the planner-mis-file root. *Verify on next run (prakash predated the commit).* | enables ~6 residual | — | pipeline | `webapp-foundation` |
 | **9** | ✅ **DONE — foundation seams now derive from a manifest (onboarding half).** All three hardcoded `Set`s deleted: `FOUNDATION_CONTROLLERS`, `GUARD_NAMES`+fenced-name sets, `AUTH_KEYS`/`NON_NAV_KEYS` now project from `FoundationManifest` (`DEFAULT` reproduces the old constants; `load(Path)` honours a foundation-shipped `foundation.manifest.json`). Planner ingests the feature list via `ARCHITECTURE.json.foundation_features` + enrichment `consumes_foundation` + `FOUNDATION LOOKUP` generator clause. Regression-proven each projection == old literal set (`FoundationManifestTest` 8/8). **Per-project *pruning* deferred** (out of Task 9 scope). See `foundation-feature-manifest-plan.md`. | OCP compliance | — | simplification | see OCP detail below |
 | **10** | **Emit shared contracts as imported artifacts (contract-as-artifact)** — deterministic replacement for `PlannedComponentPropsCard`. Emit each component's props interface ONCE as a fenced artifact both sides `import` (referencing DTOs by import), so producer + consumer bind to one definition and `tsc` enforces agreement — silent cross-file drift becomes a localized compile error. *Depends on 8 (build must run to enforce); composes with 1 & 7.* | drift → compile error | prevents cascade | simplification | new props-artifact generator; `PlannedComponentPropsCard` → generator; `FrontendGeneratorNode`. See Appendix F |
-| **11** | **Deliver hook contracts from `FrontendHookGenerator`, not regex re-scan** — the hook signature (name, params, canonical return, path) is deterministically known at emission but is recovered downstream by a lossy `FrontendContractCard` regex re-scan (query-hook params = weak point). Register/emit the exact contract at generation time so components bind to the generator's ground truth. *Matters more after task 2 (re-scan becomes sole source); composes with 10.* | hook-signature fidelity | — | simplification | `FrontendHookGenerator`, `FrontendContractCard`, `ApiArtifactGeneratorNode` |
+| **11** | ✅ **DONE (2026-09-13) — hook contracts delivered by the generator, not re-parsed.** `FrontendHookGenerator` now embeds its exact signature in each derived hook file as `// @hook-contract useX(params): {return}` (the canonical shape it already computes at emission); `FrontendContractCard.extractHookSignatures` reads those verbatim and skips the lossy `HOOK_DECL` regex when present. Embedding it in the file (vs cross-node `WorkerContext` plumbing) means the disk-scan rebuild paths — resume + ErrorFixAgent — get the authoritative contract for free. Closes the query-hook-param weak point (the sidecar carries `useGymClass(classId: number): …` exactly). 14/14 generator + 33/33 card + 10/10 registry green. **Uncommitted on `feature/env-typed-defaults`; needs a worker image rebuild to reach the pipeline.** | hook-signature fidelity | — | simplification | `FrontendHookGenerator`, `FrontendContractCard`, `ApiArtifactGeneratorNode` |
 | **12** | ✅ **DONE — `emitAppRoutes` guards fixed (40/40 tests).** Real cause: it imported a **phantom `ProtectedRoute`** (foundation never shipped one) + default `siteConfig`. Now uses the foundation's real **`RequireAuth`/`RequireAdmin`** (default exports, `children`-based) + **named `siteConfig`**; flags key on the guards; prompt rule 3 rewritten (foundation owns the guards). | Theme E | 2 (+1) | codegen | `RouteManifestGenerator`, `FrontendGeneratorNode`, prompt |
 | **13** | ✅ **DONE — `FoundationRefReconciler` cart fence narrowed (10/10 tests).** The bare `"/cart/"` fence matched app UI at `components/cart/` and stripped `CartItemsTable`/`CartSummary`. Narrowed to **`"/src/cart/"`** (fence the foundation spine only); app cart UI survives + consumes `@/cart`. | Theme G | 2 | codegen | `FoundationRefReconciler` |
 | **14** | **Enforce shadcn-only + lucide UI rule** — generated UI uses shadcn components only (no native HTML primitives, no direct radix), lucide icons only + sparingly. Tighten `file_generate_frontend.txt` and stop offering `@radix-ui/*` in `AVAILABLE UI IMPORTS`. *Standing user rule.* | UI consistency | — | prompt+context | `file_generate_frontend.txt`, `UiComponentInventory` |
@@ -898,3 +898,105 @@ A component calling a hook needs four things — **name, location, parameters, r
 The **canonical return shape** removes any need to re-scan it: query → `{ data: T | undefined; isLoading; isError; error }`; mutation → `{ mutate: (vars, options?) => void; mutateAsync; isPending; isError; error }` — a pure function of *(kind, dataType, varsType)*. So the reliable design (task 11) is: **`FrontendHookGenerator` delivers its own contract** (register the exact `(name, params, return, path)` at generation time, or emit a hook-contract artifact), and the component binds to *that* — never to a regex re-parse of a file the generator already authored. This matters more after **task 2** deletes `FrontendPlannedContractCard`, which makes the regex re-scan the *sole* hook-signature source.
 
 **Registries vs source-of-truth, restated:** for hooks, the registry (`TypeScriptExportRegistry`) answers **name + location** (existence); it does **not** carry params/return. Those are *shape*, and their ground truth is the **generator**, not a registry and not a re-scan — exactly the "derive, don't re-parse" rule that makes the whole chain solid.
+
+---
+
+## Follow-up — Re-run `worker-1f470904` (2026-09-13)
+
+Second end-to-end run of the **same brief** (`31c78b9a`, Prakash Stores) on the current worker image — the
+first run *after* tasks 8/9/12/13 and edits 1–2 all landed. Recorded here to measure what those fixes
+actually moved, against the 54-error baseline above.
+
+### How this run ended (neither attempt completed)
+
+- **Attempt 1** reached `FrontendValidationNode` (node 10/16) but was **killed by the 30-min container
+  lifetime cap** (`MAX_CONTAINER_LIFETIME_MINUTES`) mid-`npm run build` → classified **INFRA** →
+  auto-retry. Root cause was wall-clock, not correctness: `ProjectPlanningNode` alone consumed **~19.5 min**
+  (outline + 15-feature enrichment + 12-feature contract reconciliation, all Pro calls with tool-reads),
+  leaving too little for generation + validation.
+- **Attempt 2** resumed correctly — loaded the pushed `ARCHITECTURE.json`
+  (`skipGeneration=true skipEnrichment=true`), saw all 51 backend files "already done," passed backend
+  validation patchers in ~16 s — then was **stopped manually** before frontend validation.
+
+Consequence: **the `ErrorFixAgent` never engaged on the frontend this run either** (timeout, then manual
+stop). So, exactly as in the original report, the errors below are **raw, unrepaired generator output** —
+an apples-to-apples comparison of generator quality against the 54 baseline, *not* post-fix residual. The
+doc's standing caveat — *"run once after 12+13 to measure the true residual"* — is **still unsatisfied**:
+no run has yet reached the fix loop. The binding constraint this run was the lifetime cap, not context.
+
+### Result: 54 → 17 raw TS errors, and the build actually runs
+
+Reproduced the same way as the baseline (clone `feature/clothing-store-ecommerce-31c78b9a`, `npm ci`,
+`npx tsc -b`). The `NotFoundPage` route-manifest precheck — which blocked the *entire* build last time —
+**passed** (task 8 shipped `NotFoundPage.tsx` from the foundation), so `tsc` ran to completion and produced
+a real list: **17 errors**.
+
+#### Solved since the baseline ✅ (≈40 of 54 gone)
+
+| Baseline item | Then | Now | Evidence |
+|---|---|---|---|
+| **Theme A** — invented `ProductDto.variants` / `additionalImages` | 20 | **0** | no `.variants`/`additionalImages` reads remain |
+| **Worker bug #1/#2** — `AppRoutes` default-imports named `siteConfig`/`ProtectedRoute` (Task 12) | 2 (+latent `allowedRoles`) | **0** | `import { siteConfig }`; real `RequireAuth`/`RequireAdmin` used |
+| **Theme G #46/#47** — `FoundationRefReconciler` stripped `components/cart/*` (Task 13) | 2 | **0** | `CartItemsTable.tsx`/`CartSummary.tsx` survive, imports resolve |
+| **Theme G #16/#44** — `@/hooks/paymentHooks`, missing `cn` | 2 | **0** | gone |
+| **NotFoundPage precheck** (fatal, blocked the build) (Task 8) | fatal | **passes** | build reached `tsc` |
+| **Theme C** — invented `Order`/`OrderDetailsForPayment`/`ShippingDetails` | 5 | **1** | residual is `ShippingAddressDto` imported from the wrong module (exists in `@/types/shipping`) |
+| **Theme F** — `AuthUser` profile fields (`firstName`/`lastName`/`email`/`phone`) | 4 | **1** | component now binds to `AuthUser`; residual is just "`AuthUser` not exported" |
+| **Theme D** — `getAllProducts: void` → `never` cascade | 4 | **1** | `.content`/`.length`-on-`never` gone; residual is one `useProducts(arg)` arg-count |
+
+#### The 17 errors, and the key re-classification
+
+**Most of the 17 are wrong-import-path / post-gen-validation, NOT context gaps** — the producers exist
+correctly on disk, just at a different module, and the post-gen fixers that repair this never ran:
+
+| Error(s) | Consumer imports from | Real producer | Owner |
+|---|---|---|---|
+| #4/#9/#14 `useBrands` | `@/hooks/productHooks` | `@/hooks/brandHooks` ✅ | `TypeScriptImportFixer` (map [9]) |
+| #10 `BrandDto` | `@/types/product` | `@/types/brand` ✅ | `TypeScriptImportFixer` (map [9]) |
+| #13 `ShippingAddressDto` | `@/types/order` | `@/types/shipping` ✅ | `TypeScriptImportFixer` (map [9]) |
+| #8 `Instagram` | `lucide-react` (not exported) | — | `LucideIconValidator` (post-gen) |
+| #2, #12, #5 | — | — | `ErrorFixAgent` (nullable / implicit-`any`) |
+
+`ProductForm` even carries the LLM's own hint — `// Assuming these hooks are in productHooks` — i.e. it
+**guessed** the path. That's ~10 of 17 owned by fixers that were time-boxed out, not by Appendix C holes.
+
+**The genuine context/shape residual (7 of 17):**
+
+| # | Error | Map row | Class |
+|---|---|---|---|
+| 6 | `imageUrl` invented on `ProductCategoryDto` (DTO shown full, field still invented) | [4a]/[4d] | shown-but-ignored invented field |
+| 15 | `ProductFilterRequest` — no producer anywhere | [4d] | invented type |
+| 16 | `useProducts(filter)` — hook takes 0 args | [4e]/cascade | degraded/invented-filter cascade |
+| 17 | `categories`/`brands` props not on `ProductFilterSidebarProps` | [7] | sibling prop drift |
+| 1 | `AuthUser` declared but **not exported** in foundation `AuthContext` | [4b] | foundation export gap |
+| 7 | `{ ProductCard }` named vs default export | [9b] | export-kind guessed |
+| 3, 11 | `initialFocus` on `<Calendar>`; `useDeleteCategory` missing | [5]/hooks | foundation-component prop shape / hook coverage |
+
+### Headline finding for context accuracy
+
+The **invented-contract class (baseline Themes A+B+C = 37 errors, owned by Solution A / Task 1) has
+collapsed to ~2–3** this run (`ProductFilterRequest`, `imageUrl`). The reconciler + mechanical hooks now
+actually **generate** `ProductCategoryDto`, `BrandDto`, `brandHooks`, etc. as real producers, so what used
+to be "invented with no producer" (a hard context-gap) has largely **converted into wrong-import-path
+drift** — a far cheaper class owned by `TypeScriptImportFixer`. Context delivery is materially more accurate
+than when this doc was first drawn; the dominant remaining failure mode is "the build didn't reach the fix
+loop," not "the LLM wasn't told the shape."
+
+### Which Appendix D tasks are relevant to this run's residual
+
+Ordered by what actually manifested (baseline-only items omitted):
+
+| Task | Map row | This run's error(s) | Status | Priority |
+|---|---|---|---|---|
+| **(prereq)** let a full run reach `ErrorFixAgent` — raise the 30-min cap or let the retry finish | — | the ~10 import-path/lucide/trivial errors | — | **P0** — measure true residual first |
+| **5** — record export kind (default/named) in `TypeScriptExportRegistry` | [9b] | #7 | ✅ **DONE (2026-09-13)** — `toImportCatalog()` now renders `default X` / `{ X }` per module so the model doesn't guess the import form; prompt header in `FrontendGeneratorNode` explains the notation; 10/10 registry + 4/4 fixer + 10/10 generator tests green (uncommitted) | P1 |
+| **3** — foundation model fields field-for-field / extend the contract | [4b] | #1 (`export AuthUser`) | ✅ **foundation-export half DONE (2026-09-13)** — `AuthUser` now `export interface` in `webapp-foundation` `context/AuthContext.tsx` + `FOUNDATION_CONTRACT.md` card updated to "import it, do NOT redeclare" (uncommitted). Obedience lever shipped earlier (`4df3761`); structured field-for-field injection from `FoundationSymbolRegistry` still TODO | P1 |
+| **14** — shadcn-only + lucide rule | [5] | #8, #3 | TODO | P1 |
+| **1** — strip data-model shapes from plan/enrichment | [4d]/[4a] | #6, #15 (+#16) | TODO — still the deepest class, **now tiny** | P2 |
+| **10** — contract-as-artifact for component props | [7] | #17 | TODO | P2 |
+| **11** — deliver hook contracts from `FrontendHookGenerator` | [3a]/[3b] | #11 (also hardens the useBrands path-guess) | ✅ **DONE (2026-09-13)** — `// @hook-contract` sidecar emitted by the generator, read verbatim by `FrontendContractCard`; 14/14 + 33/33 + 10/10 green; needs worker image rebuild | P2 |
+
+**Confirmed done / not relevant this run:** Task 8 (precheck — *verified passing*), Task 12 (AppRoutes
+guards — no errors), Task 13 (cart fence — components survive), Task 9 (manifest OCP), edits 1 & 2.
+**Task 4** ([4c] recursive `readDerived`) is **not** implicated — `ShippingAddressDto` is exported from its
+own module; #13 is a wrong import *target*, not a missed scan.

@@ -187,6 +187,30 @@ class FrontendHookGeneratorTest {
     }
 
     @Test
+    void embedsAuthoritativeHookContractSidecar() {
+        // Task 11: the generator writes its exact signature as `// @hook-contract …` so
+        // FrontendContractCard reads it verbatim instead of re-parsing the file.
+        String c = gen("frontend/src/services/bookingService.ts", BOOKING_SERVICE);
+        assertThat(c).contains(
+                "// @hook-contract useMyBookings(): { data: BookingDto[] | undefined; "
+                + "isLoading: boolean; isError: boolean; error: Error | null }");
+        assertThat(c).contains(
+                "// @hook-contract useCreateBooking(): { mutate: (vars: CreateBookingRequest, "
+                + "options?: MutateOptions<BookingDto, Error, CreateBookingRequest>) => void;");
+        // The sidecar sits in the header block, before the first emitted hook body.
+        assertThat(c.indexOf("// @hook-contract")).isLessThan(c.indexOf("export function"));
+    }
+
+    @Test
+    void sidecarSignatureMatchesTheEmittedFunctionForParamQuery() {
+        String c = gen("frontend/src/services/classService.ts", CLASS_SERVICE);
+        // The param-carrying query's sidecar mirrors its real signature exactly (the scan's weak point).
+        assertThat(c).contains(
+                "// @hook-contract useGymClass(classId: number): { data: GymClassDto | undefined; "
+                + "isLoading: boolean; isError: boolean; error: Error | null }");
+    }
+
+    @Test
     void emptyServiceYieldsNoHookFile() {
         assertThat(FrontendHookGenerator.generate("frontend/src/services/emptyService.ts",
                 "// GENERATED from the backend API contract\nimport apiClient from '@/api/client';\n")).isEmpty();

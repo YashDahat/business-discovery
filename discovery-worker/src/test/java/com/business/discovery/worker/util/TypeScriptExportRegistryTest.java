@@ -36,11 +36,12 @@ class TypeScriptExportRegistryTest {
                 "export interface BookingState { id: string; }");
 
         assertThat(reg.isEmpty()).isFalse();
-        // Modules sorted by alias; symbols sorted within each module; @/ alias applied; no trailing newline.
+        // Modules sorted by alias; symbols sorted within each module; @/ alias applied; no trailing
+        // newline. All named exports → rendered in the `{ ... }` import form.
         assertThat(reg.toImportCatalog()).isEqualTo(
-                "@/context/AuthContext -> AuthProvider, useAuth\n"
-                + "@/services/bookingService -> createBooking, getBookings\n"
-                + "@/types/local/booking -> BookingState");
+                "@/context/AuthContext -> { AuthProvider, useAuth }\n"
+                + "@/services/bookingService -> { createBooking, getBookings }\n"
+                + "@/types/local/booking -> { BookingState }");
     }
 
     @Test
@@ -48,7 +49,7 @@ class TypeScriptExportRegistryTest {
         TypeScriptExportRegistry reg = new TypeScriptExportRegistry(workspace);
         reg.register(workspace.resolve("shared/thing.ts"), "export type Thing = string;");
 
-        assertThat(reg.toImportCatalog()).isEqualTo("shared/thing -> Thing");
+        assertThat(reg.toImportCatalog()).isEqualTo("shared/thing -> { Thing }");
     }
 
     @Test
@@ -57,7 +58,24 @@ class TypeScriptExportRegistryTest {
         reg.register(workspace.resolve("frontend/src/components/index.ts"),
                 "export { Card, Modal } from './ui';");
 
-        assertThat(reg.toImportCatalog()).isEqualTo("@/components/index -> Card, Modal");
+        assertThat(reg.toImportCatalog()).isEqualTo("@/components/index -> { Card, Modal }");
+    }
+
+    @Test
+    void rendersDefaultAndNamedImportFormsPerModule() {
+        TypeScriptExportRegistry reg = new TypeScriptExportRegistry(workspace);
+        // A default component...
+        reg.register(workspace.resolve("frontend/src/components/product/ProductCard.tsx"),
+                "export default function ProductCard() { return null; }");
+        // ...and a module that ships BOTH a default and named helpers.
+        reg.register(workspace.resolve("frontend/src/components/home/FeaturedProducts.tsx"),
+                "export default function FeaturedProducts() { return null; }\n"
+                + "export const FEATURED_LIMIT = 8;\nexport interface FeaturedProps { limit: number; }");
+
+        // Default → `default X`; named → `{ X }`; default listed before named within a module.
+        assertThat(reg.toImportCatalog()).isEqualTo(
+                "@/components/home/FeaturedProducts -> default FeaturedProducts, { FEATURED_LIMIT, FeaturedProps }\n"
+                + "@/components/product/ProductCard -> default ProductCard");
     }
 
     @Test
@@ -111,7 +129,7 @@ class TypeScriptExportRegistryTest {
 
         // Only the three exported hooks — never the imported symbols (createGymClass etc.).
         assertThat(reg.toImportCatalog()).isEqualTo(
-                "@/hooks/classHooks -> useCreateGymClass, useDeleteGymClass, useUpdateGymClass");
+                "@/hooks/classHooks -> { useCreateGymClass, useDeleteGymClass, useUpdateGymClass }");
         assertThat(reg.knows("createGymClass")).isFalse();   // an import, not an export
     }
 
@@ -140,9 +158,9 @@ class TypeScriptExportRegistryTest {
                 TypeScriptExportRegistry.buildFromDisk(ws.resolve("frontend/src"), ws);
 
         assertThat(reg.toImportCatalog()).isEqualTo(
-                "@/hooks/classHooks -> useCreateGymClass, useDeleteGymClass, useUpdateGymClass\n"
-                + "@/pages/ClassesPage -> ClassesPage\n"
-                + "@/services/classService -> createGymClass, getAllGymClasses");
+                "@/hooks/classHooks -> { useCreateGymClass, useDeleteGymClass, useUpdateGymClass }\n"
+                + "@/pages/ClassesPage -> default ClassesPage\n"
+                + "@/services/classService -> { createGymClass, getAllGymClasses }");
         assertThat(reg.resolveBinding("ClassesPage")).contains(TypeScriptExportRegistry.Binding.DEFAULT);
         assertThat(reg.resolveBinding("useCreateGymClass")).contains(TypeScriptExportRegistry.Binding.NAMED);
     }

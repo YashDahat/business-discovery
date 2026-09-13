@@ -47,6 +47,11 @@ public final class FrontendContractCard {
           + "|const\\s+(use\\w+)\\s*=\\s*(?:async\\s*)?)\\s*\\(",
             Pattern.MULTILINE);
 
+    // Authoritative hook contract embedded by FrontendHookGenerator: `// @hook-contract useX(p): {…}`.
+    // When present, these are the generator's exact signatures and override the HOOK_DECL scan above.
+    private static final Pattern HOOK_CONTRACT = Pattern.compile(
+            "^//\\s*@hook-contract\\s+(.+)$", Pattern.MULTILINE);
+
     // export interface Foo { ... }
     private static final Pattern INTERFACE = Pattern.compile(
             "^export\\s+interface\\s+(\\w+)\\s*\\{([^}]+)\\}",
@@ -325,6 +330,18 @@ public final class FrontendContractCard {
      * contract instead of guessing the standard TanStack `{ data, mutate(x,y) }` shape.
      */
     private static void extractHookSignatures(String content, List<String> sigs) {
+        // Prefer the generator's authoritative contract when present: derived hook files emit
+        // `// @hook-contract useX(params): {return}` lines carrying the exact signature known at
+        // emission. Read them verbatim and skip the lossy regex round-trip (task 11 — derive, don't
+        // re-parse; query-hook params were the weak point of the scan below).
+        Matcher hc = HOOK_CONTRACT.matcher(content);
+        boolean authoritative = false;
+        while (hc.find()) {
+            String sig = hc.group(1).trim();
+            if (!sig.isEmpty() && !sigs.contains(sig)) { sigs.add(sig); authoritative = true; }
+        }
+        if (authoritative) return;
+
         Matcher m = HOOK_DECL.matcher(content);
         while (m.find()) {
             String name = m.group(1) != null ? m.group(1) : m.group(2);
